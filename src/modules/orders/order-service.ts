@@ -7,18 +7,23 @@ import { FileService } from "../files/file-service.js";
 import { AiProvider } from "../ai/ai-provider.js";
 import { AuditService } from "../audit/audit-service.js";
 import { DriveArchiveService } from "../drive/drive-service.js";
+import { logger } from "../../shared/logger.js";
 
 export class OrderService {
+  /**
+   * Create an order from a calculated quote
+   * Initial status: WAITING_PAYMENT
+   */
   static async createOrderFromQuote(
     customerId: string,
     quote: QuoteCalculation
   ) {
-    // 1. Snapshot receiving account for the source currency
+    // 1. Snapshot receiving account for source currency using deterministic selection
     const receivingAccount = await PaymentAccountService.getActiveAccountForCurrency(
       quote.sourceCurrency
     );
     if (!receivingAccount) {
-      throw new Error(`Không tìm thấy tài khoản nhận cho đồng ${quote.sourceCurrency}`);
+      throw new Error(`Không tìm thấy tài khoản nhận hợp lệ cho đồng ${quote.sourceCurrency}`);
     }
 
     // 2. Snapshot customer payout bank for target currency
@@ -37,48 +42,78 @@ export class OrderService {
       .slice(2, 6)
       .toUpperCase()}`;
 
-    const order = await prisma.order.create({
-      data: {
-        id: orderId,
-        customerId,
-        sourceCurrency: quote.sourceCurrency,
-        targetCurrency: quote.targetCurrency,
-        sourceAmount: quote.sourceAmount,
-        targetAmount: quote.targetAmount,
-        rate: quote.effectiveRate,
-        fee: quote.fee,
-        feeCurrency: quote.feeCurrency,
-        receivingAccountId: receivingAccount.id,
-        receivingAccountSnapshot: {
-          currency: receivingAccount.currency,
-          bankName: receivingAccount.bankName,
-          accountName: receivingAccount.accountName,
-          accountNumber: receivingAccount.accountNumber,
-          qrVersion: receivingAccount.qrVersion,
-          qrSha256: receivingAccount.qrSha256,
-          qrFilePath: receivingAccount.qrFilePath
-        },
-        payoutBankSnapshot: {
-          currency: payoutBank.currency,
-          bankName: payoutBank.bankName,
-          accountName: payoutBank.accountName,
-          accountNumber: payoutBank.accountNumber
-        },
-        status: "PENDING_PAYMENT"
-      }
-    });
+    const receivingAccountSnapshot = {
+      paymentAccountId: receivingAccount.id,
+      currency: receivingAccount.currency,
+      bankName: receivingAccount.bankName,
+      accountName: receivingAccount.accountName,
+      accountNumber: receivingAccount.accountNumber,
+      qrVersion: receivingAccount.qrVersion,
+      qrFileId: receivingAccount.qrFileId,
+      qrFilePath: receivingAccount.qrFilePath,
+      qrSha256: receivingAccount.qrSha256
+    };
 
-    await AuditService.log({
-      actorId: customerId,
-      actorRole: "CUSTOMER",
-      action: "ORDER_CREATED",
-      targetType: "ORDER",
-      targetId: order.id,
-      details: {
-        sourceAmount: quote.sourceAmount.toString(),
-        targetAmount: quote.targetAmount.toString(),
-        rate: quote.effectiveRate.toString()
-      }
+    const payoutBankSnapshot = {
+      currency: payoutBank.currency,
+      bankName: payoutBank.bankName,
+      accountName: payoutBank.accountName,
+      accountNumber: payoutBank.accountNumber
+    };
+
+    const order = await prisma.$transaction(async (tx: any) => {
+      const created = await tx.order.create({
+        data: {
+          id: orderId,
+          customerId,
+          sourceCurrency: quote.sourceCurrency,
+          targetCurrency: quote.targetCurrency,
+          sourceAmount: quote.sourceAmount,
+          targetAmount: quote.targetAmount,
+          rate: quote.effectiveRate,
+          fee: quote.fee,
+          feeCurrency: quote.feeCurrency,
+          receivingAccountId: receivingAccount.id,
+          receivingAccountSnapshot,
+          payoutBankSnapshot,
+          status: "WAITING_PAYMENT"
+        }
+      });
+
+      await tx.orderStateHistory.create({
+        data: {
+          orderId: created.id,
+          fromStatus: "WAITING_PAYMENT",
+          toStatus: "WAITING_PAYMENT",
+          actorId: customerId,
+          actorRole: "CUSTOMER",
+          reason: "ORDER_CREATED",
+          metadata: {
+            sourceAmount: quote.sourceAmount.toString(),
+            targetAmount: quote.targetAmount.toString(),
+            rate: quote.effectiveRate.toString(),
+            receivingAccountId: receivingAccount.id
+          }
+        }
+      });
+
+      await AuditService.log(
+        {
+          actorId: customerId,
+          actorRole: "CUSTOMER",
+          action: "ORDER_CREATED",
+          targetType: "ORDER",
+          targetId: created.id,
+          details: {
+            sourceAmount: quote.sourceAmount.toString(),
+            targetAmount: quote.targetAmount.toString(),
+            rate: quote.effectiveRate.toString()
+          }
+        },
+        tx
+      );
+
+      return created;
     });
 
     // Enqueue non-blocking Drive archive jobs
@@ -88,19 +123,32 @@ export class OrderService {
     return order;
   }
 
+  /**
+   * Customer submits payment proof bill
+   * Checks SHA-256 duplicate & transactionId duplicate (Fix 8)
+   * Prevents silent replacement of bills (Fix 9)
+   * Transitions: WAITING_PAYMENT -> CUSTOMER_SENT_BILL -> WAITING_ADMIN_VERIFY (Fix 2)
+   */
   static async submitCustomerBill(
     orderId: string,
     fileBuffer: Buffer,
     fileName: string,
-    mimeType: string
+    mimeType: string,
+    actorTelegramId?: string
   ) {
-    const order = await prisma.order.findUnique({ where: { id: orderId } });
+    const order = await prisma.order.findUnique({
+      where: { id: orderId },
+      include: { customer: true }
+    });
     if (!order) throw new Error("Không tìm thấy đơn hàng");
-    if (order.status !== "PENDING_PAYMENT") {
-      throw new Error(`Đơn hàng đang ở trạng thái ${order.status}, không thể nạp biên lai mới`);
+
+    // Check allowed statuses for uploading bill
+    const allowedStatuses = ["WAITING_PAYMENT", "CUSTOMER_SENT_BILL", "WAITING_ADMIN_VERIFY", "MANUAL_REVIEW"];
+    if (!allowedStatuses.includes(order.status)) {
+      throw new Error(`Đơn hàng đang ở trạng thái ${order.status}, không thể nạp biên lai mới.`);
     }
 
-    // Save evidence file with SHA-256
+    // 1. Save original evidence file with SHA-256 calculation
     const evidence = await FileService.saveEvidenceFile(
       fileBuffer,
       fileName,
@@ -108,63 +156,293 @@ export class OrderService {
       mimeType
     );
 
-    // AI image analysis for secondary metadata only
-    const aiMetadata = await AiProvider.analyzeBillImage(fileBuffer, mimeType);
-
-    const updated = await prisma.order.update({
-      where: { id: orderId },
-      data: {
-        customerBillFileId: evidence.id,
-        customerBillSha256: evidence.sha256,
-        aiExtractedData: aiMetadata || {}
+    // 2. Fix 8: Check duplicate SHA-256 across all orders
+    const duplicateEvidence = await prisma.fileEvidence.findFirst({
+      where: {
+        sha256: evidence.sha256,
+        id: { not: evidence.id }
       }
     });
 
-    await AuditService.log({
-      actorId: order.customerId,
-      actorRole: "CUSTOMER",
-      action: "BILL_SUBMITTED",
-      targetType: "ORDER",
-      targetId: orderId,
-      details: { fileId: evidence.id, sha256: evidence.sha256 }
-    });
-
-    // Enqueue non-blocking customer bill sync job
-    DriveArchiveService.enqueueSyncJob(orderId, "CUSTOMER_BILL", evidence.id).catch(() => {});
-
-    return updated;
-  }
-
-  // Two-step payment confirmation by Admin
-  static async confirmPaymentReceived(orderId: string, adminId: string) {
-    const order = await prisma.order.findUnique({ where: { id: orderId } });
-    if (!order) throw new Error("Không tìm thấy đơn hàng");
-    if (order.status !== "PENDING_PAYMENT") {
-      throw new Error(`Không thể xác nhận thanh toán khi đơn ở trạng thái ${order.status}`);
+    let duplicateOrder: any = null;
+    if (duplicateEvidence) {
+      duplicateOrder = await prisma.order.findFirst({
+        where: {
+          OR: [
+            { customerBillSha256: evidence.sha256 },
+            { payoutBillSha256: evidence.sha256 }
+          ],
+          id: { not: orderId }
+        }
+      });
     }
 
-    const updated = await prisma.order.update({
-      where: { id: orderId },
-      data: {
-        status: "WAITING_PAYOUT",
-        verifiedByAdminId: adminId,
-        verifiedAt: new Date()
+    // 3. AI bill extraction (metadata only, never sets confirmed)
+    let aiMetadata: any = null;
+    try {
+      aiMetadata = await AiProvider.analyzeBillImage(fileBuffer, mimeType);
+    } catch (e) {
+      logger.warn({ err: (e as Error).message }, "AI bill analysis failed or unavailable");
+    }
+
+    // 4. Check duplicate transactionId if AI extracted one
+    let duplicateTxId = false;
+    if (aiMetadata && aiMetadata.transactionId) {
+      const existingWithTxId = await prisma.order.findFirst({
+        where: {
+          id: { not: orderId },
+          aiExtractedData: {
+            path: ["transactionId"],
+            equals: aiMetadata.transactionId
+          } as any
+        }
+      });
+      if (existingWithTxId) duplicateTxId = true;
+    }
+
+    const uploaderId = actorTelegramId || order.customerId;
+
+    // 5. Fix 9: Check if a bill was already uploaded previously
+    const hasExistingBill = Boolean(order.customerBillFileId);
+
+    return prisma.$transaction(async (tx: any) => {
+      // Always store in OrderBillEvidence history preserving all uploaded bills
+      await tx.orderBillEvidence.create({
+        data: {
+          orderId,
+          fileId: evidence.id,
+          filePath: evidence.filePath,
+          sha256: evidence.sha256,
+          extracted: aiMetadata || {},
+          uploadedBy: uploaderId
+        }
+      });
+
+      // Handle duplicate fraud detection
+      if (duplicateOrder || duplicateTxId) {
+        const flagReason = duplicateOrder
+          ? `Biên lai trùng SHA-256 với đơn ${duplicateOrder.id} (${evidence.sha256})`
+          : `Mã giao dịch ngân hàng ${aiMetadata?.transactionId} đã tồn tại ở đơn khác`;
+
+        await tx.order.update({
+          where: { id: orderId },
+          data: {
+            status: "SUSPICIOUS",
+            // If first bill, record reference, else preserve initial primary evidence
+            ...(!hasExistingBill ? {
+              customerBillFileId: evidence.id,
+              customerBillSha256: evidence.sha256,
+              aiExtractedData: aiMetadata || {}
+            } : {})
+          }
+        });
+
+        await tx.orderStateHistory.create({
+          data: {
+            orderId,
+            fromStatus: order.status,
+            toStatus: "SUSPICIOUS",
+            actorId: uploaderId,
+            actorRole: "SYSTEM_SECURITY",
+            reason: flagReason,
+            metadata: { sha256: evidence.sha256, duplicateOrderId: duplicateOrder?.id }
+          }
+        });
+
+        await AuditService.log(
+          {
+            actorId: uploaderId,
+            actorRole: "SECURITY",
+            action: "BILL_DUPLICATE_FLAGGED",
+            targetType: "ORDER",
+            targetId: orderId,
+            details: { flagReason, sha256: evidence.sha256, duplicateOrderId: duplicateOrder?.id }
+          },
+          tx
+        );
+
+        return {
+          status: "SUSPICIOUS",
+          flagReason,
+          orderId
+        };
       }
-    });
 
-    await AuditService.log({
-      actorId: adminId,
-      actorRole: "ADMIN",
-      action: "PAYMENT_VERIFIED",
-      targetType: "ORDER",
-      targetId: orderId,
-      details: { verifiedAt: new Date() }
-    });
+      // If customer is re-uploading / replacing bill when a bill already exists (Fix 9)
+      if (hasExistingBill) {
+        // Do NOT overwrite original customerBillFileId or customerBillSha256 silently!
+        // Flag for MANUAL_REVIEW with multiple bills attached in orderBillEvidence
+        await tx.order.update({
+          where: { id: orderId },
+          data: {
+            status: "MANUAL_REVIEW"
+          }
+        });
 
-    return updated;
+        await tx.orderStateHistory.create({
+          data: {
+            orderId,
+            fromStatus: order.status,
+            toStatus: "MANUAL_REVIEW",
+            actorId: uploaderId,
+            actorRole: "CUSTOMER",
+            reason: "CUSTOMER_SUBMITTED_ADDITIONAL_BILL",
+            metadata: { newFileId: evidence.id, newSha256: evidence.sha256 }
+          }
+        });
+
+        await AuditService.log(
+          {
+            actorId: uploaderId,
+            actorRole: "CUSTOMER",
+            action: "ADDITIONAL_BILL_SUBMITTED",
+            targetType: "ORDER",
+            targetId: orderId,
+            details: { newFileId: evidence.id, sha256: evidence.sha256 }
+          },
+          tx
+        );
+
+        DriveArchiveService.enqueueSyncJob(orderId, "CUSTOMER_BILL", evidence.id).catch(() => {});
+
+        return {
+          status: "MANUAL_REVIEW",
+          message: "Biên lai bổ sung đã được ghi nhận và gửi Admin kiểm duyệt thủ công.",
+          orderId
+        };
+      }
+
+      // Normal first bill submission:
+      // WAITING_PAYMENT -> CUSTOMER_SENT_BILL -> WAITING_ADMIN_VERIFY
+      const updated = await tx.order.update({
+        where: { id: orderId },
+        data: {
+          customerBillFileId: evidence.id,
+          customerBillSha256: evidence.sha256,
+          aiExtractedData: aiMetadata || {},
+          status: "WAITING_ADMIN_VERIFY"
+        }
+      });
+
+      // Record first step: WAITING_PAYMENT -> CUSTOMER_SENT_BILL
+      await tx.orderStateHistory.create({
+        data: {
+          orderId,
+          fromStatus: "WAITING_PAYMENT",
+          toStatus: "CUSTOMER_SENT_BILL",
+          actorId: uploaderId,
+          actorRole: "CUSTOMER",
+          reason: "CUSTOMER_UPLOADED_BILL",
+          metadata: { fileId: evidence.id, sha256: evidence.sha256 }
+        }
+      });
+
+      // Record second step: CUSTOMER_SENT_BILL -> WAITING_ADMIN_VERIFY
+      await tx.orderStateHistory.create({
+        data: {
+          orderId,
+          fromStatus: "CUSTOMER_SENT_BILL",
+          toStatus: "WAITING_ADMIN_VERIFY",
+          actorId: "SYSTEM",
+          actorRole: "SYSTEM",
+          reason: "AWAITING_ADMIN_VERIFICATION",
+          metadata: { aiExtracted: aiMetadata }
+        }
+      });
+
+      await AuditService.log(
+        {
+          actorId: uploaderId,
+          actorRole: "CUSTOMER",
+          action: "BILL_SUBMITTED",
+          targetType: "ORDER",
+          targetId: orderId,
+          details: { fileId: evidence.id, sha256: evidence.sha256 }
+        },
+        tx
+      );
+
+      DriveArchiveService.enqueueSyncJob(orderId, "CUSTOMER_BILL", evidence.id).catch(() => {});
+
+      return updated;
+    });
   }
 
-  // Step 1 of payout: Admin uploads payout proof bill -> status PAYOUT_SENT
+  /**
+   * Fix 3: Authorized Admin Payment Confirmation (Atomic + Idempotent)
+   * WAITING_ADMIN_VERIFY -> PAYMENT_CONFIRMED -> WAITING_PAYOUT
+   * Concurrency-safe: conditional update ensures only 1 admin can confirm simultaneously
+   */
+  static async confirmPaymentReceived(orderId: string, adminId: string) {
+    return prisma.$transaction(async (tx: any) => {
+      // Conditional update on WAITING_ADMIN_VERIFY or MANUAL_REVIEW
+      const result = await tx.order.updateMany({
+        where: {
+          id: orderId,
+          status: { in: ["WAITING_ADMIN_VERIFY", "MANUAL_REVIEW", "CUSTOMER_SENT_BILL"] }
+        },
+        data: {
+          status: "WAITING_PAYOUT",
+          verifiedByAdminId: adminId,
+          verifiedAt: new Date()
+        }
+      });
+
+      if (result.count !== 1) {
+        throw new Error("Order đã được xử lý hoặc trạng thái không còn hợp lệ.");
+      }
+
+      // Record step 1: -> PAYMENT_CONFIRMED
+      await tx.orderStateHistory.create({
+        data: {
+          orderId,
+          fromStatus: "WAITING_ADMIN_VERIFY",
+          toStatus: "PAYMENT_CONFIRMED",
+          actorId: adminId,
+          actorRole: "ADMIN",
+          reason: "ADMIN_VERIFIED_INCOMING_MONEY",
+          metadata: { verifiedAt: new Date().toISOString() }
+        }
+      });
+
+      // Record step 2: PAYMENT_CONFIRMED -> WAITING_PAYOUT
+      await tx.orderStateHistory.create({
+        data: {
+          orderId,
+          fromStatus: "PAYMENT_CONFIRMED",
+          toStatus: "WAITING_PAYOUT",
+          actorId: adminId,
+          actorRole: "ADMIN",
+          reason: "READY_FOR_PAYOUT",
+          metadata: { verifiedAt: new Date().toISOString() }
+        }
+      });
+
+      // Write AuditLog in the SAME transaction
+      await AuditService.log(
+        {
+          actorId: adminId,
+          actorRole: "ADMIN",
+          action: "PAYMENT_VERIFIED",
+          targetType: "ORDER",
+          targetId: orderId,
+          details: { verifiedAt: new Date().toISOString() }
+        },
+        tx
+      );
+
+      // Fetch the updated order inside the transaction
+      return tx.order.findUnique({
+        where: { id: orderId },
+        include: { customer: true }
+      });
+    });
+  }
+
+  /**
+   * Fix 4: Admin uploads payout proof bill (Atomic + Idempotent)
+   * WAITING_PAYOUT -> PAYOUT_SENT
+   */
   static async submitPayoutBill(
     orderId: string,
     adminId: string,
@@ -172,12 +450,6 @@ export class OrderService {
     fileName: string,
     mimeType: string
   ) {
-    const order = await prisma.order.findUnique({ where: { id: orderId } });
-    if (!order) throw new Error("Không tìm thấy đơn hàng");
-    if (order.status !== "WAITING_PAYOUT") {
-      throw new Error(`Đơn hàng cần ở trạng thái WAITING_PAYOUT (hiện tại: ${order.status})`);
-    }
-
     const evidence = await FileService.saveEvidenceFile(
       fileBuffer,
       fileName,
@@ -185,58 +457,112 @@ export class OrderService {
       mimeType
     );
 
-    const updated = await prisma.order.update({
-      where: { id: orderId },
-      data: {
-        status: "PAYOUT_SENT",
-        payoutBillFileId: evidence.id,
-        payoutBillSha256: evidence.sha256,
-        payoutByAdminId: adminId,
-        payoutAt: new Date()
+    const updated = await prisma.$transaction(async (tx: any) => {
+      const result = await tx.order.updateMany({
+        where: {
+          id: orderId,
+          status: "WAITING_PAYOUT"
+        },
+        data: {
+          status: "PAYOUT_SENT",
+          payoutBillFileId: evidence.id,
+          payoutBillSha256: evidence.sha256,
+          payoutByAdminId: adminId,
+          payoutAt: new Date()
+        }
+      });
+
+      if (result.count !== 1) {
+        throw new Error("Order đã được xử lý hoặc trạng thái không còn hợp lệ.");
       }
+
+      await tx.orderStateHistory.create({
+        data: {
+          orderId,
+          fromStatus: "WAITING_PAYOUT",
+          toStatus: "PAYOUT_SENT",
+          actorId: adminId,
+          actorRole: "ADMIN",
+          reason: "ADMIN_UPLOADED_PAYOUT_BILL",
+          metadata: { fileId: evidence.id, sha256: evidence.sha256 }
+        }
+      });
+
+      await AuditService.log(
+        {
+          actorId: adminId,
+          actorRole: "ADMIN",
+          action: "PAYOUT_BILL_UPLOADED",
+          targetType: "ORDER",
+          targetId: orderId,
+          details: { fileId: evidence.id, sha256: evidence.sha256 }
+        },
+        tx
+      );
+
+      return tx.order.findUnique({
+        where: { id: orderId },
+        include: { customer: true }
+      });
     });
 
-    await AuditService.log({
-      actorId: adminId,
-      actorRole: "ADMIN",
-      action: "PAYOUT_BILL_UPLOADED",
-      targetType: "ORDER",
-      targetId: orderId,
-      details: { fileId: evidence.id, sha256: evidence.sha256 }
-    });
-
-    // Enqueue non-blocking payout bill sync job
     DriveArchiveService.enqueueSyncJob(orderId, "PAYOUT_BILL", evidence.id).catch(() => {});
 
     return updated;
   }
 
-  // Step 2 of payout: Two-step confirmation -> COMPLETED
+  /**
+   * Fix 4: Admin confirms completed payout (Atomic + Idempotent)
+   * PAYOUT_SENT -> COMPLETED
+   */
   static async completePayout(orderId: string, adminId: string) {
-    const order = await prisma.order.findUnique({ where: { id: orderId } });
-    if (!order) throw new Error("Không tìm thấy đơn hàng");
-    if (order.status !== "PAYOUT_SENT") {
-      throw new Error(`Đơn hàng phải ở trạng thái PAYOUT_SENT trước khi hoàn tất (hiện tại: ${order.status})`);
-    }
+    const updated = await prisma.$transaction(async (tx: any) => {
+      const result = await tx.order.updateMany({
+        where: {
+          id: orderId,
+          status: "PAYOUT_SENT"
+        },
+        data: {
+          status: "COMPLETED",
+          completedAt: new Date()
+        }
+      });
 
-    const updated = await prisma.order.update({
-      where: { id: orderId },
-      data: {
-        status: "COMPLETED",
-        completedAt: new Date()
+      if (result.count !== 1) {
+        throw new Error("Order đã được xử lý hoặc trạng thái không còn hợp lệ.");
       }
+
+      await tx.orderStateHistory.create({
+        data: {
+          orderId,
+          fromStatus: "PAYOUT_SENT",
+          toStatus: "COMPLETED",
+          actorId: adminId,
+          actorRole: "ADMIN",
+          reason: "ADMIN_FINALIZED_ORDER",
+          metadata: { completedAt: new Date().toISOString() }
+        }
+      });
+
+      await AuditService.log(
+        {
+          actorId: adminId,
+          actorRole: "ADMIN",
+          action: "ORDER_COMPLETED",
+          targetType: "ORDER",
+          targetId: orderId,
+          details: { completedAt: new Date().toISOString() }
+        },
+        tx
+      );
+
+      return tx.order.findUnique({
+        where: { id: orderId },
+        include: { customer: true }
+      });
     });
 
-    await AuditService.log({
-      actorId: adminId,
-      actorRole: "ADMIN",
-      action: "ORDER_COMPLETED",
-      targetType: "ORDER",
-      targetId: orderId,
-      details: { completedAt: new Date() }
-    });
-
-    // Enqueue full archive sync upon order completion (conversation, audit, etc.)
+    // Enqueue full archive sync upon order completion
     DriveArchiveService.enqueueSyncJob(orderId, "CONVERSATION").catch(() => {});
     DriveArchiveService.enqueueSyncJob(orderId, "AUDIT").catch(() => {});
     DriveArchiveService.enqueueSyncJob(orderId, "FULL_ORDER_ARCHIVE").catch(() => {});
@@ -244,15 +570,110 @@ export class OrderService {
     return updated;
   }
 
+  /**
+   * Cancel an active order safely
+   */
+  static async cancelOrder(orderId: string, actorId: string, actorRole: string, reason: string) {
+    return prisma.$transaction(async (tx: any) => {
+      const order = await tx.order.findUnique({ where: { id: orderId } });
+      if (!order) throw new Error("Không tìm thấy đơn hàng");
+
+      const cancelableStatuses = [
+        "WAITING_PAYMENT",
+        "CUSTOMER_SENT_BILL",
+        "WAITING_ADMIN_VERIFY",
+        "PAYMENT_MISMATCH",
+        "MANUAL_REVIEW",
+        "SUSPICIOUS"
+      ];
+
+      if (!cancelableStatuses.includes(order.status)) {
+        throw new Error(`Đơn hàng đang ở trạng thái ${order.status}, không thể hủy.`);
+      }
+
+      const result = await tx.order.updateMany({
+        where: { id: orderId, status: order.status },
+        data: { status: "CANCELLED" }
+      });
+
+      if (result.count !== 1) {
+        throw new Error("Order đã thay đổi trạng thái, vui lòng thử lại.");
+      }
+
+      await tx.orderStateHistory.create({
+        data: {
+          orderId,
+          fromStatus: order.status,
+          toStatus: "CANCELLED",
+          actorId,
+          actorRole,
+          reason,
+          metadata: { canceledAt: new Date().toISOString() }
+        }
+      });
+
+      await AuditService.log(
+        {
+          actorId,
+          actorRole,
+          action: "ORDER_CANCELLED",
+          targetType: "ORDER",
+          targetId: orderId,
+          details: { reason }
+        },
+        tx
+      );
+
+      return tx.order.findUnique({ where: { id: orderId } });
+    });
+  }
+
   static async getOrder(id: string) {
-    return prisma.order.findUnique({ where: { id } });
+    return prisma.order.findUnique({
+      where: { id },
+      include: {
+        customer: true,
+        stateHistories: { orderBy: { createdAt: "asc" } },
+        bills: { orderBy: { createdAt: "asc" } }
+      }
+    });
   }
 
   static async getOrdersByStatus(status: any) {
-    return prisma.order.findMany({ where: { status }, orderBy: { createdAt: "desc" } });
+    return prisma.order.findMany({
+      where: { status },
+      include: { customer: true },
+      orderBy: { createdAt: "desc" }
+    });
   }
 
   static async getAllOrders(limit: number = 50) {
-    return prisma.order.findMany({ take: limit, orderBy: { createdAt: "desc" } });
+    return prisma.order.findMany({
+      take: limit,
+      include: { customer: true },
+      orderBy: { createdAt: "desc" }
+    });
+  }
+
+  static async getLatestActiveOrderForCustomer(customerId: string) {
+    return prisma.order.findFirst({
+      where: {
+        customerId,
+        status: {
+          in: [
+            "WAITING_PAYMENT",
+            "CUSTOMER_SENT_BILL",
+            "WAITING_ADMIN_VERIFY",
+            "PAYMENT_CONFIRMED",
+            "WAITING_PAYOUT",
+            "PAYOUT_SENT",
+            "MANUAL_REVIEW",
+            "SUSPICIOUS"
+          ]
+        }
+      },
+      include: { customer: true },
+      orderBy: { createdAt: "desc" }
+    });
   }
 }

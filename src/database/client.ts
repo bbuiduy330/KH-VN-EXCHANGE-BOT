@@ -1,19 +1,18 @@
 import { PrismaClient } from "@prisma/client";
 import { logger } from "../shared/logger.js";
-import { Decimal } from "decimal.js";
 
-// In-memory backing stores for offline/sandboxed development
+// Safe in-memory fallback store for unit tests or environments without a running Postgres
 const inMemoryStore = {
   exchangeRates: new Map<string, any>([
     [
       "USD/VND",
       {
-        id: "rate-1",
+        id: "rate-usd-vnd",
         pair: "USD/VND",
-        baseRate: new Decimal(25450),
-        buyMargin: new Decimal(50),
-        sellMargin: new Decimal(100),
-        fee: new Decimal(2),
+        baseRate: 25400,
+        buyMargin: 50,
+        sellMargin: 50,
+        fee: 2,
         feeCurrency: "USD",
         updatedBy: "system",
         createdAt: new Date(),
@@ -23,12 +22,12 @@ const inMemoryStore = {
     [
       "USD/KHR",
       {
-        id: "rate-2",
+        id: "rate-usd-khr",
         pair: "USD/KHR",
-        baseRate: new Decimal(4080),
-        buyMargin: new Decimal(20),
-        sellMargin: new Decimal(30),
-        fee: new Decimal(2),
+        baseRate: 4080,
+        buyMargin: 10,
+        sellMargin: 10,
+        fee: 2,
         feeCurrency: "USD",
         updatedBy: "system",
         createdAt: new Date(),
@@ -38,12 +37,12 @@ const inMemoryStore = {
     [
       "VND/KHR",
       {
-        id: "rate-3",
+        id: "rate-vnd-khr",
         pair: "VND/KHR",
-        baseRate: new Decimal(0.1605),
-        buyMargin: new Decimal(0.002),
-        sellMargin: new Decimal(0.003),
-        fee: new Decimal(50000),
+        baseRate: 0.16,
+        buyMargin: 0.002,
+        sellMargin: 0.002,
+        fee: 50000,
         feeCurrency: "VND",
         updatedBy: "system",
         createdAt: new Date(),
@@ -62,6 +61,8 @@ const inMemoryStore = {
         accountNumber: "001234567",
         tag: "default",
         qrVersion: 1,
+        isDefault: true,
+        priority: 10,
         isActive: true,
         createdAt: new Date(),
         updatedAt: new Date()
@@ -77,15 +78,20 @@ const inMemoryStore = {
         accountNumber: "9988776655",
         tag: "default",
         qrVersion: 1,
+        isDefault: true,
+        priority: 10,
         isActive: true,
         createdAt: new Date(),
         updatedAt: new Date()
       }
     ]
   ]),
+  paymentAccountVersions: new Map<string, any>(),
   customers: new Map<string, any>(),
   payoutBanks: new Map<string, any>(),
   orders: new Map<string, any>(),
+  orderStateHistories: new Map<string, any>(),
+  orderBillEvidence: new Map<string, any>(),
   conversations: new Map<string, any>(),
   messages: new Map<string, any>(),
   notes: new Map<string, any>(),
@@ -96,48 +102,104 @@ const inMemoryStore = {
   fileEvidence: new Map<string, any>()
 };
 
+function matchesWhere(item: any, where?: any): boolean {
+  if (!where || !item) return true;
+  for (const [k, v] of Object.entries(where)) {
+    if (v === undefined) continue;
+    if (k === "OR" && Array.isArray(v)) {
+      const orMatched = v.some((cond) => matchesWhere(item, cond));
+      if (!orMatched) return false;
+      continue;
+    }
+    if (k === "AND" && Array.isArray(v)) {
+      const andMatched = v.every((cond) => matchesWhere(item, cond));
+      if (!andMatched) return false;
+      continue;
+    }
+    if (v !== null && typeof v === "object") {
+      if ("in" in (v as any) && Array.isArray((v as any).in)) {
+        if (!(v as any).in.includes(item[k])) return false;
+        continue;
+      }
+      if ("not" in (v as any)) {
+        if (item[k] === (v as any).not) return false;
+        continue;
+      }
+    }
+    if (item[k] !== v) return false;
+  }
+  return true;
+}
+
 function createMockCollection(store: Map<string, any>, keyField: string = "id") {
+  const attachRelations = (item: any, include?: any) => {
+    if (!item || !include) return item;
+    const cloned = { ...item };
+    if (include.customer && cloned.customerId) {
+      cloned.customer = inMemoryStore.customers.get(cloned.customerId) ||
+        Array.from(inMemoryStore.customers.values()).find((c) => c.id === cloned.customerId) || null;
+    }
+    if (include.versions && cloned.id) {
+      cloned.versions = Array.from(inMemoryStore.paymentAccountVersions.values()).filter(
+        (v) => v.paymentAccountId === cloned.id
+      );
+    }
+    return cloned;
+  };
+
   return {
     findMany: async (args?: any) => {
       let items = Array.from(store.values());
       if (args?.where) {
-        items = items.filter((item) => {
-          for (const [k, v] of Object.entries(args.where)) {
-            if (v === undefined) continue;
-            if (v !== null && typeof v === "object" && "in" in (v as any) && Array.isArray((v as any).in)) {
-              if (!(v as any).in.includes(item[k])) return false;
-              continue;
+        items = items.filter((item) => matchesWhere(item, args.where));
+      }
+
+      if (args?.orderBy) {
+        const orderBys = Array.isArray(args.orderBy) ? args.orderBy : [args.orderBy];
+        items.sort((a, b) => {
+          for (const ob of orderBys) {
+            for (const [key, dir] of Object.entries(ob)) {
+              const valA = a[key];
+              const valB = b[key];
+              const asc = (dir as string).toLowerCase() === "asc";
+              if (valA === valB) continue;
+              if (valA === undefined || valA === null) return asc ? -1 : 1;
+              if (valB === undefined || valB === null) return asc ? 1 : -1;
+              if (typeof valA === "boolean") {
+                return asc ? (valA ? 1 : -1) : (valA ? -1 : 1);
+              }
+              if (valA > valB) return asc ? 1 : -1;
+              if (valA < valB) return asc ? -1 : 1;
             }
-            if (v !== null && typeof v === "object" && "not" in (v as any)) {
-              if (item[k] === (v as any).not) return false;
-              continue;
-            }
-            if (item[k] !== v) return false;
           }
-          return true;
+          return 0;
         });
       }
-      return items;
+
+      if (args?.take && typeof args.take === "number") {
+        items = items.slice(0, args.take);
+      }
+
+      return items.map((item) => attachRelations(item, args?.include));
     },
+
     findUnique: async (args: any) => {
       if (!args?.where) return null;
-      if (args.where.id && store.has(args.where.id)) return store.get(args.where.id);
+      if (args.where.id && store.has(args.where.id)) {
+        const item = store.get(args.where.id);
+        if (matchesWhere(item, args.where)) return attachRelations(item, args.include);
+      }
       for (const item of store.values()) {
-        let match = true;
-        for (const [k, v] of Object.entries(args.where)) {
-          if (item[k] !== v) {
-            match = false;
-            break;
-          }
-        }
-        if (match) return item;
+        if (matchesWhere(item, args.where)) return attachRelations(item, args.include);
       }
       return null;
     },
+
     findFirst: async (args?: any) => {
       const items = await createMockCollection(store, keyField).findMany(args);
       return items[0] ?? null;
     },
+
     create: async (args: any) => {
       const id = args.data?.id || `mock-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
       const doc = {
@@ -148,60 +210,108 @@ function createMockCollection(store: Map<string, any>, keyField: string = "id") 
       };
       const mapKey = doc[keyField] || id;
       store.set(mapKey, doc);
-      return doc;
+      return attachRelations(doc, args.include);
     },
+
     upsert: async (args: any) => {
       const existing = await createMockCollection(store, keyField).findUnique(args);
       if (existing) {
         const updated = { ...existing, ...args.update, updatedAt: new Date() };
         const storeKey = existing[keyField] || existing.id;
         store.set(storeKey, updated);
-        return updated;
+        return attachRelations(updated, args.include);
       }
-      return createMockCollection(store, keyField).create({ data: args.create });
+      return createMockCollection(store, keyField).create({ data: args.create, include: args.include });
     },
+
     update: async (args: any) => {
       const existing = await createMockCollection(store, keyField).findUnique(args);
       if (!existing) throw new Error("Record not found in mock store");
       const updated = { ...existing, ...args.data, updatedAt: new Date() };
       const storeKey = existing[keyField] || existing.id;
       store.set(storeKey, updated);
-      return updated;
+      return attachRelations(updated, args.include);
     },
+
+    updateMany: async (args: any) => {
+      let count = 0;
+      for (const item of Array.from(store.values())) {
+        if (matchesWhere(item, args?.where)) {
+          const updated = { ...item, ...args.data, updatedAt: new Date() };
+          const storeKey = updated[keyField] || updated.id;
+          store.set(storeKey, updated);
+          count++;
+        }
+      }
+      return { count };
+    },
+
     delete: async (args: any) => {
       const key = args.where?.[keyField] || args.where?.id;
       store.delete(key);
       return { success: true };
+    },
+
+    deleteMany: async (args?: any) => {
+      let count = 0;
+      for (const [k, item] of Array.from(store.entries())) {
+        if (matchesWhere(item, args?.where)) {
+          store.delete(k);
+          count++;
+        }
+      }
+      return { count };
     }
   };
 }
+
+const mockMap: Record<string, { store: Map<string, any>; key: string }> = {
+  exchangeRate: { store: inMemoryStore.exchangeRates, key: "pair" },
+  paymentAccount: { store: inMemoryStore.paymentAccounts, key: "id" },
+  paymentAccountVersion: { store: inMemoryStore.paymentAccountVersions, key: "id" },
+  customer: { store: inMemoryStore.customers, key: "telegramId" },
+  customerPayoutBank: { store: inMemoryStore.payoutBanks, key: "id" },
+  order: { store: inMemoryStore.orders, key: "id" },
+  orderStateHistory: { store: inMemoryStore.orderStateHistories, key: "id" },
+  orderBillEvidence: { store: inMemoryStore.orderBillEvidence, key: "id" },
+  conversation: { store: inMemoryStore.conversations, key: "id" },
+  message: { store: inMemoryStore.messages, key: "id" },
+  internalNote: { store: inMemoryStore.notes, key: "id" },
+  staffUser: { store: inMemoryStore.staffUsers, key: "telegramId" },
+  staffInvite: { store: inMemoryStore.staffInvites, key: "code" },
+  driveSyncJob: { store: inMemoryStore.driveSyncJobs, key: "id" },
+  auditLog: { store: inMemoryStore.auditLogs, key: "id" },
+  fileEvidence: { store: inMemoryStore.fileEvidence, key: "id" }
+};
 
 let prismaClientInstance: any;
 
 try {
   const realPrisma = new PrismaClient();
-  
+
   // Create a proxy that wraps real Prisma calls and falls back to in-memory store if DB is unreachable
   prismaClientInstance = new Proxy(realPrisma, {
     get(target: any, prop: string | symbol) {
       if (typeof prop !== "string") return target[prop];
       if (prop === "$connect" || prop === "$disconnect") return target[prop].bind(target);
-      
-      const mockMap: Record<string, { store: Map<string, any>; key: string }> = {
-        exchangeRate: { store: inMemoryStore.exchangeRates, key: "pair" },
-        paymentAccount: { store: inMemoryStore.paymentAccounts, key: "id" },
-        customer: { store: inMemoryStore.customers, key: "telegramId" },
-        customerPayoutBank: { store: inMemoryStore.payoutBanks, key: "id" },
-        order: { store: inMemoryStore.orders, key: "id" },
-        conversation: { store: inMemoryStore.conversations, key: "id" },
-        message: { store: inMemoryStore.messages, key: "id" },
-        internalNote: { store: inMemoryStore.notes, key: "id" },
-        staffUser: { store: inMemoryStore.staffUsers, key: "telegramId" },
-        staffInvite: { store: inMemoryStore.staffInvites, key: "code" },
-        driveSyncJob: { store: inMemoryStore.driveSyncJobs, key: "id" },
-        auditLog: { store: inMemoryStore.auditLogs, key: "id" },
-        fileEvidence: { store: inMemoryStore.fileEvidence, key: "id" }
-      };
+      if (prop === "$transaction") {
+        return async (arg: any) => {
+          try {
+            if (process.env.DATABASE_URL && typeof target.$transaction === "function") {
+              return await target.$transaction(arg);
+            }
+          } catch (e) {
+            logger.warn({ error: (e as Error).message }, "[AI Studio] $transaction failed on real DB, falling back to mock");
+          }
+          if (typeof arg === "function") {
+            return await arg(prismaClientInstance);
+          }
+          if (Array.isArray(arg)) {
+            return await Promise.all(arg);
+          }
+          return arg;
+        };
+      }
 
       const mock = mockMap[prop];
       if (mock) {
@@ -233,9 +343,12 @@ try {
   prismaClientInstance = {
     exchangeRate: createMockCollection(inMemoryStore.exchangeRates, "pair"),
     paymentAccount: createMockCollection(inMemoryStore.paymentAccounts, "id"),
+    paymentAccountVersion: createMockCollection(inMemoryStore.paymentAccountVersions, "id"),
     customer: createMockCollection(inMemoryStore.customers, "telegramId"),
     customerPayoutBank: createMockCollection(inMemoryStore.payoutBanks, "id"),
     order: createMockCollection(inMemoryStore.orders, "id"),
+    orderStateHistory: createMockCollection(inMemoryStore.orderStateHistories, "id"),
+    orderBillEvidence: createMockCollection(inMemoryStore.orderBillEvidence, "id"),
     conversation: createMockCollection(inMemoryStore.conversations, "id"),
     message: createMockCollection(inMemoryStore.messages, "id"),
     internalNote: createMockCollection(inMemoryStore.notes, "id"),
@@ -245,7 +358,12 @@ try {
     auditLog: createMockCollection(inMemoryStore.auditLogs, "id"),
     fileEvidence: createMockCollection(inMemoryStore.fileEvidence, "id"),
     $connect: async () => {},
-    $disconnect: async () => {}
+    $disconnect: async () => {},
+    $transaction: async (arg: any) => {
+      if (typeof arg === "function") return await arg(prismaClientInstance);
+      if (Array.isArray(arg)) return await Promise.all(arg);
+      return arg;
+    }
   };
 }
 

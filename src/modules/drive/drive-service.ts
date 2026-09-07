@@ -1,8 +1,8 @@
 import { google } from "googleapis";
-import { Readable } from "node:stream";
+import { Readable } from "stream";
 import { env } from "../../config/env.js";
-import { prisma } from "../../database/client.js";
 import { logger } from "../../shared/logger.js";
+import { prisma } from "../../database/client.js";
 import { FileService } from "../files/file-service.js";
 import { ConversationService } from "../conversation/conversation-service.js";
 
@@ -20,62 +20,52 @@ export interface OrderFolderTree {
 
 export class GoogleDriveService {
   private static driveClient: any = null;
-  private static folderCache = new Map<string, string>(); // path key -> folder ID
 
-  public static getDriveClient() {
-    if (
-      !this.driveClient &&
-      env.GOOGLE_SERVICE_ACCOUNT_EMAIL &&
-      env.GOOGLE_PRIVATE_KEY
-    ) {
-      try {
-        const auth = new google.auth.JWT({
-          email: env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
-          key: env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, "\n"),
-          scopes: ["https://www.googleapis.com/auth/drive.file"]
-        });
-        this.driveClient = google.drive({ version: "v3", auth });
-      } catch (err) {
-        logger.warn({ err }, "Google Drive auth initialization failed");
-        return null;
-      }
+  static getDriveClient() {
+    if (this.driveClient) return this.driveClient;
+
+    if (!env.GOOGLE_SERVICE_ACCOUNT_EMAIL || !env.GOOGLE_PRIVATE_KEY) {
+      logger.warn("Google Drive credentials not configured. Drive operations will be mocked or skipped.");
+      return null;
     }
-    return this.driveClient;
+
+    try {
+      let formattedKey = env.GOOGLE_PRIVATE_KEY;
+      if (formattedKey.startsWith('"') && formattedKey.endsWith('"')) {
+        formattedKey = formattedKey.slice(1, -1);
+      }
+      formattedKey = formattedKey.replace(/\\n/g, "\n");
+
+      const auth = new google.auth.JWT({
+        email: env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
+        key: formattedKey,
+        scopes: ["https://www.googleapis.com/auth/drive"]
+      });
+
+      this.driveClient = google.drive({ version: "v3", auth });
+      return this.driveClient;
+    } catch (err) {
+      logger.error({ err }, "Failed to initialize Google Drive client");
+      return null;
+    }
   }
 
-  public static getClient() {
+  static getClient() {
     return this.getDriveClient();
-  }
-
-  static setDriveClientForTesting(client: any) {
-    this.driveClient = client;
-    this.folderCache.clear();
-  }
-
-  static clearCache() {
-    this.folderCache.clear();
   }
 
   static async findOrCreateFolder(folderName: string, parentFolderId?: string): Promise<string> {
     const drive = this.getDriveClient();
-    const cacheKey = `${parentFolderId || "root"}/${folderName}`;
-    if (this.folderCache.has(cacheKey)) {
-      return this.folderCache.get(cacheKey)!;
+    if (!drive) {
+      return `mock-folder-${folderName}-${Date.now()}`;
     }
 
-    if (!drive) {
-      // Mock ID when Drive is unconfigured or in offline/test environment
-      const mockId = `mock-folder-${folderName}-${Date.now().toString(36)}`;
-      this.folderCache.set(cacheKey, mockId);
-      return mockId;
-    }
+    const parent = parentFolderId || env.GOOGLE_DRIVE_ROOT_FOLDER_ID;
+    const query = parent
+      ? `'${parent}' in parents and name = '${folderName}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false`
+      : `name = '${folderName}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false`;
 
     try {
-      let query = `mimeType = 'application/vnd.google-apps.folder' and name = '${folderName}' and trashed = false`;
-      if (parentFolderId) {
-        query += ` and '${parentFolderId}' in parents`;
-      }
-
       const res = await drive.files.list({
         q: query,
         fields: "files(id, name)",
@@ -83,30 +73,34 @@ export class GoogleDriveService {
       });
 
       if (res.data.files && res.data.files.length > 0) {
-        const folderId = res.data.files[0].id!;
-        this.folderCache.set(cacheKey, folderId);
-        return folderId;
+        return res.data.files[0].id!;
       }
 
-      // Create folder
-      const createRes = await drive.files.create({
-        requestBody: {
-          name: folderName,
-          mimeType: "application/vnd.google-apps.folder",
-          parents: parentFolderId ? [parentFolderId] : undefined
-        },
+      const fileMetadata: any = {
+        name: folderName,
+        mimeType: "application/vnd.google-apps.folder"
+      };
+
+      if (parent) {
+        fileMetadata.parents = [parent];
+      }
+
+      const folder = await drive.files.create({
+        requestBody: fileMetadata,
         fields: "id"
       });
 
-      const newFolderId = createRes.data.id || `folder-${folderName}`;
-      this.folderCache.set(cacheKey, newFolderId);
-      return newFolderId;
+      return folder.data.id!;
     } catch (err) {
-      logger.error({ err, folderName, parentFolderId }, "Failed to findOrCreateFolder on Drive");
+      logger.error({ err, folderName, parent }, "Error in findOrCreateFolder");
       throw err;
     }
   }
 
+  /**
+   * For original evidence: never overwrite historical originals.
+   * If existing file found, reuse its id.
+   */
   static async uploadFile(
     fileBuffer: Buffer,
     fileName: string,
@@ -115,14 +109,13 @@ export class GoogleDriveService {
   ): Promise<string | null> {
     const drive = this.getDriveClient();
     if (!drive) {
-      logger.info({ fileName }, "Google Drive unconfigured; generating simulated archive ID");
-      return `mock-file-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+      logger.info({ fileName }, "Mocked Google Drive upload (credentials missing)");
+      return `mock-drive-file-${Date.now()}`;
     }
 
     const folderId = parentFolderId || env.GOOGLE_DRIVE_ROOT_FOLDER_ID;
 
     try {
-      // Idempotency check: see if file already exists in this folder
       if (folderId) {
         const existing = await drive.files.list({
           q: `'${folderId}' in parents and name = '${fileName}' and trashed = false`,
@@ -131,7 +124,7 @@ export class GoogleDriveService {
         });
 
         if (existing.data.files && existing.data.files.length > 0) {
-          logger.info({ fileName, id: existing.data.files[0].id }, "File already exists in Drive folder, reusing");
+          logger.info({ fileName, id: existing.data.files[0].id }, "File already exists in Drive folder, preserving original");
           return existing.data.files[0].id!;
         }
       }
@@ -155,15 +148,74 @@ export class GoogleDriveService {
     }
   }
 
+  /**
+   * Fix 13: For generated archive files (order.json, customer.json, audit.json, conversation.txt, etc.)
+   * Idempotently update content if file already exists in folder, avoiding duplicates on retry.
+   */
+  static async uploadOrUpdateFile(
+    fileBuffer: Buffer,
+    fileName: string,
+    mimeType: string,
+    parentFolderId?: string
+  ): Promise<string | null> {
+    const drive = this.getDriveClient();
+    if (!drive) {
+      logger.info({ fileName }, "Mocked Google Drive upload/update (credentials missing)");
+      return `mock-drive-file-${Date.now()}`;
+    }
+
+    const folderId = parentFolderId || env.GOOGLE_DRIVE_ROOT_FOLDER_ID;
+
+    try {
+      if (folderId) {
+        const existing = await drive.files.list({
+          q: `'${folderId}' in parents and name = '${fileName}' and trashed = false`,
+          fields: "files(id, name)",
+          spaces: "drive"
+        });
+
+        if (existing.data.files && existing.data.files.length > 0) {
+          const fileId = existing.data.files[0].id!;
+          await drive.files.update({
+            fileId,
+            media: {
+              mimeType,
+              body: Readable.from(fileBuffer)
+            }
+          });
+          logger.info({ fileName, fileId }, "Drive file updated idempotently");
+          return fileId;
+        }
+      }
+
+      const response = await drive.files.create({
+        requestBody: {
+          name: fileName,
+          parents: folderId ? [folderId] : undefined
+        },
+        media: {
+          mimeType,
+          body: Readable.from(fileBuffer)
+        },
+        fields: "id"
+      });
+
+      return response.data.id || null;
+    } catch (err) {
+      logger.error({ err, fileName }, "Google Drive upload/update failed");
+      throw err;
+    }
+  }
+
   static async uploadJson(data: any, fileName: string, parentFolderId?: string): Promise<string | null> {
     const jsonStr = JSON.stringify(data, null, 2);
     const buffer = Buffer.from(jsonStr, "utf-8");
-    return this.uploadFile(buffer, fileName, "application/json", parentFolderId);
+    return this.uploadOrUpdateFile(buffer, fileName, "application/json", parentFolderId);
   }
 
   static async uploadText(text: string, fileName: string, parentFolderId?: string): Promise<string | null> {
     const buffer = Buffer.from(text, "utf-8");
-    return this.uploadFile(buffer, fileName, "text/plain; charset=utf-8", parentFolderId);
+    return this.uploadOrUpdateFile(buffer, fileName, "text/plain; charset=utf-8", parentFolderId);
   }
 
   /**
@@ -197,10 +249,14 @@ export class GoogleDriveService {
 
 export class DriveArchiveService {
   /**
-   * Archives order metadata: order.json and customer.json
+   * Fix 5 & 12: Archives order metadata: order.json and customer.json
+   * Correctly queries Customer by ID or relation, using valid Prisma fields.
    */
   static async archiveOrderMetadata(orderId: string): Promise<string | null> {
-    const order = await prisma.order.findUnique({ where: { id: orderId } });
+    const order = await prisma.order.findUnique({
+      where: { id: orderId },
+      include: { customer: true }
+    });
     if (!order) throw new Error(`Order ${orderId} not found`);
 
     const tree = await GoogleDriveService.getOrderFolderTree(order);
@@ -232,17 +288,17 @@ export class DriveArchiveService {
     };
     const orderFileId = await GoogleDriveService.uploadJson(orderJsonData, "order.json", tree.orderFolderId);
 
-    // 2. customer.json
-    const customer = await prisma.customer.findUnique({ where: { telegramId: order.customerId } });
+    // 2. Fix 5: customer.json with correct Customer relationship and fields
+    const customer = order.customer || (await prisma.customer.findUnique({ where: { id: order.customerId } }));
     if (customer) {
       await GoogleDriveService.uploadJson(
         {
-          customerId: customer.telegramId,
-          name: customer.name,
-          username: customer.username,
+          customerId: customer.id,
+          telegramId: customer.telegramId,
+          username: customer.username ?? null,
+          fullName: customer.fullName ?? null,
+          phone: customer.phone ?? null,
           language: customer.language,
-          phone: customer.phone,
-          status: customer.status,
           createdAt: customer.createdAt,
           archivedAt: new Date().toISOString()
         },
@@ -261,7 +317,7 @@ export class DriveArchiveService {
   }
 
   /**
-   * Archives payment QR instruction file preserving historical version
+   * Fix 7: Archives payment QR instruction file preserving historical version
    */
   static async archivePaymentInstructionQr(orderId: string): Promise<string | null> {
     const order = await prisma.order.findUnique({ where: { id: orderId } });
@@ -353,22 +409,21 @@ export class DriveArchiveService {
 
   /**
    * Formats conversation into conversation.json and conversation.txt
-   * Ensuring strict formatting requirements:
-   * [YYYY-MM-DD HH:mm:ss]
-   * SENDER:
-   * content
    */
   static async archiveConversation(orderId: string): Promise<{ jsonId: string | null; txtId: string | null }> {
-    const order = await prisma.order.findUnique({ where: { id: orderId } });
+    const order = await prisma.order.findUnique({
+      where: { id: orderId },
+      include: { customer: true }
+    });
     if (!order) return { jsonId: null, txtId: null };
 
-    const history = await ConversationService.getHistory(order.customerId, 200);
+    const telegramId = order.customer?.telegramId || order.customerId;
+    const history = await ConversationService.getHistory(telegramId, 200);
     const tree = await GoogleDriveService.getOrderFolderTree(order);
 
     // Format conversation.txt
     const txtBlocks: string[] = [];
 
-    // Combine messages and internal notes sorted chronologically
     const allEvents: Array<{
       type: "MESSAGE" | "NOTE";
       date: Date;
@@ -463,7 +518,6 @@ export class DriveArchiveService {
 
   static async enqueueSyncJob(orderId: string, jobType: string, fileEvidenceId?: string) {
     try {
-      // Check if an existing pending or processing job already exists for this order & jobType
       const existing = await prisma.driveSyncJob.findFirst({
         where: {
           orderId,
@@ -543,7 +597,6 @@ export class DriveArchiveService {
       return true;
     } catch (err: any) {
       const attempts = (job.attempts || 0) + 1;
-      // Exponential backoff: 1m, 2m, 4m, 8m, max 30m
       const backoffMs = Math.min(30 * 60 * 1000, Math.pow(2, attempts) * 60 * 1000);
       const nextRetryAt = new Date(Date.now() + backoffMs);
       const isExhausted = attempts >= (job.maxAttempts || 5);
@@ -615,7 +668,6 @@ export class DriveArchiveService {
     });
 
     if (jobs.length === 0) {
-      // Create fresh full sync job
       await this.enqueueSyncJob(orderId, "FULL_ORDER_ARCHIVE");
     } else {
       for (const j of jobs) {

@@ -1,4 +1,4 @@
-import { Composer, InlineKeyboard } from "grammy";
+import { Composer, InlineKeyboard, InputFile } from "grammy";
 import { BotContext } from "../middleware/identity.js";
 import { requirePermission } from "../middleware/permissions.js";
 import { PermissionService, ALL_PERMISSIONS, Permission } from "../../modules/permissions/permission-service.js";
@@ -7,6 +7,7 @@ import { PaymentAccountService } from "../../modules/payment-accounts/account-se
 import { OrderService } from "../../modules/orders/order-service.js";
 import { AuditService } from "../../modules/audit/audit-service.js";
 import { DriveArchiveService } from "../../modules/drive/drive-service.js";
+import { FileService } from "../../modules/files/file-service.js";
 import { env } from "../../config/env.js";
 import { sendToCustomer, sendToAdminNotificationChat } from "../notifications.js";
 import { getAdminMenuKeyboard, renderAdminStartText } from "../menus/admin-menu.js";
@@ -122,7 +123,11 @@ adminHandler.command("pending", async (ctx) => {
   const allowed = await requirePermission(ctx, "order.view");
   if (!allowed) return;
 
-  const pendingOrders = await OrderService.getOrdersByStatus("PENDING_PAYMENT");
+  const pendingOrders = await prisma.order.findMany({
+    where: { status: { in: ["WAITING_ADMIN_VERIFY", "CUSTOMER_SENT_BILL", "MANUAL_REVIEW", "SUSPICIOUS"] } },
+    include: { customer: true },
+    orderBy: { createdAt: "asc" }
+  });
   const waitingPayout = await OrderService.getOrdersByStatus("WAITING_PAYOUT");
   const payoutSent = await OrderService.getOrdersByStatus("PAYOUT_SENT");
 
@@ -135,7 +140,8 @@ adminHandler.command("pending", async (ctx) => {
   if (pendingOrders.length > 0) {
     msg += `<b>1. Chờ kiểm tra tiền nạp (${pendingOrders.length}):</b>\n`;
     for (const o of pendingOrders) {
-      msg += `• Đơn <code>${o.id}</code>: ${o.sourceAmount} ${o.sourceCurrency} ➔ ${o.targetAmount} ${o.targetCurrency}\n`;
+      const tag = o.status === "SUSPICIOUS" ? " [🚨 CẢNH BÁO]" : o.status === "MANUAL_REVIEW" ? " [⚠️ THỦ CÔNG]" : "";
+      msg += `• Đơn <code>${o.id}</code>: ${o.sourceAmount} ${o.sourceCurrency} ➔ ${o.targetAmount} ${o.targetCurrency}${tag}\n`;
     }
   }
 
@@ -164,6 +170,85 @@ adminHandler.command("pending", async (ctx) => {
   await ctx.reply(msg, { parse_mode: "HTML", reply_markup: keyboard });
 });
 
+// /order command - view comprehensive order detail
+adminHandler.command("order", async (ctx) => {
+  const allowed = await requirePermission(ctx, "order.view");
+  if (!allowed) return;
+
+  const orderId = ctx.match?.trim();
+  if (!orderId) return ctx.reply("Cú pháp: <code>/order &lt;Mã_Đơn&gt;</code>", { parse_mode: "HTML" });
+
+  const order = await OrderService.getOrder(orderId);
+  if (!order) return ctx.reply(`❌ Không tìm thấy đơn hàng <code>${orderId}</code>.`, { parse_mode: "HTML" });
+
+  const receivingSnapshot = order.receivingAccountSnapshot as any;
+  const payoutSnapshot = order.payoutBankSnapshot as any;
+
+  let msg =
+    `📦 <b>CHI TIẾT ĐƠN HÀNG: ${order.id}</b>\n\n` +
+    `• Trạng thái: <code>${order.status}</code>\n` +
+    `• Khách hàng: <b>${order.customer?.fullName || order.customer?.username || order.customerId}</b> (ID: <code>${order.customerId}</code>)\n` +
+    `• Telegram ID: <code>${order.customer?.telegramId}</code>\n\n` +
+    `💵 <b>TIỀN NẠP:</b> <b>${order.sourceAmount} ${order.sourceCurrency}</b>\n` +
+    `• Tài khoản nhận: ${receivingSnapshot?.bankName} - <code>${receivingSnapshot?.accountNumber}</code> (${receivingSnapshot?.accountName})\n` +
+    `• QR Version: v${receivingSnapshot?.qrVersion || 1}\n\n` +
+    `💸 <b>TIỀN CHI:</b> <b>${order.targetAmount} ${order.targetCurrency}</b>\n` +
+    `• Tài khoản chi trả: ${payoutSnapshot?.bankName} - <code>${payoutSnapshot?.accountNumber}</code> (${payoutSnapshot?.accountName})\n` +
+    `• Tỷ giá: <b>${order.rate}</b> | Phí: <b>${order.fee} ${order.feeCurrency}</b>\n\n` +
+    `🕒 Ngày tạo: ${new Date(order.createdAt).toLocaleString("vi-VN")}\n`;
+
+  if (order.stateHistories && order.stateHistories.length > 0) {
+    msg += `\n📜 <b>Lịch sử chuyển trạng thái:</b>\n`;
+    for (const h of order.stateHistories.slice(-4)) {
+      msg += `• [${h.fromStatus} ➔ ${h.toStatus}] bởi ${h.actorRole} lúc ${new Date(h.createdAt).toLocaleTimeString()}\n`;
+    }
+  }
+
+  const keyboard = new InlineKeyboard();
+  if (["WAITING_ADMIN_VERIFY", "CUSTOMER_SENT_BILL", "MANUAL_REVIEW", "SUSPICIOUS"].includes(order.status)) {
+    keyboard.text("💰 Duyệt tiền nạp", `admin:pay:step1:${order.id}`).row();
+  } else if (order.status === "PAYOUT_SENT") {
+    keyboard.text("✅ Hoàn tất đơn", `admin:payout:complete:${order.id}`).row();
+  }
+  keyboard.text("📁 Trạng thái Drive", `admin:drive:status:${order.id}`);
+
+  await ctx.reply(msg, { parse_mode: "HTML", reply_markup: keyboard });
+});
+
+// Callback for viewing order detail
+adminHandler.callbackQuery(/^admin:order:detail:(.+)$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const allowed = await requirePermission(ctx, "order.view");
+  if (!allowed) return;
+
+  const orderId = ctx.match?.[1];
+  if (!orderId) return;
+
+  const order = await OrderService.getOrder(orderId);
+  if (!order) return ctx.reply(`❌ Không tìm thấy đơn hàng <code>${orderId}</code>.`, { parse_mode: "HTML" });
+
+  const receivingSnapshot = order.receivingAccountSnapshot as any;
+  const payoutSnapshot = order.payoutBankSnapshot as any;
+
+  let msg =
+    `📦 <b>CHI TIẾT ĐƠN HÀNG: ${order.id}</b>\n\n` +
+    `• Trạng thái: <code>${order.status}</code>\n` +
+    `• Khách hàng: <b>${order.customer?.fullName || order.customerId}</b>\n\n` +
+    `💵 Tiền nạp: <b>${order.sourceAmount} ${order.sourceCurrency}</b>\n` +
+    `• Vào: ${receivingSnapshot?.bankName} - <code>${receivingSnapshot?.accountNumber}</code>\n\n` +
+    `💸 Tiền chi: <b>${order.targetAmount} ${order.targetCurrency}</b>\n` +
+    `• Tới: ${payoutSnapshot?.bankName} - <code>${payoutSnapshot?.accountNumber}</code> (${payoutSnapshot?.accountName})\n`;
+
+  const keyboard = new InlineKeyboard();
+  if (["WAITING_ADMIN_VERIFY", "CUSTOMER_SENT_BILL", "MANUAL_REVIEW", "SUSPICIOUS"].includes(order.status)) {
+    keyboard.text("💰 Duyệt tiền nạp", `admin:pay:step1:${order.id}`).row();
+  } else if (order.status === "PAYOUT_SENT") {
+    keyboard.text("✅ Hoàn tất đơn", `admin:payout:complete:${order.id}`).row();
+  }
+
+  await ctx.reply(msg, { parse_mode: "HTML", reply_markup: keyboard });
+});
+
 // Step 1: Verify payment received (supports admin:pay:step1:* and pay_step1:*)
 adminHandler.callbackQuery(/^(?:admin:pay:step1:|pay_step1:)(.+)$/, async (ctx) => {
   await ctx.answerCallbackQuery();
@@ -175,18 +260,43 @@ adminHandler.callbackQuery(/^(?:admin:pay:step1:|pay_step1:)(.+)$/, async (ctx) 
   const order = await OrderService.getOrder(orderId);
   if (!order) return ctx.reply("Không tìm thấy đơn hàng.");
 
+  const receivingSnapshot = order.receivingAccountSnapshot as any;
   const keyboard = new InlineKeyboard()
     .text("⚠️ XÁC NHẬN ĐÃ KIỂM TRA APP NGÂN HÀNG", `admin:pay:step2:${orderId}`)
     .row()
     .text("❌ Hủy bỏ", "admin:menu:pending_pay");
 
-  await ctx.reply(
+  let detailMsg =
     `⚠️ <b>CẢNH BÁO XÁC NHẬN TIỀN VÀO (BƯỚC 1/2)</b>\n\n` +
-      `• Mã đơn: <code>${order.id}</code>\n` +
-      `• Số tiền cần thực nhận: <b>${order.sourceAmount} ${order.sourceCurrency}</b>\n\n` +
-      `<i>Nguyên tắc tài chính an toàn:</i> Bạn đã mở ứng dụng ngân hàng và chắc chắn tiền thực tế đã vào tài khoản?`,
-    { parse_mode: "HTML", reply_markup: keyboard }
-  );
+    `• Mã đơn: <code>${order.id}</code>\n` +
+    `• Trạng thái hiện tại: <code>${order.status}</code>\n` +
+    `• Số tiền cần thực nhận: <b>${order.sourceAmount} ${order.sourceCurrency}</b>\n` +
+    `• Tài khoản đích: <b>${receivingSnapshot?.bankName}</b> - <code>${receivingSnapshot?.accountNumber}</code> (${receivingSnapshot?.accountName})\n` +
+    `• Khách hàng: <b>${order.customer?.fullName || order.customerId}</b>\n`;
+
+  if (order.customerBillSha256) {
+    detailMsg += `• SHA-256 biên lai: <code>${order.customerBillSha256}</code>\n`;
+  }
+  if (order.aiExtractedData && Object.keys(order.aiExtractedData).length > 0) {
+    detailMsg += `• AI trích xuất: <code>${JSON.stringify(order.aiExtractedData)}</code>\n`;
+  }
+
+  detailMsg += `\n<i>Nguyên tắc tài chính an toàn:</i> Bạn đã mở ứng dụng ngân hàng và chắc chắn tiền thực tế đã vào tài khoản?`;
+
+  // Send photo of customer bill if available
+  if (order.customerBillFileId) {
+    const evidence = await prisma.fileEvidence.findUnique({ where: { id: order.customerBillFileId } });
+    if (evidence?.filePath) {
+      const buffer = await FileService.getFile(evidence.filePath);
+      if (buffer) {
+        await ctx.replyWithPhoto(new InputFile(buffer), {
+          caption: `📸 Biên lai nạp tiền cho đơn ${order.id}`
+        });
+      }
+    }
+  }
+
+  await ctx.reply(detailMsg, { parse_mode: "HTML", reply_markup: keyboard });
 });
 
 // Step 2: Final verify (supports admin:pay:step2:* and pay_step2:*)
@@ -733,7 +843,11 @@ adminHandler.callbackQuery("admin:menu:pending_pay", async (ctx) => {
   const allowed = await requirePermission(ctx, "order.view");
   if (!allowed) return;
 
-  const pendingOrders = await OrderService.getOrdersByStatus("PENDING_PAYMENT");
+  const pendingOrders = await prisma.order.findMany({
+    where: { status: { in: ["WAITING_ADMIN_VERIFY", "CUSTOMER_SENT_BILL", "MANUAL_REVIEW", "SUSPICIOUS"] } },
+    include: { customer: true },
+    orderBy: { createdAt: "asc" }
+  });
   if (pendingOrders.length === 0) {
     return ctx.reply("✅ Không có đơn hàng nào đang chờ xác nhận tiền nạp.");
   }
@@ -741,7 +855,8 @@ adminHandler.callbackQuery("admin:menu:pending_pay", async (ctx) => {
   let msg = `💰 <b>ĐƠN HÀNG CHỜ XÁC NHẬN TIỀN NẠP (${pendingOrders.length}):</b>\n\n`;
   const keyboard = new InlineKeyboard();
   for (const o of pendingOrders) {
-    msg += `• Đơn <code>${o.id}</code>: Cần nhận <b>${o.sourceAmount} ${o.sourceCurrency}</b>\n`;
+    const flag = o.status === "SUSPICIOUS" ? " [🚨 CẢNH BÁO]" : o.status === "MANUAL_REVIEW" ? " [⚠️ THỦ CÔNG]" : "";
+    msg += `• Đơn <code>${o.id}</code>: Cần nhận <b>${o.sourceAmount} ${o.sourceCurrency}</b>${flag}\n`;
     keyboard.text(`🔍 Duyệt nhận: ${o.id}`, `admin:pay:step1:${o.id}`).row();
   }
   await ctx.reply(msg, { parse_mode: "HTML", reply_markup: keyboard });
@@ -928,16 +1043,19 @@ export async function handleAdminPhoto(ctx: BotContext) {
     }
 
     const [currency, bankName, accountName, accountNumber, tag] = parts as [string, string, string, string, string?];
-    const account = await PaymentAccountService.addAccount({
-      currency,
-      bankName,
-      accountName,
-      accountNumber,
-      tag: tag || "default",
-      qrFileBuffer: buffer,
-      qrFileName: `qr_${currency}_${accountNumber}.png`,
-      qrMimeType: "image/png"
-    });
+    const account = await PaymentAccountService.addAccount(
+      {
+        currency,
+        bankName,
+        accountName,
+        accountNumber,
+        tag: tag || "default",
+        qrFileBuffer: buffer,
+        qrFileName: `qr_${currency}_${accountNumber}.png`,
+        qrMimeType: "image/png"
+      },
+      adminId
+    );
 
     await ctx.reply(
       `✅ <b>ĐÃ LƯU MÃ QR CHO TÀI KHOẢN [${account.currency}]:</b>\n\n` +

@@ -37,6 +37,7 @@ customerHandler.command("help", async (ctx) => {
       `• Gửi tin nhắn ví dụ: <i>'đổi 1000 USD sang VND'</i> để nhận báo giá tức thời.\n` +
       `• Cài đặt ngân hàng nhận tiền: <code>/bank VND|MB Bank|TÊN CHỦ TK|SỐ TK</code>\n` +
       `• Xem đơn đã tạo: <code>/orders</code>\n` +
+      `• Hủy đơn đang chờ: <code>/cancel</code>\n` +
       `• Để gặp nhân viên hỗ trợ trực tiếp, vui lòng nhấn nút <b>💬 Hỗ trợ</b> trong menu.`,
     { parse_mode: "HTML", reply_markup: getCustomerMenuKeyboard() }
   );
@@ -65,6 +66,22 @@ customerHandler.command("orders", async (ctx) => {
   }
 
   await ctx.reply(msg, { parse_mode: "HTML", reply_markup: getCustomerMenuKeyboard() });
+});
+
+// /cancel command
+customerHandler.command("cancel", async (ctx) => {
+  const telegramId = String(ctx.from?.id || "");
+  const customer = await CustomerService.getOrCreateCustomer({ telegramId });
+  const activeOrder = await OrderService.getLatestActiveOrderForCustomer(customer.id);
+  if (!activeOrder) {
+    return ctx.reply("Bạn không có đơn hàng nào đang chờ để hủy.");
+  }
+  try {
+    await OrderService.cancelOrder(activeOrder.id, customer.id, "CUSTOMER", "Khách hàng tự hủy qua bot");
+    await ctx.reply(`✅ Đã hủy đơn hàng <code>${activeOrder.id}</code> thành công.`, { parse_mode: "HTML" });
+  } catch (err: any) {
+    await ctx.reply(`❌ Không thể hủy đơn: ${err.message}`);
+  }
 });
 
 // /bank command
@@ -235,7 +252,7 @@ customerHandler.callbackQuery(/^(?:customer:quote:confirm:|confirm_quote:)(.+)$/
       `🆕 <b>ĐƠN HÀNG MỚI ĐƯỢC TẠO:</b> <code>${order.id}</code>\n` +
         `• Khách: <code>${customer.id}</code>\n` +
         `• Đổi: <b>${order.sourceAmount} ${order.sourceCurrency}</b> ➔ <b>${order.targetAmount} ${order.targetCurrency}</b>\n` +
-        `• Đang chờ khách thanh toán.`,
+        `• Trạng thái: <code>WAITING_PAYMENT</code>`,
       { parse_mode: "HTML" }
     );
   } catch (err: any) {
@@ -265,7 +282,6 @@ export async function handleCustomerTextMessage(ctx: BotContext, text: string) {
     // In HUMAN mode, CSKH takes over; customer AI stops automatic replies
     logger.info({ customerId: customer.id }, "Conversation in HUMAN mode; AI reply paused");
 
-    // Forward message notification to assigned CSKH staff member if assigned
     if (conv.claimedById) {
       await sendToStaff(
         conv.claimedById,
@@ -317,48 +333,102 @@ export async function handleCustomerTextMessage(ctx: BotContext, text: string) {
   );
 }
 
-// Customer photo handler (bill upload)
+// Customer photo or document handler (bill upload)
 export async function handleCustomerPhoto(ctx: BotContext) {
   const telegramId = String(ctx.from?.id || "");
   const customer = await CustomerService.getOrCreateCustomer({ telegramId });
 
-  // Check for pending order
-  const pendingOrders = await OrderService.getOrdersByStatus("PENDING_PAYMENT");
-  const customerOrder = pendingOrders.find((o: any) => o.customerId === customer.id);
+  // Look for latest active order for customer
+  const customerOrder = await OrderService.getLatestActiveOrderForCustomer(customer.id);
 
   if (!customerOrder) {
     return ctx.reply("Không tìm thấy đơn hàng đang chờ thanh toán. Vui lòng tạo đơn trước khi gửi biên lai.");
   }
 
   try {
-    const photo = ctx.message?.photo?.pop();
-    if (!photo) return;
+    let fileId: string | undefined;
+    let fileName = `bill_${customerOrder.id}.jpg`;
+    let mimeType = "image/jpeg";
 
-    const file = await ctx.api.getFile(photo.file_id);
+    if (ctx.message?.photo && ctx.message.photo.length > 0) {
+      const photos = ctx.message.photo;
+      const photo = photos[photos.length - 1];
+      if (photo) fileId = photo.file_id;
+    } else if (ctx.message?.document) {
+      fileId = ctx.message.document.file_id;
+      fileName = ctx.message.document.file_name || fileName;
+      mimeType = ctx.message.document.mime_type || mimeType;
+    }
+
+    if (!fileId) return;
+
+    const file = await ctx.api.getFile(fileId);
     const botToken = env.TELEGRAM_BOT_TOKEN;
     const url = `https://api.telegram.org/file/bot${botToken}/${file.file_path}`;
     const res = await fetch(url);
     const buffer = Buffer.from(await res.arrayBuffer());
 
-    await OrderService.submitCustomerBill(customerOrder.id, buffer, `bill_${customerOrder.id}.jpg`, "image/jpeg");
-
-    await ctx.reply(
-      `✅ <b>Đã nhận được biên lai thanh toán cho đơn ${customerOrder.id}.</b>\n\n` +
-        `🔒 Theo quy định tài chính an toàn, Admin sẽ trực tiếp kiểm tra biến động tài khoản và xác nhận trong giây lát. Xin cảm ơn quý khách!`,
-      { parse_mode: "HTML" }
+    const result: any = await OrderService.submitCustomerBill(
+      customerOrder.id,
+      buffer,
+      fileName,
+      mimeType,
+      telegramId
     );
 
-    // Notify admins
-    await sendToAdminNotificationChat(
-      `📸 <b>BIÊN LAI MỚI CHO ĐƠN ${customerOrder.id}</b>\n` +
-        `• Khách hàng: <code>${customer.id}</code>\n` +
-        `• Cần nhận: <b>${customerOrder.sourceAmount} ${customerOrder.sourceCurrency}</b>\n` +
-        `Admin hãy kiểm tra tài khoản ngân hàng thực tế và xác nhận đơn.`,
-      {
-        parse_mode: "HTML",
-        reply_markup: new InlineKeyboard().text("🔍 Duyệt tiền nạp", `admin:pay:step1:${customerOrder.id}`)
-      }
-    );
+    if (result.status === "SUSPICIOUS") {
+      await ctx.reply(
+        `⚠️ <b>Hệ thống phát hiện biên lai có dấu hiệu cần kiểm tra thêm.</b>\n` +
+          `Đơn hàng <code>${customerOrder.id}</code> đã được chuyển sang chế độ bảo mật để quản trị viên kiểm tra trực tiếp.`,
+        { parse_mode: "HTML" }
+      );
+
+      await sendToAdminNotificationChat(
+        `🚨 <b>CẢNH BÁO BẢO MẬT: BIÊN LAI TRÙNG LẶP / BẤT THƯỜNG</b>\n` +
+          `• Mã đơn: <code>${customerOrder.id}</code>\n` +
+          `• Khách hàng: <code>${customer.id}</code> (Telegram: <code>${customer.telegramId}</code>)\n` +
+          `• Cảnh báo: <b>${result.flagReason}</b>\n` +
+          `Admin vui lòng kiểm tra đối soát thủ công!`,
+        {
+          parse_mode: "HTML",
+          reply_markup: new InlineKeyboard().text("🔍 Kiểm tra đơn", `admin:order:detail:${customerOrder.id}`)
+        }
+      );
+    } else if (result.status === "MANUAL_REVIEW") {
+      await ctx.reply(
+        `ℹ️ <b>Đã nhận biên lai bổ sung cho đơn ${customerOrder.id}.</b>\n` +
+          `Đơn hàng đã được ghi nhận đầy đủ bằng chứng và chuyển Admin kiểm duyệt thủ công.`,
+        { parse_mode: "HTML" }
+      );
+
+      await sendToAdminNotificationChat(
+        `⚠️ <b>BIÊN LAI BỔ SUNG: ĐƠN ${customerOrder.id}</b>\n` +
+          `• Khách hàng: <code>${customer.id}</code>\n` +
+          `Đơn đã nạp thêm biên lai, chuyển trạng thái MANUAL_REVIEW.`,
+        {
+          parse_mode: "HTML",
+          reply_markup: new InlineKeyboard().text("🔍 Duyệt tiền nạp", `admin:pay:step1:${customerOrder.id}`)
+        }
+      );
+    } else {
+      await ctx.reply(
+        `✅ <b>Đã nhận được biên lai thanh toán cho đơn ${customerOrder.id}.</b>\n\n` +
+          `🔒 Theo quy định tài chính an toàn, Admin sẽ trực tiếp kiểm tra biến động tài khoản thực tế và xác nhận trong giây lát. Xin cảm ơn quý khách!`,
+        { parse_mode: "HTML" }
+      );
+
+      // Notify admins
+      await sendToAdminNotificationChat(
+        `📸 <b>BIÊN LAI MỚI CHO ĐƠN ${customerOrder.id}</b>\n` +
+          `• Khách hàng: <code>${customer.id}</code>\n` +
+          `• Cần nhận: <b>${customerOrder.sourceAmount} ${customerOrder.sourceCurrency}</b>\n` +
+          `Admin hãy kiểm tra tài khoản ngân hàng thực tế và xác nhận đơn.`,
+        {
+          parse_mode: "HTML",
+          reply_markup: new InlineKeyboard().text("🔍 Duyệt tiền nạp", `admin:pay:step1:${customerOrder.id}`)
+        }
+      );
+    }
   } catch (err: any) {
     logger.error({ err }, "Error processing customer bill");
     await ctx.reply(`❌ Có lỗi khi nhận biên lai: ${err.message}`);

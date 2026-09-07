@@ -2,17 +2,21 @@ import { prisma } from "../../database/client.js";
 import { logger } from "../../shared/logger.js";
 
 export class AuditService {
-  static async log(data: {
-    actorId: string;
-    actorRole: string;
-    action: string;
-    targetType: string;
-    targetId: string;
-    details?: any;
-  }) {
+  static async log(
+    data: {
+      actorId: string;
+      actorRole: string;
+      action: string;
+      targetType: string;
+      targetId: string;
+      details?: any;
+    },
+    tx?: any
+  ) {
     logger.info(data, `[AUDIT] ${data.actorRole} ${data.actorId} executed ${data.action} on ${data.targetType} ${data.targetId}`);
     try {
-      return await prisma.auditLog.create({
+      const client = tx || prisma;
+      return await client.auditLog.create({
         data: {
           actorId: data.actorId,
           actorRole: data.actorRole,
@@ -26,6 +30,20 @@ export class AuditService {
       logger.error({ err }, "Failed to write audit log");
       return null;
     }
+  }
+
+  static async record(
+    data: {
+      actorId: string;
+      actorRole: string;
+      action: string;
+      targetType: string;
+      targetId: string;
+      details?: any;
+    },
+    tx?: any
+  ) {
+    return this.log(data, tx);
   }
 
   static async getLogs(targetType?: string, limit: number = 50) {

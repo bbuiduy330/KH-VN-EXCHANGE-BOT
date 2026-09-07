@@ -7,12 +7,17 @@ generator client {
 }
 
 enum OrderStatus {
-  PENDING_PAYMENT
+  WAITING_PAYMENT
+  CUSTOMER_SENT_BILL
+  WAITING_ADMIN_VERIFY
   PAYMENT_CONFIRMED
   WAITING_PAYOUT
   PAYOUT_SENT
   COMPLETED
   CANCELLED
+  PAYMENT_MISMATCH
+  MANUAL_REVIEW
+  SUSPICIOUS
 }
 
 enum ConversationMode {
@@ -33,32 +38,53 @@ enum StaffStatus {
 }
 
 model ExchangeRate {
-  id           String   @id @default(cuid())
-  pair         String   @unique
-  baseRate     Decimal  @db.Decimal(18, 6)
-  buyMargin    Decimal  @db.Decimal(18, 6)
-  sellMargin   Decimal  @db.Decimal(18, 6)
-  fee          Decimal  @db.Decimal(18, 6)
-  feeCurrency  String
-  updatedBy    String
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  id          String   @id @default(cuid())
+  pair        String   @unique
+  baseRate    Decimal  @db.Decimal(18, 6)
+  buyMargin   Decimal  @db.Decimal(18, 6)
+  sellMargin  Decimal  @db.Decimal(18, 6)
+  fee         Decimal  @db.Decimal(18, 6)
+  feeCurrency String
+  updatedBy   String
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
 }
 
 model PaymentAccount {
-  id            String   @id @default(cuid())
+  id            String                  @id @default(cuid())
   currency      String
   bankName      String
   accountName   String
   accountNumber String
-  tag           String   @default("default")
+  tag           String                  @default("default")
   qrFileId      String?
   qrFilePath    String?
   qrSha256      String?
-  qrVersion     Int      @default(1)
-  isActive      Boolean  @default(true)
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
+  qrVersion     Int                     @default(1)
+  isDefault     Boolean                 @default(false)
+  priority      Int                     @default(0)
+  isActive      Boolean                 @default(true)
+  createdAt     DateTime                @default(now())
+  updatedAt     DateTime                @updatedAt
+  versions      PaymentAccountVersion[]
+
+  @@index([currency, isActive])
+  @@index([isDefault])
+}
+
+model PaymentAccountVersion {
+  id               String         @id @default(cuid())
+  paymentAccountId String
+  paymentAccount   PaymentAccount @relation(fields: [paymentAccountId], references: [id], onDelete: Cascade)
+  version          Int
+  qrFileId         String
+  qrFilePath       String
+  qrSha256         String
+  createdBy        String
+  createdAt        DateTime       @default(now())
+
+  @@unique([paymentAccountId, version])
+  @@index([paymentAccountId])
 }
 
 model Customer {
@@ -89,34 +115,69 @@ model CustomerPayoutBank {
 }
 
 model Order {
-  id                        String      @id @default(cuid())
-  customerId                String
-  customer                  Customer    @relation(fields: [customerId], references: [id])
-  sourceCurrency            String
-  targetCurrency            String
-  sourceAmount              Decimal     @db.Decimal(18, 6)
-  targetAmount              Decimal     @db.Decimal(18, 6)
-  rate                      Decimal     @db.Decimal(18, 6)
-  fee                       Decimal     @db.Decimal(18, 6)
-  feeCurrency               String
-  receivingAccountId        String?
-  receivingAccountSnapshot  Json?
-  payoutBankSnapshot        Json?
-  status                    OrderStatus @default(PENDING_PAYMENT)
-  customerBillFileId        String?
-  customerBillSha256        String?
-  aiExtractedData           Json?
-  payoutBillFileId          String?
-  payoutBillSha256          String?
-  verifiedByAdminId         String?
-  verifiedAt                DateTime?
-  payoutByAdminId           String?
-  payoutAt                  DateTime?
-  completedAt               DateTime?
-  driveFolderId             String?
-  driveArchiveStatus        String?     @default("PENDING")
-  createdAt                 DateTime    @default(now())
-  updatedAt                 DateTime    @updatedAt
+  id                       String              @id @default(cuid())
+  customerId               String
+  customer                 Customer            @relation(fields: [customerId], references: [id])
+  sourceCurrency           String
+  targetCurrency           String
+  sourceAmount             Decimal             @db.Decimal(18, 6)
+  targetAmount             Decimal             @db.Decimal(18, 6)
+  rate                     Decimal             @db.Decimal(18, 6)
+  fee                      Decimal             @db.Decimal(18, 6)
+  feeCurrency              String
+  receivingAccountId       String?
+  receivingAccountSnapshot Json?
+  payoutBankSnapshot       Json?
+  status                   OrderStatus         @default(WAITING_PAYMENT)
+  customerBillFileId       String?
+  customerBillSha256       String?
+  aiExtractedData          Json?
+  payoutBillFileId         String?
+  payoutBillSha256         String?
+  verifiedByAdminId        String?
+  verifiedAt               DateTime?
+  payoutByAdminId          String?
+  payoutAt                 DateTime?
+  completedAt              DateTime?
+  driveFolderId            String?
+  driveArchiveStatus       String?             @default("PENDING")
+  createdAt                DateTime            @default(now())
+  updatedAt                DateTime            @updatedAt
+  stateHistories           OrderStateHistory[]
+  bills                    OrderBillEvidence[]
+
+  @@index([status])
+  @@index([customerId])
+}
+
+model OrderStateHistory {
+  id         String      @id @default(cuid())
+  orderId    String
+  order      Order       @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  fromStatus OrderStatus
+  toStatus   OrderStatus
+  actorId    String
+  actorRole  String
+  reason     String?
+  metadata   Json?
+  createdAt  DateTime    @default(now())
+
+  @@index([orderId])
+}
+
+model OrderBillEvidence {
+  id         String   @id @default(cuid())
+  orderId    String
+  order      Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  fileId     String
+  filePath   String
+  sha256     String
+  extracted  Json?
+  uploadedBy String
+  createdAt  DateTime @default(now())
+
+  @@index([orderId])
+  @@index([sha256])
 }
 
 model Conversation {
@@ -177,16 +238,18 @@ model AuditLog {
 }
 
 model FileEvidence {
-  id               String   @id @default(cuid())
-  fileName         String
-  filePath         String
-  fileType         String
-  fileSize         Int
-  mimeType         String
-  sha256           String
-  driveFileId      String?
-  driveSyncStatus  String   @default("PENDING")
-  createdAt        DateTime @default(now())
+  id              String   @id @default(cuid())
+  fileName        String
+  filePath        String
+  fileType        String
+  fileSize        Int
+  mimeType        String
+  sha256          String
+  driveFileId     String?
+  driveSyncStatus String   @default("PENDING")
+  createdAt       DateTime @default(now())
+
+  @@index([sha256])
 }
 
 model StaffInvite {
@@ -196,7 +259,7 @@ model StaffInvite {
   createdBy           String
   claimedByTelegramId String?
   claimedByName       String?
-  status              String    @default("PENDING") // PENDING, CLAIMED_PENDING_APPROVAL, APPROVED, REJECTED, EXPIRED
+  status              String    @default("PENDING")
   expiresAt           DateTime
   createdAt           DateTime  @default(now())
   updatedAt           DateTime  @updatedAt
@@ -205,9 +268,9 @@ model StaffInvite {
 model DriveSyncJob {
   id             String    @id @default(cuid())
   orderId        String?
-  jobType        String    // ORDER_METADATA, CUSTOMER_BILL, PAYOUT_BILL, QR_CODE, CONVERSATION, AUDIT
+  jobType        String
   fileEvidenceId String?
-  status         String    @default("PENDING") // PENDING, PROCESSING, SUCCESS, FAILED
+  status         String    @default("PENDING")
   attempts       Int       @default(0)
   maxAttempts    Int       @default(5)
   lastError      String?
@@ -217,4 +280,6 @@ model DriveSyncJob {
   payload        Json?
   createdAt      DateTime  @default(now())
   updatedAt      DateTime  @updatedAt
+
+  @@index([status])
 }
