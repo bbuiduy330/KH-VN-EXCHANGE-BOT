@@ -1,0 +1,6 @@
+{
+  "name": "KH-VN Exchange Bot",
+  "description": "Telegram-first currency exchange operations bot for USD/VND/KHR with Admin, CSKH, AI assistance and audit trail.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

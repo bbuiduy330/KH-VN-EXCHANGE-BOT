@@ -1,0 +1,220 @@
+datasource db {
+  provider = "postgresql"
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+enum OrderStatus {
+  PENDING_PAYMENT
+  PAYMENT_CONFIRMED
+  WAITING_PAYOUT
+  PAYOUT_SENT
+  COMPLETED
+  CANCELLED
+}
+
+enum ConversationMode {
+  AUTO
+  HUMAN
+}
+
+enum StaffRole {
+  SUPER_ADMIN
+  ADMIN
+  CSKH
+}
+
+enum StaffStatus {
+  PENDING
+  ACTIVE
+  DISABLED
+}
+
+model ExchangeRate {
+  id           String   @id @default(cuid())
+  pair         String   @unique
+  baseRate     Decimal  @db.Decimal(18, 6)
+  buyMargin    Decimal  @db.Decimal(18, 6)
+  sellMargin   Decimal  @db.Decimal(18, 6)
+  fee          Decimal  @db.Decimal(18, 6)
+  feeCurrency  String
+  updatedBy    String
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+}
+
+model PaymentAccount {
+  id            String   @id @default(cuid())
+  currency      String
+  bankName      String
+  accountName   String
+  accountNumber String
+  tag           String   @default("default")
+  qrFileId      String?
+  qrFilePath    String?
+  qrSha256      String?
+  qrVersion     Int      @default(1)
+  isActive      Boolean  @default(true)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+}
+
+model Customer {
+  id           String               @id @default(cuid())
+  telegramId   String               @unique
+  username     String?
+  fullName     String?
+  phone        String?
+  language     String               @default("vi")
+  createdAt    DateTime             @default(now())
+  updatedAt    DateTime             @updatedAt
+  payoutBanks  CustomerPayoutBank[]
+  orders       Order[]
+  conversation Conversation?
+}
+
+model CustomerPayoutBank {
+  id            String   @id @default(cuid())
+  customerId    String
+  customer      Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  currency      String
+  bankName      String
+  accountName   String
+  accountNumber String
+  isDefault     Boolean  @default(true)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+}
+
+model Order {
+  id                        String      @id @default(cuid())
+  customerId                String
+  customer                  Customer    @relation(fields: [customerId], references: [id])
+  sourceCurrency            String
+  targetCurrency            String
+  sourceAmount              Decimal     @db.Decimal(18, 6)
+  targetAmount              Decimal     @db.Decimal(18, 6)
+  rate                      Decimal     @db.Decimal(18, 6)
+  fee                       Decimal     @db.Decimal(18, 6)
+  feeCurrency               String
+  receivingAccountId        String?
+  receivingAccountSnapshot  Json?
+  payoutBankSnapshot        Json?
+  status                    OrderStatus @default(PENDING_PAYMENT)
+  customerBillFileId        String?
+  customerBillSha256        String?
+  aiExtractedData           Json?
+  payoutBillFileId          String?
+  payoutBillSha256          String?
+  verifiedByAdminId         String?
+  verifiedAt                DateTime?
+  payoutByAdminId           String?
+  payoutAt                  DateTime?
+  completedAt               DateTime?
+  driveFolderId             String?
+  driveArchiveStatus        String?     @default("PENDING")
+  createdAt                 DateTime    @default(now())
+  updatedAt                 DateTime    @updatedAt
+}
+
+model Conversation {
+  id          String           @id @default(cuid())
+  customerId  String           @unique
+  customer    Customer         @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  mode        ConversationMode @default(AUTO)
+  claimedById String?
+  claimedAt   DateTime?
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+  messages    Message[]
+  notes       InternalNote[]
+}
+
+model Message {
+  id                  String       @id @default(cuid())
+  conversationId      String
+  conversation        Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  senderType          String
+  senderId            String?
+  content             String
+  originalAudioFileId String?
+  originalAudioSha256 String?
+  translatedContent   String?
+  createdAt           DateTime     @default(now())
+}
+
+model InternalNote {
+  id             String       @id @default(cuid())
+  conversationId String
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  authorId       String
+  content        String
+  createdAt      DateTime     @default(now())
+}
+
+model StaffUser {
+  id          String      @id @default(cuid())
+  telegramId  String      @unique
+  name        String
+  role        StaffRole   @default(CSKH)
+  status      StaffStatus @default(PENDING)
+  permissions String[]    @default([])
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+}
+
+model AuditLog {
+  id         String   @id @default(cuid())
+  actorId    String
+  actorRole  String
+  action     String
+  targetType String
+  targetId   String
+  details    Json?
+  createdAt  DateTime @default(now())
+}
+
+model FileEvidence {
+  id               String   @id @default(cuid())
+  fileName         String
+  filePath         String
+  fileType         String
+  fileSize         Int
+  mimeType         String
+  sha256           String
+  driveFileId      String?
+  driveSyncStatus  String   @default("PENDING")
+  createdAt        DateTime @default(now())
+}
+
+model StaffInvite {
+  id                  String    @id @default(cuid())
+  code                String    @unique
+  role                StaffRole @default(CSKH)
+  createdBy           String
+  claimedByTelegramId String?
+  claimedByName       String?
+  status              String    @default("PENDING") // PENDING, CLAIMED_PENDING_APPROVAL, APPROVED, REJECTED, EXPIRED
+  expiresAt           DateTime
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+}
+
+model DriveSyncJob {
+  id             String    @id @default(cuid())
+  orderId        String?
+  jobType        String    // ORDER_METADATA, CUSTOMER_BILL, PAYOUT_BILL, QR_CODE, CONVERSATION, AUDIT
+  fileEvidenceId String?
+  status         String    @default("PENDING") // PENDING, PROCESSING, SUCCESS, FAILED
+  attempts       Int       @default(0)
+  maxAttempts    Int       @default(5)
+  lastError      String?
+  nextRetryAt    DateTime?
+  driveFileId    String?
+  driveFolderId  String?
+  payload        Json?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+}
