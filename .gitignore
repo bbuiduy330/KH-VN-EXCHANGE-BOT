@@ -10,3 +10,12 @@ coverage/
 .vscode/
 .idea/
 backups/
+
+data/
+.restic-password
+secrets/
+*.pem
+*.key
+
+__pycache__/
+*.pyc
