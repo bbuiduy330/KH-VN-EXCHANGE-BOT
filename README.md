@@ -1,6 +1,6 @@
 # KH-VN Exchange Bot V1
 
-Telegram-first MVP for a manual-approval currency exchange workflow (USD/VND/KHR) built on Node.js + TypeScript, PostgreSQL, Prisma, and Google Drive archival.
+Telegram-first MVP for a manual-approval currency exchange workflow (USD/VND/KHR) built on Node.js + TypeScript, PostgreSQL, Prisma, Local VPS Evidence Storage, and Encrypted Restic Backups.
 
 ## Target Architecture
 
@@ -24,11 +24,20 @@ The application runs **ONE Unified Telegram Bot** with Role-Based and Permission
         ┌────────────────┼────────────────┐
         ▼                ▼                ▼
    Conversation         Order          Audit
-        │
-        ▼
-   PostgreSQL
-        │
-        └──── Google Drive Archive
+        │                 │               │
+        ▼                 ▼               ▼
+   PostgreSQL ◄──── (Source of Truth)
+                          │
+                          ▼
+             VPS Local File Storage
+             /data/KH-VN-EXCHANGE/
+             (YYYY/MM/ORDER-ID/)
+                          │
+                          ▼
+             Encrypted Backup Engine
+             (restic + pg_dump)
+             ├── Local: /backup/restic-repo
+             └── SFTP:  sftp:user@host:/srv/restic-repo
 ```
 
 ### Roles & Access Resolution
@@ -46,16 +55,16 @@ Staff permissions are granularly checked on every sensitive backend action (e.g.
 1. **AI Never Confirms Money**: AI assists with quotes, intent recognition, translation, and transcription, but cannot verify payment arrival or approve payouts.
 2. **Two-Step Payment Confirmation**: Verifying incoming customer payments requires explicit two-step confirmation by an authorized Admin after checking the physical bank application.
 3. **Manual Payout Only**: Payouts require an authorized Admin to transfer funds, upload the payout receipt, and confirm completion.
-4. **Evidence Immutability**: All original QR codes, customer receipts, payout receipts, voice recordings, and conversation exports are hashed with SHA-256 and archived to Google Drive asynchronously.
+4. **Evidence Immutability**: All original QR codes, customer receipts, payout receipts, voice recordings, and conversation exports are hashed with SHA-256 and preserved permanently in local storage without overwriting historical originals.
 
 ## Requirements
 
 - Node.js 22+
 - Docker & Docker Compose (recommended for Ubuntu VPS)
 - One Telegram Bot token from @BotFather
-- PostgreSQL (included via Docker Compose)
+- PostgreSQL 17 (included via Docker Compose)
+- Restic backup utility (`sudo apt install restic`)
 - Gemini API key (optional for fallback regex; required for AI exchange parsing, multilingual translation & voice transcription)
-- Google Service Account (optional for Google Drive evidence archiving)
 
 ## Environment Configuration
 
@@ -64,7 +73,6 @@ Create a `.env` file from `.env.example`:
 ```env
 NODE_ENV=production
 PORT=3000
-DATA_DIR=./data
 
 # Unified Telegram Bot Token
 TELEGRAM_BOT_TOKEN=123456:ABC-DEF...
@@ -76,6 +84,18 @@ ADMIN_NOTIFICATION_CHAT_ID=-100123456789
 # Database
 DATABASE_URL=postgresql://exchange:exchange_change_me@postgres:5432/exchange?schema=public
 
+# Local VPS Storage Root
+STORAGE_ROOT=/data/KH-VN-EXCHANGE
+DATA_DIR=/data/KH-VN-EXCHANGE
+
+# Encrypted Restic Backup
+BACKUP_ENABLED=true
+RESTIC_REPOSITORY=/backup/restic-repo
+# Or remote SFTP target:
+# RESTIC_REPOSITORY=sftp:backupuser@backup-vps.internal:/srv/restic-repo
+RESTIC_PASSWORD_FILE=/opt/kh-vn-exchange-bot/.restic-password
+BACKUP_SCHEDULE=0 */6 * * *
+
 # Exchange & Quote Config
 BASE_FEE_USD=2
 QUOTE_EXPIRY_MINUTES=15
@@ -85,65 +105,135 @@ TIMEZONE=Asia/Phnom_Penh
 GEMINI_API_KEY=
 GEMINI_TEXT_MODEL=gemini-2.5-flash
 GEMINI_TRANSCRIBE_MODEL=gemini-2.5-flash
-
-# Google Drive Storage & Archival (Personal Google Drive OAuth 2.0)
-GOOGLE_DRIVE_CLIENT_ID=
-GOOGLE_DRIVE_CLIENT_SECRET=
-GOOGLE_DRIVE_REFRESH_TOKEN=
-GOOGLE_DRIVE_ROOT_FOLDER_ID=
-# Optional for development mock:
-# GOOGLE_DRIVE_MOCK=false
 ```
 
-## Google Drive OAuth 2.0 Setup (Personal Account)
+---
 
-The archive engine uses **OAuth 2.0 User Authentication** for a personal Google Drive account (My Drive). This replaces legacy Service Accounts, eliminating personal Google Drive storage quota limitations (`403 storageQuotaExceeded`).
+## Local VPS Evidence Storage Architecture
 
-### 1. Create Google Cloud OAuth Credentials
-1. Open the [Google Cloud Console](https://console.cloud.google.com).
-2. Create or select a project, then navigate to **APIs & Services > Library**.
-3. Search for and enable the **Google Drive API**.
-4. Configure **OAuth consent screen**:
-   - User Type: **External**.
-   - Fill in app name (e.g., `KH-VN Bot Archive`) and your developer email.
-   - Under **Test users**, add your personal Google account (e.g. `yourname@gmail.com`).
-5. Go to **APIs & Services > Credentials > Create Credentials > OAuth client ID**:
-   - Application type: **Web application** (or **Desktop app**).
-   - Name: `KH-VN Drive Sync`.
-   - **Authorized redirect URIs**: Add `http://localhost:3000/oauth2callback` and `http://localhost`.
-6. Copy the **Client ID** and **Client Secret**.
+All evidence files, payment instructions, customer and payout receipts, voice messages, conversation logs, and audit trails are persisted locally on the VPS under a configurable `STORAGE_ROOT` (`/data/KH-VN-EXCHANGE`).
 
-### 2. Prepare Root Folder in Personal Drive
-1. Open your personal Google Drive in your browser.
-2. Create a new root folder (e.g., `KH_VN_EXCHANGE_EVIDENCE`).
-3. Open the folder and copy its ID from the browser URL:
-   `https://drive.google.com/drive/folders/<GOOGLE_DRIVE_ROOT_FOLDER_ID>`
-4. Add `GOOGLE_DRIVE_ROOT_FOLDER_ID` to your `.env` file.
+### Order Folder Hierarchy
 
-### 3. Generate the Initial Refresh Token
-Run the built-in helper script on your machine:
+For every order, an idempotent directory structure is maintained:
+
+```text
+/data/KH-VN-EXCHANGE/
+└── 2026/
+    └── 09/
+        └── ORD-MTRH31MM-7GKV/
+            ├── payment_instruction/
+            │   └── payment_qr_v1_USD.jpg
+            ├── customer_bill/
+            │   └── 1788799580158_71e51db395.jpg
+            ├── payout_bill/
+            │   └── 1788799590450_98ab71cf23.jpg
+            ├── voice/
+            ├── images/
+            ├── documents/
+            ├── order.json
+            ├── customer.json
+            ├── conversation.json
+            ├── conversation.txt
+            └── audit.json
+```
+
+### Safe Path Validation & Security
+
+- **Path Traversal Prevention**: Every incoming path is validated against `STORAGE_ROOT`. Relative path escapes (`../`, `..\`, null bytes `\0`) are strictly rejected with an exception.
+- **Original File Preservation**: Evidence files are named with `${timestamp}_${sha256_prefix}.${ext}` and given restricted permissions (`0600`). Originals are never overwritten.
+- **Full Metadata Synchronization**:
+  - `order.json`: Complete snapshot of currency pair, exchange rate, amounts, status transitions, and admin verifiers.
+  - `customer.json`: Customer Telegram ID, username, and registration details.
+  - `conversation.txt`: Formatted chronological chat transcript with clear tags (`CUSTOMER`, `AI`, `BOT`, `CSKH`, `ADMIN`, `SYSTEM`, and `INTERNAL NOTE`).
+  - `conversation.json`: Raw messages and notes payload.
+  - `audit.json`: Complete timeline of security and state transition audit logs for the order.
+
+---
+
+## Encrypted Backups with Restic
+
+Backups are executed independently from the Telegram bot via shell scripts using `restic` with authenticated AES-256 encryption.
+
+### 1. Initialize Restic Repository
+
+Create a secure password file (permission `600`):
 ```bash
-npm run auth:drive
+openssl rand -base64 32 > .restic-password
+chmod 600 .restic-password
 ```
-1. Paste your `Client ID`, `Client Secret`, and Redirect URI when prompted (or have them in `.env`).
-2. Open the printed authorization URL in your browser and sign in with your personal Google account.
-3. Approve access to Google Drive.
-4. Copy the authorization code from the redirect URL address bar and paste it back into the terminal.
-5. The script exchanges the code and prints your `GOOGLE_DRIVE_REFRESH_TOKEN`.
-6. Add this token to your production/VPS `.env` file.
 
-> **Scope Justification:** The bot requests `https://www.googleapis.com/auth/drive` because it must search for and organize subfolders (`YYYY/MM/ORDER-ID/`) inside the pre-existing root folder (`GOOGLE_DRIVE_ROOT_FOLDER_ID`) created by the user. The narrower `drive.file` scope only grants access to files created directly by the client and cannot write to pre-existing personal Drive folders.
+Initialize local or SFTP repository:
+```bash
+./scripts/init-restic.sh
+```
 
-### 4. Headless VPS Execution
-- The VPS runs 100% headless using `GOOGLE_DRIVE_CLIENT_ID`, `GOOGLE_DRIVE_CLIENT_SECRET`, and `GOOGLE_DRIVE_REFRESH_TOKEN`.
-- The Google OAuth2 client automatically refreshes short-lived access tokens in the background without any browser interaction.
-- In `NODE_ENV=production`: Missing credentials will mark the integration as `NOT CONFIGURED` and safely fail sync jobs for retry with admin alerts, never producing fake success or mock IDs, and never interrupting customer financial transactions.
+### 2. Manual Backup Execution
+
+```bash
+./scripts/backup-storage.sh
+```
+
+What `backup-storage.sh` does:
+1. Performs a compressed database dump (`pg_dump ... | gzip -9`) to `/data/KH-VN-EXCHANGE/_backup/db/`.
+2. Automatically clears any stale repository locks (`restic unlock --remove-all`).
+3. Runs `restic backup /data/KH-VN-EXCHANGE` with tags `evidence`, `database`, and `kh-vn-exchange`.
+4. Enforces the snapshot retention policy:
+   - **Keep 24 hourly snapshots**
+   - **Keep 7 daily snapshots**
+   - **Keep 4 weekly snapshots**
+   - Runs `restic prune` to reclaim space.
+5. Fails safely without halting the bot or web server.
+
+### 3. Automated Backup (Every 6 Hours)
+
+Configure the automated cron job:
+```bash
+./scripts/setup-backup-cron.sh
+```
+Or create an Ubuntu `systemd` service and timer (`kh-vn-backup.timer`) as detailed in `scripts/setup-backup-cron.sh`.
+
+### 4. Disaster Recovery & Restore
+
+List available snapshots:
+```bash
+./scripts/restore-storage.sh list
+```
+
+Restore the latest snapshot to the storage directory:
+```bash
+./scripts/restore-storage.sh restore latest /data/KH-VN-EXCHANGE
+```
+
+Restore database from the restored dump:
+```bash
+gunzip -c /data/KH-VN-EXCHANGE/_backup/db/db_dump_latest.sql.gz | docker compose exec -T postgres psql -U exchange -d exchange
+```
+
+---
+
+## Remote SFTP Backup Target (Optional)
+
+To stream encrypted backups directly to an off-site VPS over SFTP:
+
+1. Setup an SSH key for the backup user:
+   ```bash
+   ssh-keygen -t ed25519 -f ~/.ssh/id_restic_backup -N ""
+   ssh-copy-id -i ~/.ssh/id_restic_backup.pub backupuser@remote-vps.com
+   ```
+2. In `.env`:
+   ```env
+   RESTIC_REPOSITORY=sftp:backupuser@remote-vps.com:/srv/restic-repo
+   RESTIC_PASSWORD_FILE=/opt/kh-vn-exchange-bot/.restic-password
+   ```
+3. Run `./scripts/init-restic.sh` to initialize the remote repository.
+
+---
 
 ## Setup & Local Development
 
 ```bash
 cp .env.example .env
-# edit .env
 npm install
 npm run prisma:generate
 npm run prisma:validate
@@ -153,101 +243,81 @@ npm run build
 ```
 
 For local development with PostgreSQL:
-
 ```bash
 npx prisma db push
 npm run prisma:seed
 npm run dev
 ```
 
-## How It Works
+---
 
-### 1. Customer Experience
-Customers interact with the bot in a single chat thread from start to finish:
-1. Send `/start` to view the **Customer Menu** (`💱 Đổi tiền`, `📦 Đơn của tôi`, `💬 Hỗ trợ`, `🏦 Tài khoản nhận tiền`).
-2. Configure recipient account: `/bank VND|Vietcombank|NGUYEN VAN A|123456789`.
-3. Request exchange rate: e.g., *"đổi 1000 USD sang VND"* or via voice note.
-4. Confirm instant quote to create an order.
-5. Receive receiving account details + payment QR image.
-6. Transfer money and upload photo of bank receipt into the chat.
-7. Receive real-time status updates as Admin confirms payment arrival and payout completion.
-
-### 2. CSKH Workspace
-Staff members with `CSKH` role see the **CSKH Menu** upon `/start`:
-- `/tickets`: View active tickets and pending customer conversations.
-- `/claim <ID_Khách>`: Take over a conversation, switching mode from `AUTO` to `HUMAN` (AI auto-replies pause).
-- `/release <ID_Khách>`: Return conversation to `AUTO` AI mode.
-- `/msg <ID_Khách> <nội dung>`: Send a message to the customer's private chat via the single bot without revealing staff's personal Telegram username.
-- `/note <ID_Khách> <nội dung>`: Internal-only operational notes (never displayed to customers).
-- `/history <ID_Khách>`: View past message history and internal notes.
-- `/translate <ngôn ngữ> <nội dung>`: Test AI translation before sending messages.
-
-### 3. Admin & Super Admin Dashboard
-Staff members with `ADMIN` or `SUPER_ADMIN` role see the **Admin Menu** upon `/start`:
-- `/pending`: Orders pending payment verification or waiting payout.
-- Two-step payment verification: `pay_step1` ➔ `pay_step2`.
-- Two-step payout completion: Upload bill with caption `/payout <orderId>` ➔ `payout_complete`.
-- `/rates` and `/setrate`: View and update exchange rates (Base rate, margins, and service fees).
-- `/accounts`: View accounts and upload new payment QR codes via photo caption `/addqr CURRENCY|BANK|NAME|NUMBER|TAG`.
-- `/staff`: Comprehensive staff directory, invite generation (24h single-use token), approval queue, and granular permission toggles.
-- `/drive <orderId>`: Inspect Drive sync status and trigger manual sync retry.
-- `/audit`: Review security and operational audit trail.
-
-## Ubuntu VPS Deployment
+## Ubuntu VPS Deployment with Docker Compose
 
 ```bash
 git clone YOUR_REPO_URL
 cd KH-VN-EXCHANGE-BOT
 cp .env.example .env
 nano .env
+
+# Create restic password file
+openssl rand -base64 32 > .restic-password
+chmod 600 .restic-password
+
+# Start containers
 docker compose up -d --build
 docker compose logs -f app
+
+# Initialize restic repo and cron
+./scripts/init-restic.sh
+./scripts/setup-backup-cron.sh
 ```
 
-Health check endpoint:
-```text
-http://YOUR_VPS_IP:3000/health
+### Persistent Docker Volumes
+- `postgres_data`: PostgreSQL database storage (`/var/lib/postgresql/data`)
+- `storage_data`: Local evidence files and metadata (`/data/KH-VN-EXCHANGE`)
+- `backup_data`: Local encrypted Restic repository (`/backup/restic-repo`)
+
+### Health Check Endpoint
+```bash
+curl http://localhost:3000/health
+```
+Response:
+```json
+{
+  "status": "ok",
+  "database": "ok",
+  "storage": {
+    "configured": true,
+    "writable": true
+  },
+  "integrations": {
+    "gemini": true,
+    "telegramBot": true
+  }
+}
 ```
 
-Persistent Docker volumes:
-- `postgres_data`: PostgreSQL database storage
-- `app_data`: Local evidence files and QR codes
-- `backups`: Database dumps and backups
+---
 
-## Project Layout
+## Telegram Bot Operational Commands
 
-```text
-src/
-  bot/
-    handlers/
-      admin-handler.ts
-      cskh-handler.ts
-      customer-handler.ts
-    menus/
-      admin-menu.ts
-      cskh-menu.ts
-      customer-menu.ts
-    middleware/
-      identity.ts
-      permissions.ts
-    index.ts
-    notifications.ts
-    router.ts
-  modules/
-    ai/
-    audit/
-    conversation/
-    customer/
-    drive/
-    files/
-    orders/
-    payment-accounts/
-    permissions/
-    quotes/
-  database/
-  config/
-  shared/
-  server.ts
-prisma/
-tests/
-```
+### Customer Commands
+- `/start`: Open Customer Menu (`💱 Đổi tiền`, `📦 Đơn của tôi`, `💬 Hỗ trợ`, `🏦 Tài khoản`).
+- `/bank <TIỀN_TỆ>|<NGÂN_HÀNG>|<TÊN_CHỦ_TK>|<SỐ_TK>`: Set receiving bank account.
+
+### CSKH Commands
+- `/tickets`: View active tickets & waiting queues.
+- `/claim <ID_Khách>`: Take over ticket (switches to `HUMAN` mode).
+- `/release <ID_Khách>`: Return ticket to `AUTO` AI mode.
+- `/msg <ID_Khách> <Nội dung>`: Reply directly to customer through the bot.
+- `/note <ID_Khách> <Nội dung>`: Add internal operator note.
+- `/history <ID_Khách>`: View conversation history & internal notes.
+
+### Admin & Super Admin Commands
+- `/pending`: View waiting payment confirmations and payouts.
+- `/rates`: View exchange rate table and margins.
+- `/setrate <CẶP> <GIÁ_GỐC> [MARGIN]`: Update exchange rate.
+- `/accounts`: View receiving accounts and bank QR codes.
+- `/staff`: Manage staff members and permissions.
+- `/storage <orderId>`: Inspect order folder on VPS (`order.json`, `customer.json`, `conversation.txt`, `audit.json`, bills, QR).
+- `/audit`: View real-time security audit logs.

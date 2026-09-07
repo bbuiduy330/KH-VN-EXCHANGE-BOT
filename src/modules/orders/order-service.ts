@@ -6,7 +6,7 @@ import { CustomerService } from "../customer/customer-service.js";
 import { FileService } from "../files/file-service.js";
 import { AiProvider } from "../ai/ai-provider.js";
 import { AuditService } from "../audit/audit-service.js";
-import { DriveArchiveService } from "../drive/drive-service.js";
+import { LocalStorageService } from "../storage/local-storage-service.js";
 import { logger } from "../../shared/logger.js";
 
 export class OrderService {
@@ -116,9 +116,13 @@ export class OrderService {
       return created;
     });
 
-    // Enqueue non-blocking Drive archive jobs
-    DriveArchiveService.enqueueSyncJob(order.id, "ORDER_METADATA").catch(() => {});
-    DriveArchiveService.enqueueSyncJob(order.id, "PAYMENT_QR").catch(() => {});
+    // Initialize order folders and archive initial metadata and payment QR locally
+    LocalStorageService.archiveOrderMetadata(order.id).catch((err) => {
+      logger.warn({ err, orderId: order.id }, "Failed to archive initial order metadata");
+    });
+    LocalStorageService.archivePaymentInstructionQr(order.id).catch((err) => {
+      logger.warn({ err, orderId: order.id }, "Failed to archive payment instruction QR");
+    });
 
     return order;
   }
@@ -153,7 +157,8 @@ export class OrderService {
       fileBuffer,
       fileName,
       "CUSTOMER_BILL",
-      mimeType
+      mimeType,
+      orderId
     );
 
     // 2. Fix 8: Check duplicate SHA-256 across all orders
@@ -303,7 +308,8 @@ export class OrderService {
           tx
         );
 
-        DriveArchiveService.enqueueSyncJob(orderId, "CUSTOMER_BILL", evidence.id).catch(() => {});
+        LocalStorageService.archiveCustomerBill(orderId, evidence.id).catch(() => {});
+        LocalStorageService.archiveOrderMetadata(orderId).catch(() => {});
 
         return {
           status: "MANUAL_REVIEW",
@@ -362,7 +368,8 @@ export class OrderService {
         tx
       );
 
-      DriveArchiveService.enqueueSyncJob(orderId, "CUSTOMER_BILL", evidence.id).catch(() => {});
+      LocalStorageService.archiveCustomerBill(orderId, evidence.id).catch(() => {});
+      LocalStorageService.archiveOrderMetadata(orderId).catch(() => {});
 
       return updated;
     });
@@ -454,7 +461,8 @@ export class OrderService {
       fileBuffer,
       fileName,
       "PAYOUT_BILL",
-      mimeType
+      mimeType,
+      orderId
     );
 
     const updated = await prisma.$transaction(async (tx: any) => {
@@ -506,7 +514,8 @@ export class OrderService {
       });
     });
 
-    DriveArchiveService.enqueueSyncJob(orderId, "PAYOUT_BILL", evidence.id).catch(() => {});
+    LocalStorageService.archivePayoutBill(orderId, evidence.id).catch(() => {});
+    LocalStorageService.archiveOrderMetadata(orderId).catch(() => {});
 
     return updated;
   }
@@ -562,10 +571,10 @@ export class OrderService {
       });
     });
 
-    // Enqueue full archive sync upon order completion
-    DriveArchiveService.enqueueSyncJob(orderId, "CONVERSATION").catch(() => {});
-    DriveArchiveService.enqueueSyncJob(orderId, "AUDIT").catch(() => {});
-    DriveArchiveService.enqueueSyncJob(orderId, "FULL_ORDER_ARCHIVE").catch(() => {});
+    // Trigger full order archival to local storage upon completion
+    LocalStorageService.archiveFullOrder(orderId).catch((err) => {
+      logger.warn({ err, orderId }, "Failed to archive full order on completion");
+    });
 
     return updated;
   }
@@ -624,7 +633,9 @@ export class OrderService {
         tx
       );
 
-      return tx.order.findUnique({ where: { id: orderId } });
+      const updated = await tx.order.findUnique({ where: { id: orderId } });
+      LocalStorageService.archiveFullOrder(orderId).catch(() => {});
+      return updated;
     });
   }
 

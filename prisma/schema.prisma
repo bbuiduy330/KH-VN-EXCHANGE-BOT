@@ -139,8 +139,8 @@ model Order {
   payoutByAdminId          String?
   payoutAt                 DateTime?
   completedAt              DateTime?
-  driveFolderId            String?
-  driveArchiveStatus       String?             @default("PENDING")
+  storageFolder            String?
+  archiveStatus            String?             @default("PENDING")
   createdAt                DateTime            @default(now())
   updatedAt                DateTime            @updatedAt
   stateHistories           OrderStateHistory[]
@@ -238,16 +238,15 @@ model AuditLog {
 }
 
 model FileEvidence {
-  id              String   @id @default(cuid())
-  fileName        String
-  filePath        String
-  fileType        String
-  fileSize        Int
-  mimeType        String
-  sha256          String
-  driveFileId     String?
-  driveSyncStatus String   @default("PENDING")
-  createdAt       DateTime @default(now())
+  id                  String   @id @default(cuid())
+  fileName            String
+  filePath            String
+  storageRelativePath String?
+  fileType            String
+  fileSize            Int
+  mimeType            String
+  sha256              String
+  createdAt           DateTime @default(now())
 
   @@index([sha256])
 }
@@ -265,21 +264,16 @@ model StaffInvite {
   updatedAt           DateTime  @updatedAt
 }
 
-model DriveSyncJob {
-  id             String    @id @default(cuid())
-  orderId        String?
-  jobType        String
-  fileEvidenceId String?
-  status         String    @default("PENDING")
-  attempts       Int       @default(0)
-  maxAttempts    Int       @default(5)
-  lastError      String?
-  nextRetryAt    DateTime?
-  driveFileId    String?
-  driveFolderId  String?
-  payload        Json?
-  createdAt      DateTime  @default(now())
-  updatedAt      DateTime  @updatedAt
+model BackupRun {
+  id         String    @id @default(cuid())
+  startedAt  DateTime  @default(now())
+  finishedAt DateTime?
+  status     String    @default("RUNNING")
+  snapshotId String?
+  filesCount Int?
+  error      String?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
 
   @@index([status])
 }

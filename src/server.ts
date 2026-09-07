@@ -1,7 +1,7 @@
 import express from "express";
 import { env } from "./config/env.js";
 import { logger } from "./shared/logger.js";
-import { DriveArchiveService, GoogleDriveService } from "./modules/drive/drive-service.js";
+import { LocalStorageService } from "./modules/storage/local-storage-service.js";
 import { startSingleBot, stopSingleBot } from "./bot/index.js";
 import { prisma } from "./database/client.js";
 
@@ -21,20 +21,18 @@ app.get("/health", async (req, res) => {
     dbStatus = "degraded";
   }
 
-  const driveConfigured = GoogleDriveService.isConfigured();
+  const storageHealth = await LocalStorageService.checkStorageHealth();
 
   res.json({
     status: "ok",
     database: dbStatus,
-    googleDrive: {
-      configured: driveConfigured
+    storage: {
+      configured: storageHealth.configured,
+      writable: storageHealth.writable
     },
     integrations: {
       gemini: Boolean(env.GEMINI_API_KEY),
-      telegramBot: Boolean(env.TELEGRAM_BOT_TOKEN),
-      googleDrive: {
-        configured: driveConfigured
-      }
+      telegramBot: Boolean(env.TELEGRAM_BOT_TOKEN)
     }
   });
 });
@@ -49,11 +47,6 @@ const server = app.listen(PORT, "0.0.0.0", () => {
   startSingleBot().catch((err) => {
     logger.warn({ err }, "Unified Telegram Bot startup error or token missing");
   });
-
-  // Periodic Google Drive Sync (every 60s)
-  setInterval(() => {
-    DriveArchiveService.runPendingJobs().catch(() => {});
-  }, 60000);
 });
 
 // Graceful shutdown handlers
@@ -75,4 +68,4 @@ process.on("SIGINT", async () => {
   });
 });
 
-export default app;
+export { app };

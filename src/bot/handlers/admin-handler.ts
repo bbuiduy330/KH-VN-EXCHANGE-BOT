@@ -6,7 +6,7 @@ import { QuoteService } from "../../modules/quotes/quote-service.js";
 import { PaymentAccountService } from "../../modules/payment-accounts/account-service.js";
 import { OrderService } from "../../modules/orders/order-service.js";
 import { AuditService } from "../../modules/audit/audit-service.js";
-import { DriveArchiveService, GoogleDriveService } from "../../modules/drive/drive-service.js";
+import { LocalStorageService } from "../../modules/storage/local-storage-service.js";
 import { FileService } from "../../modules/files/file-service.js";
 import { env } from "../../config/env.js";
 import { sendToCustomer, sendToAdminNotificationChat } from "../notifications.js";
@@ -210,7 +210,7 @@ adminHandler.command("order", async (ctx) => {
   } else if (order.status === "PAYOUT_SENT") {
     keyboard.text("✅ Hoàn tất đơn", `admin:payout:complete:${order.id}`).row();
   }
-  keyboard.text("📁 Trạng thái Drive", `admin:drive:status:${order.id}`);
+  keyboard.text("📁 Trạng thái lưu trữ VPS", `admin:storage:status:${order.id}`);
 
   await ctx.reply(msg, { parse_mode: "HTML", reply_markup: keyboard });
 });
@@ -764,51 +764,88 @@ adminHandler.command("invite", async (ctx) => {
   await ctx.reply(`✅ Đã kích hoạt nhân sự <b>${name}</b> với vai trò <b>${role}</b>.`, { parse_mode: "HTML" });
 });
 
-// /drive command
-adminHandler.command("drive", async (ctx) => {
+// /storage & /drive commands
+adminHandler.command(["storage", "drive"], async (ctx) => {
   const adminId = String(ctx.from?.id || "");
   const hasPerm =
     (await PermissionService.hasPermission(adminId, "order.view")) ||
     (await PermissionService.hasPermission(adminId, "audit.view"));
-  if (!hasPerm) return ctx.reply("⛔ Bạn không có quyền xem dữ liệu đồng bộ Drive.");
+  if (!hasPerm) return ctx.reply("⛔ Bạn không có quyền xem dữ liệu lưu trữ VPS.");
 
   const orderId = ctx.match?.trim();
-  if (!orderId) return ctx.reply("Cú pháp: <code>/drive &lt;Mã_Đơn_Hàng&gt;</code>", { parse_mode: "HTML" });
+  if (!orderId) return ctx.reply("Cú pháp: <code>/storage &lt;Mã_Đơn_Hàng&gt;</code>", { parse_mode: "HTML" });
 
-  const status = await DriveArchiveService.getOrderArchiveStatus(orderId);
+  const status = await LocalStorageService.getOrderArchiveStatus(orderId);
   if (!status) return ctx.reply(`❌ Không tìm thấy đơn hàng <code>${orderId}</code>.`, { parse_mode: "HTML" });
 
-  const icon = (s: string) => (s === "SUCCESS" ? "✅" : s === "PROCESSING" ? "⏳" : s === "FAILED" ? "⚠️" : s === "N/A" ? "➖" : "⚪");
+  const icon = (s: string) => (s === "SUCCESS" ? "✅" : s === "FAILED" ? "⚠️" : s === "N/A" ? "➖" : "⚪");
 
   const msg =
-    `📁 <b>TRẠNG THÁI GOOGLE DRIVE (Đơn ${orderId}):</b>\n\n` +
-    `• Thư mục Drive: <code>${status.driveFolderId || "Chưa tạo"}</code>\n` +
+    `📁 <b>KHO LƯU TRỮ CHỨNG TỪ VPS (Đơn ${orderId}):</b>\n\n` +
+    `• Thư mục lưu trữ: <code>${status.storageFolder || "Chưa tạo"}</code>\n` +
+    `• Tồn tại trên đĩa: ${status.existsOnDisk ? "✅ Có" : "❌ Chưa"}\n` +
+    `• Tổng số tập tin: <b>${status.filesCount}</b>\n` +
     `• Thông tin đơn hàng (order.json): ${icon(status.metadataStatus)} <b>${status.metadataStatus}</b>\n` +
+    `• Thông tin khách hàng (customer.json): ${icon(status.customerStatus)} <b>${status.customerStatus}</b>\n` +
     `• Mã QR thanh toán: ${icon(status.qrStatus)} <b>${status.qrStatus}</b>\n` +
     `• Biên lai khách chuyển: ${icon(status.customerBillStatus)} <b>${status.customerBillStatus}</b>\n` +
     `• Biên lai chi tiền: ${icon(status.payoutBillStatus)} <b>${status.payoutBillStatus}</b>\n` +
     `• Hội thoại (txt &amp; json): ${icon(status.conversationStatus)} <b>${status.conversationStatus}</b>\n` +
     `• Nhật ký kiểm toán (audit.json): ${icon(status.auditStatus)} <b>${status.auditStatus}</b>`;
 
-  const keyboard = new InlineKeyboard().text("🔄 Thử lại đồng bộ (Retry Drive Sync)", `admin:drive:retry:${orderId}`);
+  const keyboard = new InlineKeyboard().text("🔄 Lưu trữ lại (Archive Now)", `admin:storage:archive:${orderId}`);
   await ctx.reply(msg, { parse_mode: "HTML", reply_markup: keyboard });
 });
 
-// Drive retry callback (supports admin:drive:retry:* and drive_retry:*)
-adminHandler.callbackQuery(/^(?:admin:drive:retry:|drive_retry:)(.+)$/, async (ctx) => {
+// Storage status callback (supports admin:storage:status:* and admin:drive:status:*)
+adminHandler.callbackQuery(/^(?:admin:storage:status:|admin:drive:status:)(.+)$/, async (ctx) => {
   await ctx.answerCallbackQuery();
   const adminId = String(ctx.from?.id || "");
   const hasPerm =
     (await PermissionService.hasPermission(adminId, "order.view")) ||
     (await PermissionService.hasPermission(adminId, "audit.view"));
-  if (!hasPerm) return ctx.reply("⛔ Bạn không có quyền kích hoạt retry đồng bộ Drive.");
+  if (!hasPerm) return ctx.reply("⛔ Bạn không có quyền xem dữ liệu lưu trữ VPS.");
 
   const orderId = String(ctx.match?.[1] || "");
   if (!orderId) return;
 
-  await ctx.reply(`🔄 Đang bắt đầu đồng bộ lại Drive cho đơn <code>${orderId}</code>...`, { parse_mode: "HTML" });
-  const synced = await DriveArchiveService.retryOrderSync(orderId);
-  await ctx.reply(`✅ Hoàn tất lượt đồng bộ lại Drive (${synced} tác vụ đã hoàn tất thành công).`);
+  const status = await LocalStorageService.getOrderArchiveStatus(orderId);
+  if (!status) return ctx.reply(`❌ Không tìm thấy đơn hàng <code>${orderId}</code>.`, { parse_mode: "HTML" });
+
+  const icon = (s: string) => (s === "SUCCESS" ? "✅" : s === "FAILED" ? "⚠️" : s === "N/A" ? "➖" : "⚪");
+
+  const msg =
+    `📁 <b>KHO LƯU TRỮ CHỨNG TỪ VPS (Đơn ${orderId}):</b>\n\n` +
+    `• Thư mục lưu trữ: <code>${status.storageFolder || "Chưa tạo"}</code>\n` +
+    `• Tồn tại trên đĩa: ${status.existsOnDisk ? "✅ Có" : "❌ Chưa"}\n` +
+    `• Tổng số tập tin: <b>${status.filesCount}</b>\n` +
+    `• Thông tin đơn hàng (order.json): ${icon(status.metadataStatus)} <b>${status.metadataStatus}</b>\n` +
+    `• Thông tin khách hàng (customer.json): ${icon(status.customerStatus)} <b>${status.customerStatus}</b>\n` +
+    `• Mã QR thanh toán: ${icon(status.qrStatus)} <b>${status.qrStatus}</b>\n` +
+    `• Biên lai khách chuyển: ${icon(status.customerBillStatus)} <b>${status.customerBillStatus}</b>\n` +
+    `• Biên lai chi tiền: ${icon(status.payoutBillStatus)} <b>${status.payoutBillStatus}</b>\n` +
+    `• Hội thoại (txt &amp; json): ${icon(status.conversationStatus)} <b>${status.conversationStatus}</b>\n` +
+    `• Nhật ký kiểm toán (audit.json): ${icon(status.auditStatus)} <b>${status.auditStatus}</b>`;
+
+  const keyboard = new InlineKeyboard().text("🔄 Lưu trữ lại (Archive Now)", `admin:storage:archive:${orderId}`);
+  await ctx.reply(msg, { parse_mode: "HTML", reply_markup: keyboard });
+});
+
+// Storage archive callback (supports admin:storage:archive:*, admin:drive:retry:*, drive_retry:*)
+adminHandler.callbackQuery(/^(?:admin:storage:archive:|admin:drive:retry:|drive_retry:)(.+)$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const adminId = String(ctx.from?.id || "");
+  const hasPerm =
+    (await PermissionService.hasPermission(adminId, "order.view")) ||
+    (await PermissionService.hasPermission(adminId, "audit.view"));
+  if (!hasPerm) return ctx.reply("⛔ Bạn không có quyền kích hoạt lưu trữ chứng từ.");
+
+  const orderId = String(ctx.match?.[1] || "");
+  if (!orderId) return;
+
+  await ctx.reply(`🔄 Đang lưu trữ toàn bộ dữ liệu đơn hàng <code>${orderId}</code> vào VPS...`, { parse_mode: "HTML" });
+  await LocalStorageService.archiveFullOrder(orderId);
+  await ctx.reply(`✅ Đã hoàn tất lưu trữ chứng từ và nhật ký đơn hàng trên VPS.`);
 });
 
 // /audit command
@@ -982,11 +1019,13 @@ adminHandler.callbackQuery("admin:menu:audit", async (ctx) => {
 
 adminHandler.callbackQuery("admin:menu:system", async (ctx) => {
   await ctx.answerCallbackQuery();
+  const storageHealth = await LocalStorageService.checkStorageHealth();
   const health = {
     status: "ok",
     nodeEnv: env.NODE_ENV,
     timezone: env.TIMEZONE,
-    driveStatus: GoogleDriveService.isConfigured() ? "Đã kết nối OAuth2" : "Chưa cấu hình",
+    storageStatus: storageHealth.writable ? "Hoạt động (Ghi/Đọc OK)" : "Cảnh báo lỗi ghi",
+    backupStatus: env.BACKUP_ENABLED ? "Đã bật (Restic)" : "Chưa kích hoạt",
     gemini: env.GEMINI_API_KEY ? "Hoạt động" : "Chưa cấu hình"
   };
 
@@ -994,7 +1033,8 @@ adminHandler.callbackQuery("admin:menu:system", async (ctx) => {
     `⚙️ <b>TRẠNG THÁI HỆ THỐNG:</b>\n\n` +
       `• Môi trường: <b>${health.nodeEnv}</b>\n` +
       `• Múi giờ: <b>${health.timezone}</b>\n` +
-      `• Google Drive: <b>${health.driveStatus}</b>\n` +
+      `• Lưu trữ cục bộ VPS: <b>${health.storageStatus}</b>\n` +
+      `• Sao lưu mã hóa Restic: <b>${health.backupStatus}</b>\n` +
       `• Trợ lý Gemini AI: <b>${health.gemini}</b>\n` +
       `• Cổng HTTP: <b>${env.PORT}</b>`,
     { parse_mode: "HTML" }

@@ -35,7 +35,7 @@ export function renderAdminStartText(staffName: string, isSuperAdmin: boolean = 
     `• <code>/accounts</code> - Danh sách tài khoản nhận | Gửi ảnh + <code>/addqr</code>\n` +
     `• <code>/staff</code> - Danh sách &amp; phân quyền nhân sự\n` +
     `• <code>/invite &lt;id&gt; &lt;tên&gt; &lt;ADMIN|CSKH&gt;</code> - Mời nhân sự\n` +
-    `• <code>/drive &lt;orderId&gt;</code> - Kiểm tra kho lưu trữ Drive\n` +
+    `• <code>/storage &lt;orderId&gt;</code> - Kiểm tra kho lưu trữ đơn hàng trên VPS\n` +
     `• <code>/audit</code> - Xem nhật ký kiểm toán bảo mật\n\n` +
     `Chọn bảng điều khiển bên dưới:`
   );

@@ -19,8 +19,7 @@
     "prisma:validate": "prisma validate",
     "prisma:migrate": "prisma migrate dev",
     "prisma:deploy": "prisma migrate deploy",
-    "prisma:seed": "tsx prisma/seed.ts",
-    "auth:drive": "tsx scripts/google-drive-auth.ts"
+    "prisma:seed": "tsx prisma/seed.ts"
   },
   "dependencies": {
     "@google/genai": "^1.0.0",
@@ -30,7 +29,6 @@
     "decimal.js": "^10.6.0",
     "dotenv": "^17.0.0",
     "express": "^5.2.1",
-    "googleapis": "^160.0.0",
     "grammy": "^1.38.0",
     "pg": "^8.16.0",
     "pino": "^9.0.0",

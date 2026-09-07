@@ -21,17 +21,19 @@ services:
       - .env
     environment:
       DATABASE_URL: postgresql://exchange:exchange_change_me@postgres:5432/exchange?schema=public
-      DATA_DIR: /app/data
+      STORAGE_ROOT: /data/KH-VN-EXCHANGE
+      DATA_DIR: /data/KH-VN-EXCHANGE
+      RESTIC_REPOSITORY: /backup/restic-repo
     depends_on:
       postgres:
         condition: service_healthy
     ports:
       - "3000:3000"
     volumes:
-      - app_data:/app/data
-      - backups:/app/backups
+      - storage_data:/data/KH-VN-EXCHANGE
+      - backup_data:/backup/restic-repo
 
 volumes:
   postgres_data:
-  app_data:
-  backups:
+  storage_data:
+  backup_data:

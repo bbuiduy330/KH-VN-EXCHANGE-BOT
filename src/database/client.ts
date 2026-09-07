@@ -97,7 +97,7 @@ const inMemoryStore = {
   notes: new Map<string, any>(),
   staffUsers: new Map<string, any>(),
   staffInvites: new Map<string, any>(),
-  driveSyncJobs: new Map<string, any>(),
+  backupRuns: new Map<string, any>(),
   auditLogs: new Map<string, any>(),
   fileEvidence: new Map<string, any>()
 };
@@ -279,7 +279,7 @@ const mockMap: Record<string, { store: Map<string, any>; key: string }> = {
   internalNote: { store: inMemoryStore.notes, key: "id" },
   staffUser: { store: inMemoryStore.staffUsers, key: "telegramId" },
   staffInvite: { store: inMemoryStore.staffInvites, key: "code" },
-  driveSyncJob: { store: inMemoryStore.driveSyncJobs, key: "id" },
+  backupRun: { store: inMemoryStore.backupRuns, key: "id" },
   auditLog: { store: inMemoryStore.auditLogs, key: "id" },
   fileEvidence: { store: inMemoryStore.fileEvidence, key: "id" }
 };
@@ -354,7 +354,7 @@ try {
     internalNote: createMockCollection(inMemoryStore.notes, "id"),
     staffUser: createMockCollection(inMemoryStore.staffUsers, "telegramId"),
     staffInvite: createMockCollection(inMemoryStore.staffInvites, "code"),
-    driveSyncJob: createMockCollection(inMemoryStore.driveSyncJobs, "id"),
+    backupRun: createMockCollection(inMemoryStore.backupRuns, "id"),
     auditLog: createMockCollection(inMemoryStore.auditLogs, "id"),
     fileEvidence: createMockCollection(inMemoryStore.fileEvidence, "id"),
     $connect: async () => {},
