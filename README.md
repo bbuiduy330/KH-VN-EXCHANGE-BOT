@@ -86,11 +86,58 @@ GEMINI_API_KEY=
 GEMINI_TEXT_MODEL=gemini-2.5-flash
 GEMINI_TRANSCRIBE_MODEL=gemini-2.5-flash
 
-# Google Drive Storage & Archival
-GOOGLE_SERVICE_ACCOUNT_EMAIL=
-GOOGLE_PRIVATE_KEY=
+# Google Drive Storage & Archival (Personal Google Drive OAuth 2.0)
+GOOGLE_DRIVE_CLIENT_ID=
+GOOGLE_DRIVE_CLIENT_SECRET=
+GOOGLE_DRIVE_REFRESH_TOKEN=
 GOOGLE_DRIVE_ROOT_FOLDER_ID=
+# Optional for development mock:
+# GOOGLE_DRIVE_MOCK=false
 ```
+
+## Google Drive OAuth 2.0 Setup (Personal Account)
+
+The archive engine uses **OAuth 2.0 User Authentication** for a personal Google Drive account (My Drive). This replaces legacy Service Accounts, eliminating personal Google Drive storage quota limitations (`403 storageQuotaExceeded`).
+
+### 1. Create Google Cloud OAuth Credentials
+1. Open the [Google Cloud Console](https://console.cloud.google.com).
+2. Create or select a project, then navigate to **APIs & Services > Library**.
+3. Search for and enable the **Google Drive API**.
+4. Configure **OAuth consent screen**:
+   - User Type: **External**.
+   - Fill in app name (e.g., `KH-VN Bot Archive`) and your developer email.
+   - Under **Test users**, add your personal Google account (e.g. `yourname@gmail.com`).
+5. Go to **APIs & Services > Credentials > Create Credentials > OAuth client ID**:
+   - Application type: **Web application** (or **Desktop app**).
+   - Name: `KH-VN Drive Sync`.
+   - **Authorized redirect URIs**: Add `http://localhost:3000/oauth2callback` and `http://localhost`.
+6. Copy the **Client ID** and **Client Secret**.
+
+### 2. Prepare Root Folder in Personal Drive
+1. Open your personal Google Drive in your browser.
+2. Create a new root folder (e.g., `KH_VN_EXCHANGE_EVIDENCE`).
+3. Open the folder and copy its ID from the browser URL:
+   `https://drive.google.com/drive/folders/<GOOGLE_DRIVE_ROOT_FOLDER_ID>`
+4. Add `GOOGLE_DRIVE_ROOT_FOLDER_ID` to your `.env` file.
+
+### 3. Generate the Initial Refresh Token
+Run the built-in helper script on your machine:
+```bash
+npm run auth:drive
+```
+1. Paste your `Client ID`, `Client Secret`, and Redirect URI when prompted (or have them in `.env`).
+2. Open the printed authorization URL in your browser and sign in with your personal Google account.
+3. Approve access to Google Drive.
+4. Copy the authorization code from the redirect URL address bar and paste it back into the terminal.
+5. The script exchanges the code and prints your `GOOGLE_DRIVE_REFRESH_TOKEN`.
+6. Add this token to your production/VPS `.env` file.
+
+> **Scope Justification:** The bot requests `https://www.googleapis.com/auth/drive` because it must search for and organize subfolders (`YYYY/MM/ORDER-ID/`) inside the pre-existing root folder (`GOOGLE_DRIVE_ROOT_FOLDER_ID`) created by the user. The narrower `drive.file` scope only grants access to files created directly by the client and cannot write to pre-existing personal Drive folders.
+
+### 4. Headless VPS Execution
+- The VPS runs 100% headless using `GOOGLE_DRIVE_CLIENT_ID`, `GOOGLE_DRIVE_CLIENT_SECRET`, and `GOOGLE_DRIVE_REFRESH_TOKEN`.
+- The Google OAuth2 client automatically refreshes short-lived access tokens in the background without any browser interaction.
+- In `NODE_ENV=production`: Missing credentials will mark the integration as `NOT CONFIGURED` and safely fail sync jobs for retry with admin alerts, never producing fake success or mock IDs, and never interrupting customer financial transactions.
 
 ## Setup & Local Development
 

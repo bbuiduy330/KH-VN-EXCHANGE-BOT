@@ -12,9 +12,13 @@ const envSchema = z.object({
   GEMINI_API_KEY: z.string().optional().default(""),
   GEMINI_TEXT_MODEL: z.string().default("gemini-2.5-flash"),
   GEMINI_TRANSCRIBE_MODEL: z.string().default("gemini-2.5-flash"),
-  GOOGLE_SERVICE_ACCOUNT_EMAIL: z.string().optional().default(""),
-  GOOGLE_PRIVATE_KEY: z.string().optional().default(""),
+  GOOGLE_DRIVE_CLIENT_ID: z.string().optional().default(""),
+  GOOGLE_DRIVE_CLIENT_SECRET: z.string().optional().default(""),
+  GOOGLE_DRIVE_REFRESH_TOKEN: z.string().optional().default(""),
   GOOGLE_DRIVE_ROOT_FOLDER_ID: z.string().optional().default(""),
+  GOOGLE_DRIVE_MOCK: z
+    .preprocess((val) => val === "true" || val === true, z.boolean())
+    .default(false),
   DEFAULT_SERVICE_FEE_USD: z.coerce.number().default(2),
   LARGE_TRANSACTION_THRESHOLD_USD: z.coerce.number().default(5000),
   QUOTE_EXPIRY_MINUTES: z.coerce.number().default(15),

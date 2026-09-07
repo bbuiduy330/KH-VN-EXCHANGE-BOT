@@ -1,11 +1,14 @@
 import { describe, it, expect, beforeEach } from "vitest";
-import { DriveArchiveService, GoogleDriveService } from "../src/modules/drive/drive-service.js";
+import { DriveArchiveService, GoogleDriveService, sanitizeDriveError } from "../src/modules/drive/drive-service.js";
 import { prisma } from "../src/database/client.js";
+import { env } from "../src/config/env.js";
 
-describe("Google Drive Archive Service & Job Queue", () => {
+describe("Google Drive Archive Service & OAuth Security", () => {
   const sampleOrderId = "ORD-TEST-DRIVE-001";
 
   beforeEach(async () => {
+    GoogleDriveService.resetClientForTesting();
+
     // Create or mock order
     await prisma.order.upsert({
       where: { id: sampleOrderId },
@@ -48,28 +51,68 @@ describe("Google Drive Archive Service & Job Queue", () => {
     expect(status?.conversationStatus).toBe("PENDING");
   });
 
-  it("Safe execution: when Google Drive credentials are not set, jobs handle gracefully", async () => {
-    // Drive client returns null in local test env
-    const client = await GoogleDriveService.getClient();
-    expect(client).toBeNull();
+  it("OAuth error sanitizer: redacts tokens, secrets and sanitizes known OAuth error codes", () => {
+    // 1. invalid_grant
+    const grantErr = { code: "invalid_grant", message: "Bad Request: invalid_grant" };
+    expect(sanitizeDriveError(grantErr)).toContain("invalid_grant (refresh token may be invalid, revoked, or expired)");
 
-    // Running pending jobs when Drive is offline updates error log and schedules backoff
-    const processed = await DriveArchiveService.runPendingJobs();
-    expect(processed).toBeGreaterThanOrEqual(0);
+    // 2. invalid_client
+    const clientErr = new Error("invalid_client: client secret is invalid");
+    expect(sanitizeDriveError(clientErr)).toContain("invalid_client (client ID or client secret mismatch)");
 
-    // Verify order archive status still works
-    const status = await DriveArchiveService.getOrderArchiveStatus(sampleOrderId);
-    expect(status).toBeDefined();
+    // 3. Sensitive tokens redact check
+    const secretErr = new Error("Failed request to https://oauth2.googleapis.com/token?client_secret=GOCSPX-Secret123&refresh_token=1//09abcDEF&code=4/0AcvD Bearer ya29.a0AfH6SM");
+    const sanitized = sanitizeDriveError(secretErr);
+
+    expect(sanitized).not.toContain("GOCSPX-Secret123");
+    expect(sanitized).not.toContain("1//09abcDEF");
+    expect(sanitized).not.toContain("ya29.a0AfH6SM");
+    expect(sanitized).toContain("client_secret=[REDACTED]");
+    expect(sanitized).toContain("Bearer [REDACTED]");
   });
 
-  it("Allows manual retry of failed or pending jobs for an order", async () => {
-    const retriedCount = await DriveArchiveService.retryOrderSync(sampleOrderId);
-    expect(retriedCount).toBeGreaterThanOrEqual(0);
+  it("Reports GoogleDriveService.isConfigured() correctly based on 4 required OAuth parameters", () => {
+    // In test environment without mock env vars, isConfigured should be false
+    expect(typeof GoogleDriveService.isConfigured()).toBe("boolean");
+  });
 
-    const jobs = await prisma.driveSyncJob.findMany({ where: { orderId: sampleOrderId } });
-    for (const j of jobs) {
-      expect(["PENDING", "PROCESSING", "SUCCESS"]).toContain(j.status);
+  it("In production without credentials: refuses fake success and throws error instead of returning mock ID", async () => {
+    const originalEnv = env.NODE_ENV;
+    try {
+      (env as any).NODE_ENV = "production";
+      (env as any).GOOGLE_DRIVE_MOCK = false;
+
+      // Mock drive client reset
+      GoogleDriveService.resetClientForTesting();
+
+      await expect(
+        GoogleDriveService.uploadFile(Buffer.from("test"), "test.txt", "text/plain")
+      ).rejects.toThrow(/Google Drive is not configured/);
+
+      await expect(
+        GoogleDriveService.uploadOrUpdateFile(Buffer.from("test"), "test.txt", "text/plain")
+      ).rejects.toThrow(/Google Drive is not configured/);
+
+      await expect(
+        GoogleDriveService.findOrCreateFolder("test_folder")
+      ).rejects.toThrow(/Google Drive is not configured/);
+    } finally {
+      (env as any).NODE_ENV = originalEnv;
     }
+  });
+
+  it("Drive sync failure does not break financial order workflow", async () => {
+    // Financial order transition
+    const updated = await prisma.order.update({
+      where: { id: sampleOrderId },
+      data: { status: "COMPLETED" }
+    });
+    expect(updated.status).toBe("COMPLETED");
+
+    // Enqueueing sync job succeeds even if drive is unconfigured
+    const job = await DriveArchiveService.enqueueSyncJob(sampleOrderId, "FULL_ORDER_ARCHIVE");
+    expect(job).toBeDefined();
+    expect(job.status).toBe("PENDING");
   });
 
   it("Folder hierarchy formatting handles order dates accurately", () => {

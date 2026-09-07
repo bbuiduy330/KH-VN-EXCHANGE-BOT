@@ -6,7 +6,7 @@ import { QuoteService } from "../../modules/quotes/quote-service.js";
 import { PaymentAccountService } from "../../modules/payment-accounts/account-service.js";
 import { OrderService } from "../../modules/orders/order-service.js";
 import { AuditService } from "../../modules/audit/audit-service.js";
-import { DriveArchiveService } from "../../modules/drive/drive-service.js";
+import { DriveArchiveService, GoogleDriveService } from "../../modules/drive/drive-service.js";
 import { FileService } from "../../modules/files/file-service.js";
 import { env } from "../../config/env.js";
 import { sendToCustomer, sendToAdminNotificationChat } from "../notifications.js";
@@ -986,7 +986,7 @@ adminHandler.callbackQuery("admin:menu:system", async (ctx) => {
     status: "ok",
     nodeEnv: env.NODE_ENV,
     timezone: env.TIMEZONE,
-    driveRootFolder: env.GOOGLE_DRIVE_ROOT_FOLDER_ID ? "Đã cấu hình" : "Chưa cấu hình",
+    driveStatus: GoogleDriveService.isConfigured() ? "Đã kết nối OAuth2" : "Chưa cấu hình",
     gemini: env.GEMINI_API_KEY ? "Hoạt động" : "Chưa cấu hình"
   };
 
@@ -994,7 +994,7 @@ adminHandler.callbackQuery("admin:menu:system", async (ctx) => {
     `⚙️ <b>TRẠNG THÁI HỆ THỐNG:</b>\n\n` +
       `• Môi trường: <b>${health.nodeEnv}</b>\n` +
       `• Múi giờ: <b>${health.timezone}</b>\n` +
-      `• Google Drive: <b>${health.driveRootFolder}</b>\n` +
+      `• Google Drive: <b>${health.driveStatus}</b>\n` +
       `• Trợ lý Gemini AI: <b>${health.gemini}</b>\n` +
       `• Cổng HTTP: <b>${env.PORT}</b>`,
     { parse_mode: "HTML" }

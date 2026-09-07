@@ -1,7 +1,7 @@
 import express from "express";
 import { env } from "./config/env.js";
 import { logger } from "./shared/logger.js";
-import { DriveArchiveService } from "./modules/drive/drive-service.js";
+import { DriveArchiveService, GoogleDriveService } from "./modules/drive/drive-service.js";
 import { startSingleBot, stopSingleBot } from "./bot/index.js";
 import { prisma } from "./database/client.js";
 
@@ -21,13 +21,20 @@ app.get("/health", async (req, res) => {
     dbStatus = "degraded";
   }
 
+  const driveConfigured = GoogleDriveService.isConfigured();
+
   res.json({
     status: "ok",
     database: dbStatus,
+    googleDrive: {
+      configured: driveConfigured
+    },
     integrations: {
       gemini: Boolean(env.GEMINI_API_KEY),
       telegramBot: Boolean(env.TELEGRAM_BOT_TOKEN),
-      googleDrive: Boolean(env.GOOGLE_SERVICE_ACCOUNT_EMAIL && env.GOOGLE_PRIVATE_KEY)
+      googleDrive: {
+        configured: driveConfigured
+      }
     }
   });
 });

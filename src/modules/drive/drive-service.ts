@@ -5,6 +5,37 @@ import { logger } from "../../shared/logger.js";
 import { prisma } from "../../database/client.js";
 import { FileService } from "../files/file-service.js";
 import { ConversationService } from "../conversation/conversation-service.js";
+import { sendToAdminNotificationChat } from "../../bot/notifications.js";
+
+export function sanitizeDriveError(err: any): string {
+  if (!err) return "Unknown error";
+  let message = typeof err === "string" ? err : err.message || JSON.stringify(err);
+
+  const errCode = err?.code || err?.response?.data?.error;
+
+  if (errCode === "invalid_grant" || message.includes("invalid_grant")) {
+    return "OAuth error: invalid_grant (refresh token may be invalid, revoked, or expired)";
+  }
+  if (errCode === "invalid_client" || message.includes("invalid_client")) {
+    return "OAuth error: invalid_client (client ID or client secret mismatch)";
+  }
+  if (errCode === "unauthorized_client" || message.includes("unauthorized_client")) {
+    return "OAuth error: unauthorized_client (OAuth client not authorized for this scope)";
+  }
+  if (errCode === "insufficient_scope" || message.includes("insufficient_scope")) {
+    return "OAuth error: insufficient_scope (token does not have required Google Drive permissions)";
+  }
+
+  message = message
+    .replace(/Bearer\s+[A-Za-z0-9-_.]+/gi, "Bearer [REDACTED]")
+    .replace(/ya29\.[A-Za-z0-9-_.]+/gi, "[REDACTED_ACCESS_TOKEN]")
+    .replace(/1\/\/[A-Za-z0-9-_.]+/gi, "[REDACTED_REFRESH_TOKEN]")
+    .replace(/client_secret=[^& \n\r"']+/gi, "client_secret=[REDACTED]")
+    .replace(/refresh_token=[^& \n\r"']+/gi, "refresh_token=[REDACTED]")
+    .replace(/code=[^& \n\r"']+/gi, "code=[REDACTED]");
+
+  return message.slice(0, 400);
+}
 
 export interface OrderFolderTree {
   orderFolderId: string;
@@ -20,32 +51,76 @@ export interface OrderFolderTree {
 
 export class GoogleDriveService {
   private static driveClient: any = null;
+  private static oauth2Client: any = null;
 
-  static getDriveClient() {
-    if (this.driveClient) return this.driveClient;
+  static isConfigured(): boolean {
+    return Boolean(
+      env.GOOGLE_DRIVE_CLIENT_ID?.trim() &&
+      env.GOOGLE_DRIVE_CLIENT_SECRET?.trim() &&
+      env.GOOGLE_DRIVE_REFRESH_TOKEN?.trim() &&
+      env.GOOGLE_DRIVE_ROOT_FOLDER_ID?.trim()
+    );
+  }
 
-    if (!env.GOOGLE_SERVICE_ACCOUNT_EMAIL || !env.GOOGLE_PRIVATE_KEY) {
-      logger.warn("Google Drive credentials not configured. Drive operations will be mocked or skipped.");
+  static isMockAllowed(): boolean {
+    if (env.NODE_ENV === "test") return true;
+    if (env.NODE_ENV === "development" && env.GOOGLE_DRIVE_MOCK === true) return true;
+    return false;
+  }
+
+  static setDriveClientForTesting(client: any) {
+    this.driveClient = client;
+  }
+
+  static resetClientForTesting() {
+    this.driveClient = null;
+    this.oauth2Client = null;
+  }
+
+  static getOAuth2Client() {
+    if (this.oauth2Client) return this.oauth2Client;
+
+    if (!env.GOOGLE_DRIVE_CLIENT_ID || !env.GOOGLE_DRIVE_CLIENT_SECRET || !env.GOOGLE_DRIVE_REFRESH_TOKEN) {
       return null;
     }
 
     try {
-      let formattedKey = env.GOOGLE_PRIVATE_KEY;
-      if (formattedKey.startsWith('"') && formattedKey.endsWith('"')) {
-        formattedKey = formattedKey.slice(1, -1);
-      }
-      formattedKey = formattedKey.replace(/\\n/g, "\n");
+      const oauth2 = new google.auth.OAuth2(
+        env.GOOGLE_DRIVE_CLIENT_ID,
+        env.GOOGLE_DRIVE_CLIENT_SECRET
+      );
 
-      const auth = new google.auth.JWT({
-        email: env.GOOGLE_SERVICE_ACCOUNT_EMAIL,
-        key: formattedKey,
-        scopes: ["https://www.googleapis.com/auth/drive"]
+      oauth2.setCredentials({
+        refresh_token: env.GOOGLE_DRIVE_REFRESH_TOKEN
       });
 
-      this.driveClient = google.drive({ version: "v3", auth });
+      this.oauth2Client = oauth2;
+      return this.oauth2Client;
+    } catch (err: any) {
+      logger.error({ err: sanitizeDriveError(err) }, "Failed to initialize Google Drive OAuth2 client");
+      return null;
+    }
+  }
+
+  static getDriveClient() {
+    if (this.driveClient) return this.driveClient;
+
+    const oauth2 = this.getOAuth2Client();
+    if (!oauth2) {
+      if (!this.isConfigured()) {
+        logger.warn("Google Drive OAuth2 credentials not configured. Drive operations will be mocked or rejected based on environment.");
+      }
+      return null;
+    }
+
+    try {
+      this.driveClient = google.drive({
+        version: "v3",
+        auth: oauth2
+      });
       return this.driveClient;
-    } catch (err) {
-      logger.error({ err }, "Failed to initialize Google Drive client");
+    } catch (err: any) {
+      logger.error({ err: sanitizeDriveError(err) }, "Failed to initialize Google Drive v3 client");
       return null;
     }
   }
@@ -57,7 +132,12 @@ export class GoogleDriveService {
   static async findOrCreateFolder(folderName: string, parentFolderId?: string): Promise<string> {
     const drive = this.getDriveClient();
     if (!drive) {
-      return `mock-folder-${folderName}-${Date.now()}`;
+      if (this.isMockAllowed()) {
+        return `mock-folder-${folderName}-${Date.now()}`;
+      }
+      throw new Error(
+        "Google Drive is not configured. Missing required OAuth2 credentials in production."
+      );
     }
 
     const parent = parentFolderId || env.GOOGLE_DRIVE_ROOT_FOLDER_ID;
@@ -91,9 +171,10 @@ export class GoogleDriveService {
       });
 
       return folder.data.id!;
-    } catch (err) {
-      logger.error({ err, folderName, parent }, "Error in findOrCreateFolder");
-      throw err;
+    } catch (err: any) {
+      const sanitized = sanitizeDriveError(err);
+      logger.error({ err: sanitized, folderName, parent }, "Error in findOrCreateFolder");
+      throw new Error(`Google Drive findOrCreateFolder failed: ${sanitized}`);
     }
   }
 
@@ -109,8 +190,13 @@ export class GoogleDriveService {
   ): Promise<string | null> {
     const drive = this.getDriveClient();
     if (!drive) {
-      logger.info({ fileName }, "Mocked Google Drive upload (credentials missing)");
-      return `mock-drive-file-${Date.now()}`;
+      if (this.isMockAllowed()) {
+        logger.info({ fileName }, "Mocked Google Drive upload (test/dev mock mode)");
+        return `mock-drive-file-${Date.now()}`;
+      }
+      throw new Error(
+        "Google Drive is not configured. Missing required OAuth2 credentials in production."
+      );
     }
 
     const folderId = parentFolderId || env.GOOGLE_DRIVE_ROOT_FOLDER_ID;
@@ -142,9 +228,10 @@ export class GoogleDriveService {
       });
 
       return response.data.id || null;
-    } catch (err) {
-      logger.error({ err, fileName }, "Google Drive upload failed");
-      throw err;
+    } catch (err: any) {
+      const sanitized = sanitizeDriveError(err);
+      logger.error({ err: sanitized, fileName }, "Google Drive upload failed");
+      throw new Error(`Google Drive upload failed: ${sanitized}`);
     }
   }
 
@@ -160,8 +247,13 @@ export class GoogleDriveService {
   ): Promise<string | null> {
     const drive = this.getDriveClient();
     if (!drive) {
-      logger.info({ fileName }, "Mocked Google Drive upload/update (credentials missing)");
-      return `mock-drive-file-${Date.now()}`;
+      if (this.isMockAllowed()) {
+        logger.info({ fileName }, "Mocked Google Drive upload/update (test/dev mock mode)");
+        return `mock-drive-file-${Date.now()}`;
+      }
+      throw new Error(
+        "Google Drive is not configured. Missing required OAuth2 credentials in production."
+      );
     }
 
     const folderId = parentFolderId || env.GOOGLE_DRIVE_ROOT_FOLDER_ID;
@@ -201,9 +293,10 @@ export class GoogleDriveService {
       });
 
       return response.data.id || null;
-    } catch (err) {
-      logger.error({ err, fileName }, "Google Drive upload/update failed");
-      throw err;
+    } catch (err: any) {
+      const sanitized = sanitizeDriveError(err);
+      logger.error({ err: sanitized, fileName }, "Google Drive upload/update failed");
+      throw new Error(`Google Drive upload/update failed: ${sanitized}`);
     }
   }
 
@@ -596,6 +689,7 @@ export class DriveArchiveService {
 
       return true;
     } catch (err: any) {
+      const sanitized = sanitizeDriveError(err);
       const attempts = (job.attempts || 0) + 1;
       const backoffMs = Math.min(30 * 60 * 1000, Math.pow(2, attempts) * 60 * 1000);
       const nextRetryAt = new Date(Date.now() + backoffMs);
@@ -606,12 +700,25 @@ export class DriveArchiveService {
         data: {
           status: isExhausted ? "EXHAUSTED" : "FAILED",
           attempts,
-          lastError: String(err.message || err).slice(0, 400),
+          lastError: sanitized,
           nextRetryAt
         }
       });
 
-      logger.warn({ jobId: job.id, attempts, nextRetryAt }, "Drive sync job failed, scheduled retry");
+      logger.warn({ jobId: job.id, attempts, nextRetryAt, error: sanitized }, "Drive sync job failed, scheduled retry");
+
+      // Notify admin on critical OAuth error or retry exhaustion (without leaking credentials)
+      if (isExhausted || sanitized.includes("OAuth error") || sanitized.includes("not configured")) {
+        sendToAdminNotificationChat(
+          `⚠️ <b>CẢNH BÁO ĐỒNG BỘ GOOGLE DRIVE:</b>\n` +
+            `• Mã lệnh: <code>${job.orderId || "N/A"}</code>\n` +
+            `• Tác vụ: <code>${job.jobType}</code>\n` +
+            `• Trạng thái: <b>${isExhausted ? "EXHAUSTED (Hết số lần thử)" : "FAILED (Sẽ thử lại)"}</b>\n` +
+            `• Lỗi: <code>${sanitized}</code>\n` +
+            `• Lần thử: <b>${attempts}/${job.maxAttempts || 5}</b>`
+        ).catch(() => {});
+      }
+
       return false;
     }
   }
