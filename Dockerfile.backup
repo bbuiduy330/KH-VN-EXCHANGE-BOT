@@ -1,0 +1,5 @@
+FROM postgres:17-bookworm
+RUN apt-get update && apt-get install -y --no-install-recommends restic openssh-client ca-certificates && rm -rf /var/lib/apt/lists/*
+COPY scripts/backup-container.sh /usr/local/bin/backup-exchange
+RUN chmod 755 /usr/local/bin/backup-exchange
+ENTRYPOINT ["/usr/local/bin/backup-exchange"]

@@ -4,3 +4,10 @@ dist
 .env
 coverage
 backups
+
+.env.*
+.restic-password
+secrets
+data
+*.pem
+*.key

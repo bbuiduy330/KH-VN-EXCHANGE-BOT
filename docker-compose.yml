@@ -5,35 +5,73 @@ services:
     environment:
       POSTGRES_DB: exchange
       POSTGRES_USER: exchange
-      POSTGRES_PASSWORD: exchange_change_me
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Run python3 scripts/configure-vps.py first}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U exchange -d exchange"]
+      test: [CMD-SHELL, "pg_isready -U exchange -d exchange"]
       interval: 5s
       timeout: 5s
       retries: 10
+    logging: &logs
+      driver: json-file
+      options: {max-size: 10m, max-file: '3'}
 
   app:
     build: .
     restart: unless-stopped
-    env_file:
-      - .env
+    init: true
+    env_file: .env
     environment:
-      DATABASE_URL: postgresql://exchange:exchange_change_me@postgres:5432/exchange?schema=public
+      NODE_ENV: production
+      DATABASE_URL: postgresql://exchange:${POSTGRES_PASSWORD}@postgres:5432/exchange?schema=public
       STORAGE_ROOT: /data/KH-VN-EXCHANGE
       DATA_DIR: /data/KH-VN-EXCHANGE
-      RESTIC_REPOSITORY: /backup/restic-repo
     depends_on:
-      postgres:
-        condition: service_healthy
+      postgres: {condition: service_healthy}
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
     volumes:
-      - storage_data:/data/KH-VN-EXCHANGE
-      - backup_data:/backup/restic-repo
+      - ./data:/data/KH-VN-EXCHANGE
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:3000/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      start_period: 60s
+      retries: 3
+    logging: *logs
+
+  backup:
+    profiles: [tools]
+    build:
+      context: .
+      dockerfile: Dockerfile.backup
+    environment:
+      PGHOST: postgres
+      PGUSER: exchange
+      PGDATABASE: exchange
+      PGPASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD required}
+      RESTIC_REPOSITORY: /repository
+      RESTIC_PASSWORD_FILE: /run/secrets/restic_password
+      RESTIC_CACHE_DIR: /tmp/restic-cache
+    volumes:
+      - ./data:/evidence:ro
+      - ./backups/restic:/repository
+      - ./backups/restore:/restore
+    secrets: [restic_password]
+    depends_on:
+      postgres: {condition: service_healthy}
+    tmpfs: [/tmp]
+    read_only: true
+    security_opt: [no-new-privileges:true]
+    logging: *logs
 
 volumes:
   postgres_data:
-  storage_data:
-  backup_data:
+secrets:
+  restic_password:
+    file: ./.restic-password
