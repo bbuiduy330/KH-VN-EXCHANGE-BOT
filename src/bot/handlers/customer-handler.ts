@@ -91,8 +91,7 @@ customerHandler.command("bank", async (ctx) => {
   if (!text) {
     const kb = new InlineKeyboard()
       .text("🇻🇳 VND", "customer:bank:wiz:VND")
-      .text("🇺🇸 USD", "customer:bank:wiz:USD")
-      .text("🇰🇭 KHR", "customer:bank:wiz:KHR");
+      .text("🇺🇸 USD", "customer:bank:wiz:USD");
 
     return ctx.reply(
       `🏦 <b>CÀI ĐẶT TÀI KHOẢN NHẬN TIỀN</b>\n\n` +
@@ -139,7 +138,7 @@ customerHandler.callbackQuery("customer:menu:quote", async (ctx) => {
       `Vui lòng nhắn tin số tiền bạn muốn đổi ngay tại đây.\n\n` +
       `<i>Ví dụ:</i>\n` +
       `• "đổi 500 USD sang VND"\n` +
-      `• "1000 KHR to USD"\n` +
+      `• "100 đô"\n` +
       `• Hoặc gửi tin nhắn thoại nói rõ nhu cầu của bạn.`,
     { parse_mode: "HTML" }
   );
@@ -171,8 +170,7 @@ customerHandler.callbackQuery("customer:menu:bank", async (ctx) => {
   await ctx.answerCallbackQuery();
   const kb = new InlineKeyboard()
     .text("🇻🇳 VND", "customer:bank:wiz:VND")
-    .text("🇺🇸 USD", "customer:bank:wiz:USD")
-    .text("🇰🇭 KHR", "customer:bank:wiz:KHR");
+    .text("🇺🇸 USD", "customer:bank:wiz:USD");
 
   await ctx.reply(
     `🏦 <b>THIẾT LẬP TÀI KHOẢN NGÂN HÀNG NHẬN TIỀN</b>\n\n` +
@@ -181,7 +179,7 @@ customerHandler.callbackQuery("customer:menu:bank", async (ctx) => {
   );
 });
 
-customerHandler.callbackQuery(/^customer:bank:wiz:(VND|USD|KHR)$/, async (ctx) => {
+customerHandler.callbackQuery(/^customer:bank:wiz:(VND|USD)$/, async (ctx) => {
   await ctx.answerCallbackQuery();
   const currency = ctx.match ? ctx.match[1] : "VND";
   await ctx.reply(
