@@ -9,11 +9,10 @@ import { ConversationService } from "../../modules/conversation/conversation-ser
 import { AiProvider } from "../../modules/ai/ai-provider.js";
 import { ConversationalAIService } from "../../modules/ai/customer-ai-service.js";
 import { FileService } from "../../modules/files/file-service.js";
+import { RuntimeConfigService } from "../../modules/system-config/runtime-config-service.js";
+import { MoneyService } from "../../modules/money/money-service.js";
 import { sendToStaff, sendToAdminNotificationChat } from "../notifications.js";
 import { getCustomerMenuKeyboard, renderCustomerStartText } from "../menus/customer-menu.js";
-
-// Pending quote states stored in-memory per customer
-export const pendingCustomerQuotes = new Map<string, any>();
 
 export const customerHandler = new Composer<BotContext>();
 
@@ -44,12 +43,11 @@ customerHandler.command("help", async (ctx) => {
   );
 });
 
-// /orders command
+// /orders command (Postgres direct with pagination)
 customerHandler.command("orders", async (ctx) => {
   const telegramId = String(ctx.from?.id || "");
   const customer = await CustomerService.getOrCreateCustomer({ telegramId });
-  const pendingOrders = await OrderService.getAllOrders(20);
-  const myOrders = pendingOrders.filter((o: any) => o.customerId === customer.id);
+  const myOrders = await OrderService.getOrdersForCustomer(customer.id, 10);
 
   if (myOrders.length === 0) {
     return ctx.reply("📦 Bạn chưa có đơn hàng nào trong hệ thống.", {
@@ -59,9 +57,11 @@ customerHandler.command("orders", async (ctx) => {
 
   let msg = `📦 <b>DANH SÁCH ĐƠN HÀNG CỦA BẠN:</b>\n\n`;
   for (const o of myOrders.slice(0, 5)) {
+    const srcAmt = MoneyService.formatAmount(o.sourceAmount, o.sourceCurrency);
+    const tgtAmt = MoneyService.formatAmount(o.targetAmount, o.targetCurrency);
     msg +=
       `• Đơn <b>${o.id}</b>\n` +
-      `  Đổi: <b>${o.sourceAmount} ${o.sourceCurrency}</b> ➔ <b>${o.targetAmount} ${o.targetCurrency}</b>\n` +
+      `  Đổi: <b>${srcAmt} ${o.sourceCurrency}</b> ➔ <b>${tgtAmt} ${o.targetCurrency}</b>\n` +
       `  Trạng thái: <code>${o.status}</code>\n` +
       `  Ngày: ${new Date(o.createdAt).toLocaleString("vi-VN")}\n\n`;
   }
@@ -85,14 +85,21 @@ customerHandler.command("cancel", async (ctx) => {
   }
 });
 
-// /bank command
+// /bank command (supports pipe syntax or button wizard)
 customerHandler.command("bank", async (ctx) => {
   const text = ctx.match?.trim();
   if (!text) {
+    const kb = new InlineKeyboard()
+      .text("🇻🇳 VND", "customer:bank:wiz:VND")
+      .text("🇺🇸 USD", "customer:bank:wiz:USD")
+      .text("🇰🇭 KHR", "customer:bank:wiz:KHR");
+
     return ctx.reply(
-      "Vui lòng nhập theo cú pháp: <code>/bank TIỀN_TỆ|Tên Ngân Hàng|Tên Chủ Tài Khoản|Số Tài Khoản</code>\n\n" +
-        "Ví dụ: <code>/bank VND|MB Bank|NGUYEN VAN A|123456789</code>",
-      { parse_mode: "HTML" }
+      `🏦 <b>CÀI ĐẶT TÀI KHOẢN NHẬN TIỀN</b>\n\n` +
+        `Chọn loại tiền tệ bạn muốn nhận, hoặc nhập nhanh bằng cú pháp:\n` +
+        `<code>/bank TIỀN_TỆ|Tên Ngân Hàng|Tên Chủ TK|Số TK</code>\n\n` +
+        `<i>Ví dụ:</i> <code>/bank VND|Vietcombank|NGUYEN VAN A|1012345678</code>`,
+      { parse_mode: "HTML", reply_markup: kb }
     );
   }
 
@@ -142,8 +149,7 @@ customerHandler.callbackQuery("customer:menu:orders", async (ctx) => {
   await ctx.answerCallbackQuery();
   const telegramId = String(ctx.from?.id || "");
   const customer = await CustomerService.getOrCreateCustomer({ telegramId });
-  const pendingOrders = await OrderService.getAllOrders(20);
-  const myOrders = pendingOrders.filter((o: any) => o.customerId === customer.id);
+  const myOrders = await OrderService.getOrdersForCustomer(customer.id, 10);
 
   if (myOrders.length === 0) {
     return ctx.reply("📦 Bạn chưa có đơn hàng nào trong hệ thống.");
@@ -151,9 +157,11 @@ customerHandler.callbackQuery("customer:menu:orders", async (ctx) => {
 
   let msg = `📦 <b>DANH SÁCH ĐƠN HÀNG GẦN ĐÂY:</b>\n\n`;
   for (const o of myOrders.slice(0, 5)) {
+    const srcAmt = MoneyService.formatAmount(o.sourceAmount, o.sourceCurrency);
+    const tgtAmt = MoneyService.formatAmount(o.targetAmount, o.targetCurrency);
     msg +=
       `• Đơn <b>${o.id}</b>\n` +
-      `  ${o.sourceAmount} ${o.sourceCurrency} ➔ ${o.targetAmount} ${o.targetCurrency}\n` +
+      `  ${srcAmt} ${o.sourceCurrency} ➔ ${tgtAmt} ${o.targetCurrency}\n` +
       `  Trạng thái: <code>${o.status}</code>\n\n`;
   }
   await ctx.reply(msg, { parse_mode: "HTML" });
@@ -161,14 +169,27 @@ customerHandler.callbackQuery("customer:menu:orders", async (ctx) => {
 
 customerHandler.callbackQuery("customer:menu:bank", async (ctx) => {
   await ctx.answerCallbackQuery();
+  const kb = new InlineKeyboard()
+    .text("🇻🇳 VND", "customer:bank:wiz:VND")
+    .text("🇺🇸 USD", "customer:bank:wiz:USD")
+    .text("🇰🇭 KHR", "customer:bank:wiz:KHR");
+
   await ctx.reply(
     `🏦 <b>THIẾT LẬP TÀI KHOẢN NGÂN HÀNG NHẬN TIỀN</b>\n\n` +
-      `Vui lòng gửi lệnh cài đặt tài khoản theo cú pháp:\n` +
-      `<code>/bank TIỀN_TỆ|Tên Ngân Hàng|Tên Chủ TK|Số TK</code>\n\n` +
-      `<i>Ví dụ nhận VND:</i>\n` +
-      `<code>/bank VND|Vietcombank|NGUYEN VAN A|1012345678</code>\n\n` +
-      `<i>Ví dụ nhận USD (ABA):</i>\n` +
-      `<code>/bank USD|ABA Bank|SOKHA PHAN|001234567</code>`,
+      `Vui lòng chọn loại tiền tệ bạn muốn nhận:`,
+    { parse_mode: "HTML", reply_markup: kb }
+  );
+});
+
+customerHandler.callbackQuery(/^customer:bank:wiz:(VND|USD|KHR)$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const currency = ctx.match ? ctx.match[1] : "VND";
+  await ctx.reply(
+    `🏦 <b>CÀI ĐẶT TÀI KHOẢN NHẬN ${currency}</b>\n\n` +
+      `Vui lòng gửi tin nhắn theo định dạng:\n` +
+      `<code>/bank ${currency}|Tên Ngân Hàng|Tên Chủ TK|Số TK</code>\n\n` +
+      `<i>Ví dụ:</i>\n` +
+      `<code>/bank ${currency}|Vietcombank|NGUYEN VAN A|0123456789</code>`,
     { parse_mode: "HTML" }
   );
 });
@@ -178,8 +199,7 @@ customerHandler.callbackQuery("customer:menu:support", async (ctx) => {
   const telegramId = String(ctx.from?.id || "");
   const customer = await CustomerService.getOrCreateCustomer({ telegramId });
 
-  // Switch conversation mode to HUMAN
-  await ConversationService.setMode(customer.id, "HUMAN");
+  await ConversationService.getOrCreateConversation(customer.id);
   await ConversationService.addMessage({
     customerId: customer.id,
     senderType: "CUSTOMER",
@@ -193,12 +213,11 @@ customerHandler.callbackQuery("customer:menu:support", async (ctx) => {
     { parse_mode: "HTML" }
   );
 
-  // Notify CSKH & Admin
   await sendToAdminNotificationChat(
     `🛎 <b>YÊU CẦU HỖ TRỢ TỪ KHÁCH HÀNG:</b>\n` +
       `• Khách: <b>${customer.fullName || customer.username || customer.telegramId}</b> (ID: <code>${customer.id}</code>)\n` +
       `• Telegram ID: <code>${customer.telegramId}</code>\n` +
-      `CSKH vui lòng dùng lệnh <code>/claim ${customer.id}</code> để tiếp nhận.`,
+      `CSKH vui lòng bấm nút bên dưới để tiếp nhận.`,
     {
       parse_mode: "HTML",
       reply_markup: new InlineKeyboard().text("🙋 Tiếp nhận hỗ trợ", `cskh:ticket:claim:${customer.id}`)
@@ -206,30 +225,27 @@ customerHandler.callbackQuery("customer:menu:support", async (ctx) => {
   );
 });
 
-// Quote confirmation callback (supports customer:quote:confirm:* and confirm_quote:*)
+// Quote confirmation callback (persisted Quote in DB)
 customerHandler.callbackQuery(/^(?:customer:quote:confirm:|confirm_quote:)(.+)$/, async (ctx) => {
   await ctx.answerCallbackQuery();
-  const quoteKey = ctx.match ? ctx.match[1] : undefined;
-  if (!quoteKey) return;
-  const quoteData = pendingCustomerQuotes.get(quoteKey);
-
-  if (!quoteData) {
-    return ctx.reply("⚠️ Báo giá này đã hết hạn hoặc không còn hiệu lực. Vui lòng tạo yêu cầu mới.");
-  }
+  const quoteId = ctx.match ? ctx.match[1] : undefined;
+  if (!quoteId) return;
 
   const telegramId = String(ctx.from?.id || "");
   const customer = await CustomerService.getOrCreateCustomer({ telegramId });
 
   try {
-    const order = await OrderService.createOrderFromQuote(customer.id, quoteData);
-    pendingCustomerQuotes.delete(quoteKey);
+    // Atomically confirm quote in database
+    const confirmedQuote = await QuoteService.confirmQuote(quoteId, customer.id);
+    const order = await OrderService.createOrderFromQuote(customer.id, confirmedQuote);
 
     const receivingSnapshot = order.receivingAccountSnapshot as any;
+    const formattedSrc = MoneyService.formatAmount(confirmedQuote.sourceAmount, confirmedQuote.sourceCurrency);
 
     let msg =
       `🎉 <b>ĐƠN HÀNG ĐÃ ĐƯỢC TẠO THÀNH CÔNG!</b>\n` +
       `Mã đơn: <code>${order.id}</code>\n\n` +
-      `💵 Quý khách vui lòng chuyển đúng số tiền: <b>${quoteData.sourceAmount} ${quoteData.sourceCurrency}</b>\n` +
+      `💵 Quý khách vui lòng chuyển đúng số tiền: <b>${formattedSrc} ${confirmedQuote.sourceCurrency}</b>\n` +
       `🏦 Đến tài khoản chỉ định:\n` +
       `• Ngân hàng: <b>${receivingSnapshot?.bankName}</b>\n` +
       `• Số tài khoản: <code>${receivingSnapshot?.accountNumber}</code>\n` +
@@ -248,7 +264,7 @@ customerHandler.callbackQuery(/^(?:customer:quote:confirm:|confirm_quote:)(.+)$/
       }
     }
 
-    // Notify admins of new pending order
+    // Notify admins
     await sendToAdminNotificationChat(
       `🆕 <b>ĐƠN HÀNG MỚI ĐƯỢC TẠO:</b> <code>${order.id}</code>\n` +
         `• Khách: <code>${customer.id}</code>\n` +
@@ -259,6 +275,17 @@ customerHandler.callbackQuery(/^(?:customer:quote:confirm:|confirm_quote:)(.+)$/
   } catch (err: any) {
     await ctx.reply(`❌ Lỗi tạo đơn: ${err.message}`);
   }
+});
+
+// Attach bill to explicitly selected order
+customerHandler.callbackQuery(/^customer:bill:attach:([a-zA-Z0-9_-]+):(.+)$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const orderId = ctx.match ? ctx.match[1] : undefined;
+  const fileId = ctx.match ? ctx.match[2] : undefined;
+  if (!orderId || !fileId) return;
+
+  const telegramId = String(ctx.from?.id || "");
+  await processBillUpload(ctx, orderId, fileId, telegramId);
 });
 
 // Customer text message handler
@@ -280,7 +307,6 @@ export async function handleCustomerTextMessage(ctx: BotContext, text: string) {
   });
 
   if (conv.mode === "HUMAN") {
-    // In HUMAN mode, CSKH takes over; customer AI stops automatic replies (Requirement 18)
     logger.info({ customerId: customer.id }, "Conversation in HUMAN mode; AI reply paused");
 
     if (conv.claimedById) {
@@ -288,13 +314,7 @@ export async function handleCustomerTextMessage(ctx: BotContext, text: string) {
         conv.claimedById,
         `💬 <b>Tin nhắn mới từ khách [${customer.fullName || customer.id}]:</b>\n\n` +
           `"${text}"\n\n` +
-          `<i>Dùng lệnh:</i> <code>/msg ${customer.id} &lt;Nội dung&gt;</code> để phản hồi khách.`,
-        { parse_mode: "HTML" }
-      );
-    } else {
-      await sendToAdminNotificationChat(
-        `💬 <b>Khách [${customer.id}] vừa nhắn:</b> "${text}"\n` +
-          `Chưa có CSKH nào tiếp nhận. Dùng <code>/claim ${customer.id}</code> để trả lời.`,
+          `Dùng <code>/msg ${customer.id} &lt;nội dung&gt;</code> để trả lời.`,
         { parse_mode: "HTML" }
       );
     }
@@ -317,24 +337,30 @@ export async function handleCustomerTextMessage(ctx: BotContext, text: string) {
     };
   }
 
-  // 1. Check exchange intent (structured parser -> QuoteService)
+  // 1. Check exchange intent
   const intent = await AiProvider.parseExchangeIntent(text);
   if (intent) {
     try {
-      // Deterministic calculation handled strictly by QuoteService / MoneyService (Requirement 4)
-      const quote = await QuoteService.calculateQuote(intent.sourceCurrency, intent.targetCurrency, intent.amount);
-      const quoteKey = `${customer.id}_${Date.now()}`;
-      pendingCustomerQuotes.set(quoteKey, quote);
+      // Persist Quote in DB
+      const quote = await QuoteService.createQuote(
+        customer.id,
+        intent.sourceCurrency,
+        intent.targetCurrency,
+        intent.amount
+      );
 
-      const keyboard = new InlineKeyboard().text("✅ Xác nhận đổi tiền", `customer:quote:confirm:${quoteKey}`);
+      const keyboard = new InlineKeyboard().text("✅ Xác nhận đổi tiền", `customer:quote:confirm:${quote.id}`);
+      const expiryMinutes = RuntimeConfigService.getQuoteExpiryMinutes();
+      const formattedSrc = MoneyService.formatAmount(quote.sourceAmount, quote.sourceCurrency);
+      const formattedTgt = MoneyService.formatAmount(quote.targetAmount, quote.targetCurrency);
 
       await ctx.reply(
         `📊 <b>BÁO GIÁ ĐỔI TIỀN TỆ</b>\n\n` +
-          `• Quý khách gửi: <b>${quote.sourceAmount} ${quote.sourceCurrency}</b>\n` +
-          `• Quý khách nhận: <b>${quote.targetAmount.toFixed(2)} ${quote.targetCurrency}</b>\n` +
-          `• Tỷ giá áp dụng: <b>${quote.effectiveRate.toFixed(4)}</b>\n` +
+          `• Quý khách gửi: <b>${formattedSrc} ${quote.sourceCurrency}</b>\n` +
+          `• Quý khách nhận: <b>${formattedTgt} ${quote.targetCurrency}</b>\n` +
+          `• Tỷ giá áp dụng: <b>${Number(quote.effectiveRate).toFixed(4)}</b>\n` +
           `• Phí dịch vụ: <b>${quote.fee} ${quote.feeCurrency}</b>\n` +
-          `• Hiệu lực: <i>${env.QUOTE_EXPIRY_MINUTES} phút</i>\n\n` +
+          `• Hiệu lực: <i>${expiryMinutes} phút</i>\n\n` +
           `Bấm nút dưới đây để tạo đơn và nhận tài khoản chuyển tiền:`,
         { parse_mode: "HTML", reply_markup: keyboard }
       );
@@ -345,7 +371,7 @@ export async function handleCustomerTextMessage(ctx: BotContext, text: string) {
     }
   }
 
-  // 2. General conversation -> ConversationalAIService (Requirement 3, 4, 5, 6)
+  // 2. General conversation -> AI (Stored with senderType = "AI")
   let aiReply: string | null = null;
   const isAvailable = await AiProvider.isAvailable();
   if (isAvailable) {
@@ -364,7 +390,7 @@ export async function handleCustomerTextMessage(ctx: BotContext, text: string) {
   if (aiReply) {
     await ConversationService.addMessage({
       customerId: customer.id,
-      senderType: "SYSTEM",
+      senderType: "AI", // Correct senderType AI (Requirement P1)
       content: aiReply
     });
 
@@ -374,116 +400,148 @@ export async function handleCustomerTextMessage(ctx: BotContext, text: string) {
     return;
   }
 
-  // Fallback friendly message if Gemini is unconfigured or failed
   await ctx.reply(
     `Xin chào! Quý khách có thể nhắn tin yêu cầu đổi tiền, ví dụ: <i>'đổi 500 USD sang VND'</i> hoặc nhấn <b>💬 Hỗ trợ</b> để gặp nhân viên tư vấn.`,
     { parse_mode: "HTML", reply_markup: getCustomerMenuKeyboard() }
   );
 }
 
-// Customer photo or document handler (bill upload)
+// Hardened Telegram File Downloader & Bill Processor
+async function processBillUpload(ctx: BotContext, orderId: string, fileId: string, telegramId: string) {
+  const maxBytes = (env.MAX_UPLOAD_MB || 15) * 1024 * 1024;
+  const allowedMimes = ["image/jpeg", "image/png", "image/webp", "application/pdf"];
+
+  const file = await ctx.api.getFile(fileId);
+
+  if (file.file_size && file.file_size > maxBytes) {
+    return ctx.reply(`❌ Kích thước tệp vượt quá giới hạn cho phép (${env.MAX_UPLOAD_MB}MB). Vui lòng gửi ảnh nhẹ hơn.`);
+  }
+
+  const botToken = env.TELEGRAM_BOT_TOKEN;
+  const url = `https://api.telegram.org/file/bot${botToken}/${file.file_path}`;
+  const res = await fetch(url);
+
+  if (!res.ok) {
+    throw new Error(`Tải tệp từ Telegram thất bại (HTTP ${res.status})`);
+  }
+
+  const mimeType = res.headers.get("content-type") || "image/jpeg";
+  if (!allowedMimes.includes(mimeType) && !mimeType.startsWith("image/")) {
+    return ctx.reply("❌ Định dạng tệp không được hỗ trợ. Vui lòng gửi ảnh chụp rõ nét (JPG, PNG, WebP) hoặc PDF.");
+  }
+
+  const buffer = Buffer.from(await res.arrayBuffer());
+  if (buffer.length > maxBytes) {
+    return ctx.reply(`❌ Kích thước tệp thực tế vượt quá giới hạn ${env.MAX_UPLOAD_MB}MB.`);
+  }
+
+  const safeExt = mimeType === "application/pdf" ? "pdf" : mimeType === "image/png" ? "png" : "jpg";
+  const sanitizedFileName = `bill_${orderId}_${Date.now()}.${safeExt}`;
+
+  const result: any = await OrderService.submitCustomerBill(
+    orderId,
+    buffer,
+    sanitizedFileName,
+    mimeType,
+    telegramId
+  );
+
+  if (result.status === "SUSPICIOUS") {
+    await ctx.reply(
+      `⚠️ <b>Hệ thống phát hiện biên lai có dấu hiệu cần kiểm tra thêm.</b>\n` +
+        `Đơn hàng <code>${orderId}</code> đã được chuyển sang chế độ bảo mật để quản trị viên kiểm tra trực tiếp.`,
+      { parse_mode: "HTML" }
+    );
+
+    await sendToAdminNotificationChat(
+      `🚨 <b>CẢNH BÁO BẢO MẬT: BIÊN LAI TRÙNG LẶP / BẤT THƯỜNG</b>\n` +
+        `• Mã đơn: <code>${orderId}</code>\n` +
+        `• Telegram: <code>${telegramId}</code>\n` +
+        `• Cảnh báo: <b>${result.flagReason}</b>\n` +
+        `Admin vui lòng kiểm tra đối soát thủ công!`,
+      {
+        parse_mode: "HTML",
+        reply_markup: new InlineKeyboard().text("🔍 Kiểm tra đơn", `admin:order:detail:${orderId}`)
+      }
+    );
+  } else if (result.status === "MANUAL_REVIEW") {
+    await ctx.reply(
+      `ℹ️ <b>Đã nhận biên lai bổ sung cho đơn ${orderId}.</b>\n` +
+        `Đơn hàng đã được ghi nhận đầy đủ bằng chứng và chuyển Admin kiểm duyệt thủ công.`,
+      { parse_mode: "HTML" }
+    );
+  } else {
+    await ctx.reply(
+      `✅ <b>Đã nhận được biên lai thanh toán cho đơn ${orderId}.</b>\n\n` +
+        `🔒 Theo quy định tài chính an toàn, Admin sẽ trực tiếp kiểm tra biến động tài khoản thực tế và xác nhận trong giây lát. Xin cảm ơn quý khách!`,
+      { parse_mode: "HTML" }
+    );
+
+    await sendToAdminNotificationChat(
+      `📸 <b>BIÊN LAI MỚI CHO ĐƠN ${orderId}</b>\n` +
+        `Admin hãy kiểm tra tài khoản ngân hàng thực tế và xác nhận đơn.`,
+      {
+        parse_mode: "HTML",
+        reply_markup: new InlineKeyboard().text("🔍 Duyệt tiền nạp", `admin:pay:step1:${orderId}`)
+      }
+    );
+  }
+}
+
+// Customer photo or document handler (Safe Bill Target Selection)
 export async function handleCustomerPhoto(ctx: BotContext) {
   const telegramId = String(ctx.from?.id || "");
   const customer = await CustomerService.getOrCreateCustomer({ telegramId });
 
-  // Look for latest active order for customer
-  const customerOrder = await OrderService.getLatestActiveOrderForCustomer(customer.id);
+  // Safe Bill Target Selection: Query orders waiting for bill
+  const awaitingOrders = await OrderService.getOrdersAwaitingBill(customer.id);
 
-  if (!customerOrder) {
-    return ctx.reply("Không tìm thấy đơn hàng đang chờ thanh toán. Vui lòng tạo đơn trước khi gửi biên lai.");
-  }
-
-  try {
-    let fileId: string | undefined;
-    let fileName = `bill_${customerOrder.id}.jpg`;
-    let mimeType = "image/jpeg";
-
-    if (ctx.message?.photo && ctx.message.photo.length > 0) {
-      const photos = ctx.message.photo;
-      const photo = photos[photos.length - 1];
-      if (photo) fileId = photo.file_id;
-    } else if (ctx.message?.document) {
-      fileId = ctx.message.document.file_id;
-      fileName = ctx.message.document.file_name || fileName;
-      mimeType = ctx.message.document.mime_type || mimeType;
-    }
-
-    if (!fileId) return;
-
-    const file = await ctx.api.getFile(fileId);
-    const botToken = env.TELEGRAM_BOT_TOKEN;
-    const url = `https://api.telegram.org/file/bot${botToken}/${file.file_path}`;
-    const res = await fetch(url);
-    const buffer = Buffer.from(await res.arrayBuffer());
-
-    const result: any = await OrderService.submitCustomerBill(
-      customerOrder.id,
-      buffer,
-      fileName,
-      mimeType,
-      telegramId
+  if (awaitingOrders.length === 0) {
+    return ctx.reply(
+      "Không tìm thấy đơn hàng nào của bạn đang chờ thanh toán (WAITING_PAYMENT). Vui lòng tạo đơn trước khi gửi biên lai."
     );
-
-    if (result.status === "SUSPICIOUS") {
-      await ctx.reply(
-        `⚠️ <b>Hệ thống phát hiện biên lai có dấu hiệu cần kiểm tra thêm.</b>\n` +
-          `Đơn hàng <code>${customerOrder.id}</code> đã được chuyển sang chế độ bảo mật để quản trị viên kiểm tra trực tiếp.`,
-        { parse_mode: "HTML" }
-      );
-
-      await sendToAdminNotificationChat(
-        `🚨 <b>CẢNH BÁO BẢO MẬT: BIÊN LAI TRÙNG LẶP / BẤT THƯỜNG</b>\n` +
-          `• Mã đơn: <code>${customerOrder.id}</code>\n` +
-          `• Khách hàng: <code>${customer.id}</code> (Telegram: <code>${customer.telegramId}</code>)\n` +
-          `• Cảnh báo: <b>${result.flagReason}</b>\n` +
-          `Admin vui lòng kiểm tra đối soát thủ công!`,
-        {
-          parse_mode: "HTML",
-          reply_markup: new InlineKeyboard().text("🔍 Kiểm tra đơn", `admin:order:detail:${customerOrder.id}`)
-        }
-      );
-    } else if (result.status === "MANUAL_REVIEW") {
-      await ctx.reply(
-        `ℹ️ <b>Đã nhận biên lai bổ sung cho đơn ${customerOrder.id}.</b>\n` +
-          `Đơn hàng đã được ghi nhận đầy đủ bằng chứng và chuyển Admin kiểm duyệt thủ công.`,
-        { parse_mode: "HTML" }
-      );
-
-      await sendToAdminNotificationChat(
-        `⚠️ <b>BIÊN LAI BỔ SUNG: ĐƠN ${customerOrder.id}</b>\n` +
-          `• Khách hàng: <code>${customer.id}</code>\n` +
-          `Đơn đã nạp thêm biên lai, chuyển trạng thái MANUAL_REVIEW.`,
-        {
-          parse_mode: "HTML",
-          reply_markup: new InlineKeyboard().text("🔍 Duyệt tiền nạp", `admin:pay:step1:${customerOrder.id}`)
-        }
-      );
-    } else {
-      await ctx.reply(
-        `✅ <b>Đã nhận được biên lai thanh toán cho đơn ${customerOrder.id}.</b>\n\n` +
-          `🔒 Theo quy định tài chính an toàn, Admin sẽ trực tiếp kiểm tra biến động tài khoản thực tế và xác nhận trong giây lát. Xin cảm ơn quý khách!`,
-        { parse_mode: "HTML" }
-      );
-
-      // Notify admins
-      await sendToAdminNotificationChat(
-        `📸 <b>BIÊN LAI MỚI CHO ĐƠN ${customerOrder.id}</b>\n` +
-          `• Khách hàng: <code>${customer.id}</code>\n` +
-          `• Cần nhận: <b>${customerOrder.sourceAmount} ${customerOrder.sourceCurrency}</b>\n` +
-          `Admin hãy kiểm tra tài khoản ngân hàng thực tế và xác nhận đơn.`,
-        {
-          parse_mode: "HTML",
-          reply_markup: new InlineKeyboard().text("🔍 Duyệt tiền nạp", `admin:pay:step1:${customerOrder.id}`)
-        }
-      );
-    }
-  } catch (err: any) {
-    logger.error({ err }, "Error processing customer bill");
-    await ctx.reply(`❌ Có lỗi khi nhận biên lai: ${err.message}`);
   }
+
+  let fileId: string | undefined;
+  if (ctx.message?.photo && ctx.message.photo.length > 0) {
+    const photo = ctx.message.photo[ctx.message.photo.length - 1];
+    if (photo) fileId = photo.file_id;
+  } else if (ctx.message?.document) {
+    fileId = ctx.message.document.file_id;
+  }
+
+  if (!fileId) return;
+
+  // If customer has exactly ONE eligible order, attach automatically
+  if (awaitingOrders.length === 1) {
+    const targetOrder = awaitingOrders[0];
+    try {
+      await processBillUpload(ctx, targetOrder.id, fileId, telegramId);
+    } catch (err: any) {
+      logger.error({ err }, "Error processing single customer bill");
+      await ctx.reply(`❌ Có lỗi khi xử lý biên lai: ${err.message}`);
+    }
+    return;
+  }
+
+  // If multiple eligible orders exist, present interactive selection buttons
+  const keyboard = new InlineKeyboard();
+  for (const order of awaitingOrders.slice(0, 5)) {
+    const srcAmt = MoneyService.formatAmount(order.sourceAmount, order.sourceCurrency);
+    keyboard.text(
+      `📋 Đơn ${order.id.slice(-6)} (${srcAmt} ${order.sourceCurrency})`,
+      `customer:bill:attach:${order.id}:${fileId}`
+    ).row();
+  }
+
+  await ctx.reply(
+    `📸 <b>BẠN CÓ ${awaitingOrders.length} ĐƠN HÀNG ĐANG CHỜ THANH TOÁN</b>\n\n` +
+      `Vui lòng chọn chính xác đơn hàng áp dụng biên lai này:`,
+    { parse_mode: "HTML", reply_markup: keyboard }
+  );
 }
 
-// Customer voice handler (Requirement 16)
+// Customer voice handler
 export async function handleCustomerVoice(ctx: BotContext) {
   const telegramId = String(ctx.from?.id || "");
   const customer = await CustomerService.getOrCreateCustomer({ telegramId });
@@ -497,7 +555,7 @@ export async function handleCustomerVoice(ctx: BotContext) {
     const res = await fetch(url);
     const buffer = Buffer.from(await res.arrayBuffer());
 
-    // 1. Preserve original Telegram voice file locally (Requirement 16)
+    // Preserve original Telegram voice file locally
     const savedEvidence = await FileService.saveEvidenceFile(
       buffer,
       `voice_${customer.id}_${Date.now()}.ogg`,
@@ -505,7 +563,7 @@ export async function handleCustomerVoice(ctx: BotContext) {
       "audio/ogg"
     );
 
-    // 2. Transcribe using Gemini
+    // Transcribe using Gemini
     const transcribeResult = await AiProvider.transcribeAudio(buffer, "audio/ogg");
     if (transcribeResult && transcribeResult.transcript) {
       const langTag = transcribeResult.detectedLanguage?.toUpperCase() || "VI";

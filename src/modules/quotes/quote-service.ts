@@ -1,6 +1,7 @@
 import { Decimal } from "decimal.js";
 import { prisma } from "../../database/client.js";
-import { env } from "../../config/env.js";
+import { RuntimeConfigService } from "../system-config/runtime-config-service.js";
+import { MoneyService } from "../money/money-service.js";
 
 export interface QuoteCalculation {
   sourceCurrency: string;
@@ -25,23 +26,30 @@ export class QuoteService {
     updatedBy: string
   ) {
     const normalizedPair = pair.toUpperCase().trim();
+    const base = new Decimal(baseRate);
+    const buy = new Decimal(buyMargin);
+    const sell = new Decimal(sellMargin);
+    const feeDec = new Decimal(fee);
+
+    MoneyService.validateMargins(buy, sell);
+
     return prisma.exchangeRate.upsert({
       where: { pair: normalizedPair },
       update: {
-        baseRate: new Decimal(baseRate),
-        buyMargin: new Decimal(buyMargin),
-        sellMargin: new Decimal(sellMargin),
-        fee: new Decimal(fee),
+        baseRate: base,
+        buyMargin: buy,
+        sellMargin: sell,
+        fee: feeDec,
         feeCurrency: feeCurrency.toUpperCase(),
         updatedBy,
         updatedAt: new Date()
       },
       create: {
         pair: normalizedPair,
-        baseRate: new Decimal(baseRate),
-        buyMargin: new Decimal(buyMargin),
-        sellMargin: new Decimal(sellMargin),
-        fee: new Decimal(fee),
+        baseRate: base,
+        buyMargin: buy,
+        sellMargin: sell,
+        fee: feeDec,
         feeCurrency: feeCurrency.toUpperCase(),
         updatedBy
       }
@@ -56,9 +64,14 @@ export class QuoteService {
   }
 
   static async getAllRates() {
-    return prisma.exchangeRate.findMany();
+    return prisma.exchangeRate.findMany({
+      orderBy: { pair: "asc" }
+    });
   }
 
+  /**
+   * Pure deterministic calculation of quote using Decimal and MoneyService
+   */
   static async calculateQuote(
     sourceCurrency: string,
     targetCurrency: string,
@@ -84,17 +97,24 @@ export class QuoteService {
 
     if (rateDirect) {
       baseRate = new Decimal(rateDirect.baseRate);
-      // Customer sells source, applies buyMargin
-      const margin = new Decimal(rateDirect.buyMargin);
-      effectiveRate = baseRate.minus(margin);
+      // Customer sells source to buy target: applies buyMargin (subtracted)
+      const { effectiveBuy } = MoneyService.calculateEffectiveRates(
+        baseRate,
+        rateDirect.buyMargin,
+        rateDirect.sellMargin
+      );
+      effectiveRate = effectiveBuy;
       fee = new Decimal(rateDirect.fee);
       feeCurrency = rateDirect.feeCurrency;
     } else if (rateInverse) {
       baseRate = new Decimal(rateInverse.baseRate);
-      // Customer buys target, inverse rate applies sellMargin
-      const margin = new Decimal(rateInverse.sellMargin);
-      const denominator = baseRate.plus(margin);
-      effectiveRate = new Decimal(1).dividedBy(denominator);
+      // Inverse pair: Customer buys target, denominator applies sellMargin (added)
+      const { effectiveSell } = MoneyService.calculateEffectiveRates(
+        baseRate,
+        rateInverse.buyMargin,
+        rateInverse.sellMargin
+      );
+      effectiveRate = new Decimal(1).dividedBy(effectiveSell);
       fee = new Decimal(rateInverse.fee);
       feeCurrency = rateInverse.feeCurrency;
     } else {
@@ -113,7 +133,11 @@ export class QuoteService {
       throw new Error("Số tiền sau khi trừ phí không hợp lệ");
     }
 
-    const expiresAt = new Date(Date.now() + env.QUOTE_EXPIRY_MINUTES * 60 * 1000);
+    // Apply currency-specific rounding
+    targetAmount = MoneyService.roundTargetAmount(targetAmount, tgt);
+
+    const expiryMinutes = RuntimeConfigService.getQuoteExpiryMinutes();
+    const expiresAt = new Date(Date.now() + expiryMinutes * 60 * 1000);
 
     return {
       sourceCurrency: src,
@@ -126,5 +150,99 @@ export class QuoteService {
       feeCurrency,
       expiresAt
     };
+  }
+
+  /**
+   * Creates a persisted Quote in the database.
+   * Survives server restart.
+   */
+  static async createQuote(
+    customerId: string,
+    sourceCurrency: string,
+    targetCurrency: string,
+    sourceAmountInput: number | string
+  ) {
+    const calc = await this.calculateQuote(sourceCurrency, targetCurrency, sourceAmountInput);
+
+    const quote = await prisma.quote.create({
+      data: {
+        customerId,
+        sourceCurrency: calc.sourceCurrency,
+        targetCurrency: calc.targetCurrency,
+        sourceAmount: calc.sourceAmount,
+        targetAmount: calc.targetAmount,
+        effectiveRate: calc.effectiveRate,
+        baseRate: calc.baseRate,
+        fee: calc.fee,
+        feeCurrency: calc.feeCurrency,
+        status: "PENDING",
+        expiresAt: calc.expiresAt
+      }
+    });
+
+    return quote;
+  }
+
+  static async getQuoteById(quoteId: string) {
+    return prisma.quote.findUnique({
+      where: { id: quoteId },
+      include: { customer: true }
+    });
+  }
+
+  /**
+   * Atomically confirms a quote:
+   * 1. Validates quote exists
+   * 2. Belongs to customer
+   * 3. Status is PENDING
+   * 4. expiresAt > now
+   * Conditional update prevents double confirmation.
+   */
+  static async confirmQuote(quoteId: string, customerId: string) {
+    return prisma.$transaction(async (tx: any) => {
+      const quote = await tx.quote.findUnique({
+        where: { id: quoteId }
+      });
+
+      if (!quote) {
+        throw new Error("Báo giá không tồn tại trên hệ thống.");
+      }
+
+      if (quote.customerId !== customerId) {
+        throw new Error("Báo giá này không thuộc về tài khoản của bạn.");
+      }
+
+      if (quote.status !== "PENDING") {
+        throw new Error("Báo giá này đã được sử dụng hoặc không còn hiệu lực.");
+      }
+
+      if (new Date() > new Date(quote.expiresAt)) {
+        await tx.quote.update({
+          where: { id: quoteId },
+          data: { status: "EXPIRED" }
+        });
+        throw new Error("Báo giá đã hết hạn. Vui lòng tạo yêu cầu báo giá mới.");
+      }
+
+      const result = await tx.quote.updateMany({
+        where: {
+          id: quoteId,
+          customerId,
+          status: "PENDING"
+        },
+        data: {
+          status: "CONFIRMED",
+          confirmedAt: new Date()
+        }
+      });
+
+      if (result.count !== 1) {
+        throw new Error("Không thể xác nhận báo giá. Đã có thao tác xác nhận đồng thời.");
+      }
+
+      return tx.quote.findUnique({
+        where: { id: quoteId }
+      });
+    });
   }
 }

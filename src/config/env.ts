@@ -9,7 +9,7 @@ const envSchema = z.object({
   TELEGRAM_BOT_TOKEN: z.string().optional().default(""),
   SUPER_ADMIN_TELEGRAM_ID: z.string().optional().default(""),
   ADMIN_NOTIFICATION_CHAT_ID: z.string().optional().default(""),
-  CONFIG_ENCRYPTION_KEY: z.string().default(process.env.CONFIG_ENCRYPTION_KEY || "kh-vn-exchange-master-secret-key-32b!"),
+  CONFIG_ENCRYPTION_KEY: z.string().optional().default(""),
   GEMINI_API_KEY: z.string().optional().default(""),
   GEMINI_PRIMARY_MODEL: z.string().default("gemini-3.8-flash"),
   GEMINI_FALLBACK_MODEL: z.string().default("gemini-3.6-flash"),

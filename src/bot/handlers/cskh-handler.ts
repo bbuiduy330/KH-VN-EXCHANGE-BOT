@@ -56,7 +56,11 @@ cskhHandler.command("claim", async (ctx) => {
   if (!customerId) return ctx.reply("Cú pháp: <code>/claim &lt;ID_Khách&gt;</code>", { parse_mode: "HTML" });
 
   const staffTelegramId = String(ctx.from?.id || "");
-  await ConversationService.claim(customerId, staffTelegramId);
+  try {
+    await ConversationService.claim(customerId, staffTelegramId, ctx.identity?.userType || "CSKH");
+  } catch (err: any) {
+    return ctx.reply(`⚠️ ${err.message}`);
+  }
 
   // Notify customer without revealing staff's personal info
   const customer = await prisma.customer.findUnique({ where: { id: customerId } });
@@ -84,7 +88,16 @@ cskhHandler.command("release", async (ctx) => {
   if (!customerId) return ctx.reply("Cú pháp: <code>/release &lt;ID_Khách&gt;</code>", { parse_mode: "HTML" });
 
   const staffTelegramId = String(ctx.from?.id || "");
-  await ConversationService.release(customerId, staffTelegramId);
+  try {
+    await ConversationService.release(
+      customerId,
+      staffTelegramId,
+      ctx.identity?.userType || "CSKH",
+      ctx.identity?.staff?.permissions || []
+    );
+  } catch (err: any) {
+    return ctx.reply(`❌ ${err.message}`);
+  }
 
   // Notify customer
   const customer = await prisma.customer.findUnique({ where: { id: customerId } });
@@ -117,26 +130,46 @@ cskhHandler.command("msg", async (ctx) => {
   const content = text.substring(firstSpace + 1).trim();
   const staffTelegramId = String(ctx.from?.id || "");
 
-  // Record message in database
-  await ConversationService.addMessage({
+  // Check ownership
+  const canSend = await ConversationService.canStaffMessage(
     customerId,
-    senderType: "CSKH",
+    staffTelegramId,
+    ctx.identity?.userType || "CSKH",
+    ctx.identity?.staff?.permissions || []
+  );
+
+  if (!canSend) {
+    return ctx.reply("⛔ Bạn chỉ có thể gửi tin nhắn cho khách hàng mà bạn đã tiếp nhận (Claim). Dùng /claim trước nếu cần tiếp nhận.");
+  }
+
+  // Record outbound message in database as PENDING delivery
+  const msgRecord = await ConversationService.createOutboundMessage({
+    customerId,
     senderId: staffTelegramId,
-    content
+    content,
+    senderType: ctx.identity?.userType === "ADMIN" || ctx.identity?.userType === "SUPER_ADMIN" ? "ADMIN" : "CSKH"
   });
 
-  // Forward to customer's private telegram chat using the single bot
+  // Forward to customer's private telegram chat
   const customer = await prisma.customer.findUnique({ where: { id: customerId } });
   if (customer) {
-    const sent = await sendToCustomer(customer.telegramId, `💬 <b>Bộ phận CSKH:</b>\n${content}`);
-    if (sent) {
-      await ctx.reply(`✅ Đã gửi tin nhắn đến khách <code>${customerId}</code>.`, { parse_mode: "HTML" });
-    } else {
-      await ctx.reply(`⚠️ Lưu tin nhắn thành công nhưng chưa thể chuyển tới Telegram khách (ID: <code>${customer.telegramId}</code>).`, {
-        parse_mode: "HTML"
-      });
+    try {
+      const sent = await sendToCustomer(customer.telegramId, `💬 <b>Bộ phận CSKH:</b>\n${content}`);
+      if (sent) {
+        await ConversationService.markMessageSent(msgRecord.id, Date.now());
+        await ctx.reply(`✅ Đã gửi tin nhắn đến khách <code>${customerId}</code>.`, { parse_mode: "HTML" });
+      } else {
+        await ConversationService.markMessageFailed(msgRecord.id, "Telegram send returned false");
+        await ctx.reply(`⚠️ Không thể chuyển tin nhắn tới Telegram khách (ID: <code>${customer.telegramId}</code>).`, {
+          parse_mode: "HTML"
+        });
+      }
+    } catch (sendErr: any) {
+      await ConversationService.markMessageFailed(msgRecord.id, sendErr.message);
+      await ctx.reply(`❌ Lỗi gửi tin nhắn Telegram: ${sendErr.message}`, { parse_mode: "HTML" });
     }
   } else {
+    await ConversationService.markMessageFailed(msgRecord.id, "Customer not found");
     await ctx.reply(`❌ Không tìm thấy thông tin khách hàng <code>${customerId}</code>.`, { parse_mode: "HTML" });
   }
 });

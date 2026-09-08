@@ -107,7 +107,10 @@ const inMemoryStore = {
   backupRuns: new Map<string, any>(),
   auditLogs: new Map<string, any>(),
   fileEvidence: new Map<string, any>(),
-  systemSecrets: new Map<string, any>()
+  systemSecrets: new Map<string, any>(),
+  quotes: new Map<string, any>(),
+  systemSettings: new Map<string, any>(),
+  adminInputSessions: new Map<string, any>()
 };
 
 function matchesWhere(item: any, where?: any): boolean {
@@ -290,7 +293,10 @@ const mockMap: Record<string, { store: Map<string, any>; key: string }> = {
   backupRun: { store: inMemoryStore.backupRuns, key: "id" },
   auditLog: { store: inMemoryStore.auditLogs, key: "id" },
   fileEvidence: { store: inMemoryStore.fileEvidence, key: "id" },
-  systemSecret: { store: inMemoryStore.systemSecrets, key: "key" }
+  systemSecret: { store: inMemoryStore.systemSecrets, key: "key" },
+  quote: { store: inMemoryStore.quotes, key: "id" },
+  systemSetting: { store: inMemoryStore.systemSettings, key: "key" },
+  adminInputSession: { store: inMemoryStore.adminInputSessions, key: "staffId" }
 };
 
 let prismaClientInstance: any;
@@ -370,6 +376,9 @@ try {
     auditLog: createMockCollection(inMemoryStore.auditLogs, "id"),
     fileEvidence: createMockCollection(inMemoryStore.fileEvidence, "id"),
     systemSecret: createMockCollection(inMemoryStore.systemSecrets, "key"),
+    quote: createMockCollection(inMemoryStore.quotes, "id"),
+    systemSetting: createMockCollection(inMemoryStore.systemSettings, "key"),
+    adminInputSession: createMockCollection(inMemoryStore.adminInputSessions, "staffId"),
     $connect: async () => {},
     $disconnect: async () => {},
     $transaction: async (arg: any) => {

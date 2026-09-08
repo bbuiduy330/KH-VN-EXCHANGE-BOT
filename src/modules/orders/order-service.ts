@@ -379,14 +379,15 @@ export class OrderService {
    * Fix 3: Authorized Admin Payment Confirmation (Atomic + Idempotent)
    * WAITING_ADMIN_VERIFY -> PAYMENT_CONFIRMED -> WAITING_PAYOUT
    * Concurrency-safe: conditional update ensures only 1 admin can confirm simultaneously
+   * Normal confirmation strictly requires WAITING_ADMIN_VERIFY.
    */
   static async confirmPaymentReceived(orderId: string, adminId: string) {
     return prisma.$transaction(async (tx: any) => {
-      // Conditional update on WAITING_ADMIN_VERIFY or MANUAL_REVIEW
+      // Conditional update strictly on WAITING_ADMIN_VERIFY only
       const result = await tx.order.updateMany({
         where: {
           id: orderId,
-          status: { in: ["WAITING_ADMIN_VERIFY", "MANUAL_REVIEW", "CUSTOMER_SENT_BILL"] }
+          status: "WAITING_ADMIN_VERIFY"
         },
         data: {
           status: "WAITING_PAYOUT",
@@ -396,7 +397,9 @@ export class OrderService {
       });
 
       if (result.count !== 1) {
-        throw new Error("Order đã được xử lý hoặc trạng thái không còn hợp lệ.");
+        throw new Error(
+          "Order đã được xử lý hoặc không ở trạng thái chờ duyệt (WAITING_ADMIN_VERIFY). Hãy dùng Manual Override nếu cần can thiệp ngoại lệ."
+        );
       }
 
       // Record step 1: -> PAYMENT_CONFIRMED
@@ -425,8 +428,8 @@ export class OrderService {
         }
       });
 
-      // Write AuditLog in the SAME transaction
-      await AuditService.log(
+      // Write STRICT AuditLog in the SAME transaction (aborts if audit fails)
+      await AuditService.logStrict(
         {
           actorId: adminId,
           actorRole: "ADMIN",
@@ -496,7 +499,7 @@ export class OrderService {
         }
       });
 
-      await AuditService.log(
+      await AuditService.logStrict(
         {
           actorId: adminId,
           actorRole: "ADMIN",
@@ -553,7 +556,7 @@ export class OrderService {
         }
       });
 
-      await AuditService.log(
+      await AuditService.logStrict(
         {
           actorId: adminId,
           actorRole: "ADMIN",
@@ -577,6 +580,89 @@ export class OrderService {
     });
 
     return updated;
+  }
+
+  /**
+   * MANUAL FINANCIAL OVERRIDE
+   * Only for SUPER_ADMIN or specifically permitted Admin.
+   * Forces transition from abnormal/blocked states (e.g. MANUAL_REVIEW, SUSPICIOUS, PAYMENT_MISMATCH)
+   * to a target state with mandatory reason, ⚠️ warning, and STRICT audit logging.
+   */
+  static async manualFinancialOverride({
+    orderId,
+    actorId,
+    actorRole,
+    targetStatus,
+    reason
+  }: {
+    orderId: string;
+    actorId: string;
+    actorRole: string;
+    targetStatus: string;
+    reason: string;
+  }) {
+    if (!reason || reason.trim().length < 5) {
+      throw new Error("Lý do can thiệp tài chính thủ công (MANUAL OVERRIDE) phải từ 5 ký tự trở lên.");
+    }
+
+    return prisma.$transaction(async (tx: any) => {
+      const currentOrder = await tx.order.findUnique({
+        where: { id: orderId }
+      });
+
+      if (!currentOrder) {
+        throw new Error(`Không tìm thấy đơn hàng ${orderId}`);
+      }
+
+      const fromStatus = currentOrder.status;
+
+      const updated = await tx.order.update({
+        where: { id: orderId },
+        data: {
+          status: targetStatus,
+          verifiedByAdminId: actorId,
+          verifiedAt: new Date()
+        }
+      });
+
+      await tx.orderStateHistory.create({
+        data: {
+          orderId,
+          fromStatus,
+          toStatus: targetStatus,
+          actorId,
+          actorRole,
+          reason: `⚠️ MANUAL OVERRIDE: ${reason.trim()}`,
+          metadata: {
+            manualOverride: true,
+            actorId,
+            actorRole,
+            fromStatus,
+            targetStatus,
+            timestamp: new Date().toISOString()
+          }
+        }
+      });
+
+      await AuditService.logStrict(
+        {
+          actorId,
+          actorRole,
+          action: "FINANCIAL_MANUAL_OVERRIDE",
+          targetType: "ORDER",
+          targetId: orderId,
+          details: {
+            fromStatus,
+            targetStatus,
+            reason: reason.trim(),
+            timestamp: new Date().toISOString()
+          }
+        },
+        tx
+      );
+
+      return updated;
+    });
   }
 
   /**
@@ -662,6 +748,27 @@ export class OrderService {
     return prisma.order.findMany({
       take: limit,
       include: { customer: true },
+      orderBy: { createdAt: "desc" }
+    });
+  }
+
+  static async getOrdersForCustomer(customerId: string, limit: number = 20, cursor?: string) {
+    return prisma.order.findMany({
+      where: { customerId },
+      take: limit,
+      skip: cursor ? 1 : 0,
+      cursor: cursor ? { id: cursor } : undefined,
+      orderBy: { createdAt: "desc" },
+      include: { customer: true }
+    });
+  }
+
+  static async getOrdersAwaitingBill(customerId: string) {
+    return prisma.order.findMany({
+      where: {
+        customerId,
+        status: { in: ["WAITING_PAYMENT"] }
+      },
       orderBy: { createdAt: "desc" }
     });
   }
