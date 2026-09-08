@@ -14,7 +14,12 @@ import { getAdminMenuKeyboard, renderAdminStartText } from "../menus/admin-menu.
 import { prisma } from "../../database/client.js";
 import { AiProvider } from "../../modules/ai/ai-provider.js";
 import { SystemConfigService } from "../../modules/system-config/system-config-service.js";
+import { SystemSecretService } from "../../modules/system-config/system-secret-service.js";
+import { EncryptionService } from "../../modules/security/encryption-service.js";
+import { GeminiModelStrategy } from "../../modules/ai/gemini-models.js";
 import { BackupService } from "../../modules/backup/backup-service.js";
+
+export const pendingAdminInputs = new Map<string, { action: string; [key: string]: any }>();
 
 export const adminHandler = new Composer<BotContext>();
 
@@ -36,7 +41,7 @@ adminHandler.command("admin", async (ctx) => {
   await showAdminStart(ctx);
 });
 
-// /testai and /testgemini commands for quick diagnostic in Telegram
+// /testai and /testgemini commands for quick diagnostic in Telegram (Requirement 11 & 12)
 adminHandler.command(["testai", "testgemini"], async (ctx) => {
   const userType = ctx.identity?.userType;
   if (userType !== "ADMIN" && userType !== "SUPER_ADMIN") {
@@ -44,42 +49,82 @@ adminHandler.command(["testai", "testgemini"], async (ctx) => {
   }
 
   const waitMsg = await ctx.reply("⏳ Đang gửi yêu cầu kiểm tra tới Google Gemini API...");
-
   const result = await AiProvider.testGeminiConnection();
 
   if (result.ok) {
-    await ctx.api.editMessageText(
-      ctx.chat!.id,
-      waitMsg.message_id,
-      `✅ <b>GOOGLE GEMINI AI HOẠT ĐỘNG TỐT!</b>\n\n` +
-        `• <b>Model:</b> <code>${result.model}</code>\n` +
-        `• <b>Độ trễ:</b> <code>${result.latencyMs} ms</code>\n` +
-        `• <b>Phản hồi:</b>\n<i>"${result.reply}"</i>\n\n` +
-        `💡 <i>API Key đã kết nối thành công và đã ghi nhận token sử dụng trên Google AI Studio.</i>`,
-      { parse_mode: "HTML" }
-    );
+    let msg =
+      `🔍 <b>GEMINI DIAGNOSTIC</b>\n\n` +
+      `<b>API Key:</b>\n${result.configured ? "Configured" : "Not configured"}\n\n`;
+
+    if (result.fallbackUsed) {
+      msg +=
+        `<b>Primary:</b>\n<code>${result.primaryModel}</code>\nFAILED\n\n` +
+        `<b>Fallback:</b>\n<code>${result.actualModel}</code>\nOK\n\n`;
+    } else {
+      msg += `<b>Primary:</b>\n<code>${result.primaryModel}</code>\n\n`;
+    }
+
+    msg +=
+      `<b>Connection:</b>\nOK${result.fallbackUsed ? " (Fallback)" : ""}\n\n` +
+      `<b>Actual model:</b>\n<code>${result.actualModel}</code>\n\n` +
+      `<b>Latency:</b>\n${result.latencyMs} ms\n\n` +
+      `<b>Response:</b>\n${result.reply || "OK"}`;
+
+    await ctx.api.editMessageText(ctx.chat!.id, waitMsg.message_id, msg, { parse_mode: "HTML" });
   } else {
-    await ctx.api.editMessageText(
-      ctx.chat!.id,
-      waitMsg.message_id,
-      `❌ <b>KẾT NỐI GEMINI AI THẤT BẠI!</b>\n\n` +
-        `• <b>Model:</b> <code>${result.model}</code>\n` +
-        `• <b>Chi tiết lỗi:</b>\n<code>${result.error}</code>\n\n` +
-        `🔧 <b>Khắc phục:</b>\n` +
-        `1. Kiểm tra biến <code>GEMINI_API_KEY</code> trong file <code>.env</code> trên VPS.\n` +
-        `2. Xem quota tại <a href="https://aistudio.google.com/">Google AI Studio</a>.\n` +
-        `3. Đảm bảo cấu hình <code>GEMINI_TEXT_MODEL=gemini-3.6-flash</code>.`,
-      { parse_mode: "HTML", link_preview_options: { is_disabled: true } }
-    );
+    let msg =
+      `🔍 <b>GEMINI DIAGNOSTIC</b>\n\n` +
+      `<b>API Key:</b>\n${result.configured ? "Configured" : "Not configured"}\n\n` +
+      `<b>Primary:</b>\n<code>${result.primaryModel}</code>\nFAILED: ${result.errorCategory || "ERROR"}\n\n` +
+      `<b>Connection:</b>\nFAILED\n\n` +
+      `<b>Latency:</b>\n${result.latencyMs} ms\n\n` +
+      `<b>Error:</b>\n<code>${result.error || "Unknown error"}</code>`;
+
+    await ctx.api.editMessageText(ctx.chat!.id, waitMsg.message_id, msg, { parse_mode: "HTML" });
   }
 });
 
+// AI Management View (Requirement 7)
+export async function renderAiManagementView(): Promise<{ text: string; keyboard: InlineKeyboard }> {
+  const resolved = await SystemSecretService.resolveGeminiApiKey();
+  const currentModel = SystemConfigService.getGeminiTextModel() || GeminiModelStrategy.getPrimaryModel();
+  const maskedKey = EncryptionService.maskApiKey(resolved.key);
+
+  const text =
+    `🤖 <b>AI / GEMINI MANAGEMENT</b>\n\n` +
+    `• <b>Status:</b> ${resolved.key ? "Configured (Đã cấu hình)" : "Not configured (Chưa cấu hình)"}\n` +
+    `• <b>Key Source:</b> <code>${resolved.source}</code>\n` +
+    `• <b>Current model:</b> <code>${currentModel}</code>\n` +
+    `• <b>API key:</b> <code>${maskedKey}</code>\n\n` +
+    `<i>Bảo mật: API key được mã hóa AES-256-GCM tại mức lưu trữ. Không bao giờ hiển thị toàn bộ key.</i>`;
+
+  const keyboard = new InlineKeyboard()
+    .text("🧪 Test Gemini", "admin:ai:test")
+    .text("🔑 Replace API Key", "admin:ai:replace_key")
+    .row()
+    .text("🤖 Models", "admin:ai:models")
+    .text("📊 Diagnostics", "admin:ai:diagnostics")
+    .row()
+    .text("🔙 Về Menu chính", "admin:menu:back_start");
+
+  return { text, keyboard };
+}
+
+// /ai command: Access AI / Gemini management (SUPER_ADMIN only)
+adminHandler.command("ai", async (ctx) => {
+  const userType = ctx.identity?.userType;
+  if (userType !== "SUPER_ADMIN") {
+    return ctx.reply("⛔ Chỉ Super Admin mới có quyền quản lý cấu hình Gemini AI.");
+  }
+  const view = await renderAiManagementView();
+  await ctx.reply(view.text, { parse_mode: "HTML", reply_markup: view.keyboard });
+});
+
 // Helper for rendering dynamic settings view
-function renderSystemSettingsView(): { text: string; keyboard: InlineKeyboard } {
+async function renderSystemSettingsView(): Promise<{ text: string; keyboard: InlineKeyboard }> {
   const cfg = SystemConfigService.getConfig();
-  const maskedKey = cfg.geminiApiKey
-    ? `${cfg.geminiApiKey.slice(0, 7)}...${cfg.geminiApiKey.slice(-4)} (Đã kích hoạt)`
-    : "❌ Chưa cài đặt (Dùng /setkey <key> để cài)";
+  const resolvedKey = await SystemSecretService.resolveGeminiApiKey();
+  const maskedKey = EncryptionService.maskApiKey(resolvedKey.key);
 
   const history = BackupService.getHistory();
   const lastBackup = history[0];
@@ -135,27 +180,37 @@ adminHandler.command(["settings", "config"], async (ctx) => {
   if (userType !== "ADMIN" && userType !== "SUPER_ADMIN") {
     return ctx.reply("⛔ Bạn không có quyền truy cập bảng cài đặt hệ thống.");
   }
-  const view = renderSystemSettingsView();
+  const view = await renderSystemSettingsView();
   await ctx.reply(view.text, { parse_mode: "HTML", reply_markup: view.keyboard });
 });
 
-// /setkey command: Set Gemini API key directly from chat
+// /setkey command: Set Gemini API key directly from chat (SUPER_ADMIN ONLY, Requirement 7 & 10)
 adminHandler.command("setkey", async (ctx) => {
   const userType = ctx.identity?.userType;
-  if (userType !== "ADMIN" && userType !== "SUPER_ADMIN") {
-    return ctx.reply("⛔ Chỉ quản trị viên mới có quyền cài đặt API Key.");
+  if (userType !== "SUPER_ADMIN") {
+    return ctx.reply("⛔ Chỉ Super Admin mới có quyền quản lý và cập nhật API Key.");
   }
+
+  // Delete message containing sensitive command if possible
+  try {
+    await ctx.deleteMessage();
+  } catch {}
 
   const newKey = ctx.match?.trim();
   if (!newKey) {
     return ctx.reply(
       "🔑 <b>HƯỚNG DẪN CÀI ĐẶT GOOGLE GEMINI API KEY:</b>\n\n" +
-        "1. Lấy API Key miễn phí tại: https://aistudio.google.com/app/apikey\n" +
+        "1. Lấy API Key tại: https://aistudio.google.com/app/apikey\n" +
         "2. Gửi lệnh theo cú pháp:\n" +
         "<code>/setkey AIzaSyDxxxxxxxxxxxxxx</code>\n\n" +
-        "💡 <i>Hệ thống sẽ kiểm tra kết nối với Google trước khi lưu. Khi lưu thành công, AI sẽ hoạt động ngay lập tức mà không cần khởi động lại VPS.</i>",
+        "🔒 <i>Hệ thống sẽ xác thực với Google trước khi lưu. Key sẽ được mã hóa AES-256-GCM an toàn trên VPS.</i>",
       { parse_mode: "HTML", link_preview_options: { is_disabled: true } }
     );
+  }
+
+  // Format validation
+  if (newKey.length < 20) {
+    return ctx.reply("❌ Gemini API Key không hợp lệ. Vui lòng kiểm tra lại key từ Google AI Studio.");
   }
 
   const waitMsg = await ctx.reply("⏳ Đang kiểm tra kết nối với Google Gemini API...");
@@ -166,22 +221,26 @@ adminHandler.command("setkey", async (ctx) => {
       ctx.chat!.id,
       waitMsg.message_id,
       `❌ <b>API KEY KHÔNG HỢP LỆ HOẶC KHÔNG KẾT NỐI ĐƯỢC:</b>\n\n` +
-        `• Chi tiết lỗi:\n<code>${testRes.error}</code>\n\n` +
-        `🔧 Hệ thống chưa lưu key này. Vui lòng kiểm tra lại key trên Google AI Studio.`,
+        `• Lỗi: <code>${testRes.error}</code>\n\n` +
+        `🔧 Hệ thống KHÔNG lưu key này. Vui lòng kiểm tra lại key trên Google AI Studio.`,
       { parse_mode: "HTML" }
     );
   }
 
-  SystemConfigService.updateConfig({ geminiApiKey: newKey }, ctx.identity?.telegramId || "ADMIN");
+  // Encrypt and persist in secure storage
+  await SystemSecretService.setSecret("GEMINI_API_KEY", newKey, ctx.identity?.telegramId || "SUPER_ADMIN");
+  AiProvider.invalidateClient();
 
+  const maskedKey = EncryptionService.maskApiKey(newKey);
   await ctx.api.editMessageText(
     ctx.chat!.id,
     waitMsg.message_id,
     `✅ <b>ĐÃ CẬP NHẬT GOOGLE GEMINI API KEY THÀNH CÔNG!</b>\n\n` +
-      `• Model: <code>${testRes.model}</code>\n` +
-      `• Độ trễ: <code>${testRes.latencyMs} ms</code>\n` +
-      `• Phản hồi thử nghiệm: <i>"${testRes.reply}"</i>\n\n` +
-      `💾 <i>Key đã được lưu an toàn vào hệ thống VPS và kích hoạt ngay lập tức. Khách hàng giờ đây có thể trò chuyện với Trợ lý AI và phân tích hóa đơn thông minh!</i>`,
+      `• <b>API Key:</b> <code>${maskedKey}</code>\n` +
+      `• <b>Model:</b> <code>${testRes.actualModel || testRes.primaryModel}</code>\n` +
+      `• <b>Độ trễ:</b> <code>${testRes.latencyMs} ms</code>\n` +
+      `• <b>Lưu trữ:</b> <b>Mã hóa AES-256-GCM trên VPS</b>\n\n` +
+      `💾 <i>Key đã kích hoạt ngay lập tức. Khách hàng có thể tương tác với Trợ lý AI và phân tích hóa đơn.</i>`,
     { parse_mode: "HTML" }
   );
 });
@@ -1380,7 +1439,7 @@ adminHandler.callbackQuery("admin:menu:super_admin", async (ctx) => {
     return ctx.reply("⛔ Chức năng này chỉ dành riêng cho Super Admin.");
   }
 
-  const view = renderSystemSettingsView();
+  const view = await renderSystemSettingsView();
   await ctx.reply(view.text, { parse_mode: "HTML", reply_markup: view.keyboard });
 });
 
@@ -1392,19 +1451,214 @@ adminHandler.callbackQuery("admin:menu:settings", async (ctx) => {
     return ctx.reply("⛔ Chỉ quản trị viên mới có quyền truy cập cài đặt.");
   }
 
-  const view = renderSystemSettingsView();
+  const view = await renderSystemSettingsView();
   await ctx.reply(view.text, { parse_mode: "HTML", reply_markup: view.keyboard });
 });
 
 adminHandler.callbackQuery("admin:settings:refresh", async (ctx) => {
   await ctx.answerCallbackQuery("Đã làm mới thông số!");
-  const view = renderSystemSettingsView();
+  const view = await renderSystemSettingsView();
   try {
     await ctx.editMessageText(view.text, { parse_mode: "HTML", reply_markup: view.keyboard });
   } catch {
     await ctx.reply(view.text, { parse_mode: "HTML", reply_markup: view.keyboard });
   }
 });
+
+// AI / Gemini Callbacks (Requirement 7, 10, 11, 12)
+adminHandler.callbackQuery("admin:menu:ai", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userType = ctx.identity?.userType;
+  if (userType !== "SUPER_ADMIN") {
+    return ctx.reply("⛔ Chỉ Super Admin mới có quyền quản lý cấu hình Gemini AI.");
+  }
+  const view = await renderAiManagementView();
+  await ctx.reply(view.text, { parse_mode: "HTML", reply_markup: view.keyboard });
+});
+
+adminHandler.callbackQuery("admin:ai:test", async (ctx) => {
+  await ctx.answerCallbackQuery("Đang kiểm tra kết nối AI...");
+  const waitMsg = await ctx.reply("⏳ Đang gửi yêu cầu kiểm tra tới Google Gemini API...");
+  const result = await AiProvider.testGeminiConnection();
+
+  if (result.ok) {
+    let msg =
+      `🔍 <b>GEMINI DIAGNOSTIC</b>\n\n` +
+      `<b>API Key:</b>\n${result.configured ? "Configured" : "Not configured"}\n\n`;
+
+    if (result.fallbackUsed) {
+      msg +=
+        `<b>Primary:</b>\n<code>${result.primaryModel}</code>\nFAILED\n\n` +
+        `<b>Fallback:</b>\n<code>${result.actualModel}</code>\nOK\n\n`;
+    } else {
+      msg += `<b>Primary:</b>\n<code>${result.primaryModel}</code>\n\n`;
+    }
+
+    msg +=
+      `<b>Connection:</b>\nOK${result.fallbackUsed ? " (Fallback)" : ""}\n\n` +
+      `<b>Actual model:</b>\n<code>${result.actualModel}</code>\n\n` +
+      `<b>Latency:</b>\n${result.latencyMs} ms\n\n` +
+      `<b>Response:</b>\n${result.reply || "OK"}`;
+
+    await ctx.api.editMessageText(ctx.chat!.id, waitMsg.message_id, msg, { parse_mode: "HTML" });
+  } else {
+    let msg =
+      `🔍 <b>GEMINI DIAGNOSTIC</b>\n\n` +
+      `<b>API Key:</b>\n${result.configured ? "Configured" : "Not configured"}\n\n` +
+      `<b>Primary:</b>\n<code>${result.primaryModel}</code>\nFAILED: ${result.errorCategory || "ERROR"}\n\n` +
+      `<b>Connection:</b>\nFAILED\n\n` +
+      `<b>Latency:</b>\n${result.latencyMs} ms\n\n` +
+      `<b>Error:</b>\n<code>${result.error || "Unknown error"}</code>`;
+
+    await ctx.api.editMessageText(ctx.chat!.id, waitMsg.message_id, msg, { parse_mode: "HTML" });
+  }
+});
+
+adminHandler.callbackQuery("admin:ai:replace_key", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userType = ctx.identity?.userType;
+  if (userType !== "SUPER_ADMIN") {
+    return ctx.reply("⛔ Chỉ Super Admin mới có quyền đổi API Key.");
+  }
+
+  const telegramId = String(ctx.from?.id || "");
+  pendingAdminInputs.set(telegramId, { action: "REPLACE_GEMINI_KEY" });
+
+  await ctx.reply(
+    `🔑 <b>REPLACE GEMINI API KEY</b>\n\n` +
+      `Vui lòng gửi API Key mới trực tiếp vào khung chat (bắt đầu bằng <code>AIza...</code>).\n\n` +
+      `🔒 <i>Tin nhắn chứa API Key sẽ được tự động xóa sau khi nhận và lưu mã hóa AES-256-GCM. Không bao giờ hiển thị toàn bộ key.</i>\n\n` +
+      `<i>Gửi /cancel nếu bạn muốn hủy thao tác này.</i>`,
+    { parse_mode: "HTML" }
+  );
+});
+
+adminHandler.callbackQuery("admin:ai:models", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const keyboard = new InlineKeyboard()
+    .text("⚡ gemini-3.8-flash (Primary / Mặc định)", "admin:set_model:gemini-3.8-flash")
+    .row()
+    .text("🛡 gemini-3.6-flash (Fallback)", "admin:set_model:gemini-3.6-flash")
+    .row()
+    .text("🪶 gemini-3.5-flash-lite (Lite)", "admin:set_model:gemini-3.5-flash-lite")
+    .row()
+    .text("🔙 Quay lại Quản trị AI", "admin:menu:ai");
+
+  await ctx.reply(
+    `🤖 <b>CHỌN MODEL GOOGLE GEMINI AI:</b>\n\n` +
+      `Chiến lược model hiện tại:\n` +
+      `• <b>Primary:</b> <code>${GeminiModelStrategy.getPrimaryModel()}</code>\n` +
+      `• <b>Fallback:</b> <code>${GeminiModelStrategy.getFallbackModel()}</code>\n` +
+      `• <b>Lite:</b> <code>${GeminiModelStrategy.getLiteModel()}</code>\n\n` +
+      `Chọn model bạn muốn ưu tiên sử dụng:`,
+    {
+      parse_mode: "HTML",
+      reply_markup: keyboard
+    }
+  );
+});
+
+adminHandler.callbackQuery("admin:ai:diagnostics", async (ctx) => {
+  await ctx.answerCallbackQuery("Đang chạy chẩn đoán...");
+  const waitMsg = await ctx.reply("⏳ Đang thực hiện chẩn đoán toàn diện hệ thống AI...");
+  const resolved = await SystemSecretService.resolveGeminiApiKey();
+  const testRes = await AiProvider.testGeminiConnection();
+
+  const attemptsReport = testRes.attempts
+    ? testRes.attempts.map((a) => `• Model <code>${a.model}</code>: ${a.error ? `FAILED (${a.error.category})` : "OK"} (${a.latencyMs} ms)`).join("\n")
+    : "Không có nhật ký chi tiết";
+
+  const diagText =
+    `📊 <b>CHI TIẾT CHẨN ĐOÁN HỆ THỐNG AI (DIAGNOSTICS)</b>\n\n` +
+    `• <b>Provider:</b> Google Gemini API (@google/genai)\n` +
+    `• <b>Trạng thái Key:</b> ${resolved.key ? "Đã kích hoạt" : "Chưa có Key"}\n` +
+    `• <b>Nguồn Key:</b> <code>${resolved.source}</code>\n` +
+    `• <b>Mã hóa VPS:</b> AES-256-GCM (Hardware/OS Level)\n\n` +
+    `<b>Chuỗi Fallback:</b>\n` +
+    `1. Primary: <code>${GeminiModelStrategy.getPrimaryModel()}</code>\n` +
+    `2. Fallback: <code>${GeminiModelStrategy.getFallbackModel()}</code>\n` +
+    `3. Lite: <code>${GeminiModelStrategy.getLiteModel()}</code>\n\n` +
+    `<b>Kết quả thực nghiệm:</b>\n` +
+    `${attemptsReport}\n\n` +
+    `• <b>Model phản hồi thực tế:</b> <code>${testRes.actualModel || "N/A"}</code>\n` +
+    `• <b>Độ trễ:</b> ${testRes.latencyMs} ms\n` +
+    `• <b>Kết nối:</b> ${testRes.ok ? "✅ HOẠT ĐỘNG TỐT" : "❌ LỖI KẾT NỐI"}\n` +
+    (testRes.error ? `• <b>Lỗi:</b> <code>${testRes.error}</code>\n` : "");
+
+  await ctx.api.editMessageText(ctx.chat!.id, waitMsg.message_id, diagText, {
+    parse_mode: "HTML",
+    reply_markup: new InlineKeyboard().text("🔙 Quay lại Quản trị AI", "admin:menu:ai")
+  });
+});
+
+// Admin text message handler for interactive prompts (e.g. Replace Key flow)
+export async function handleAdminTextMessage(ctx: BotContext, text: string): Promise<boolean> {
+  const telegramId = String(ctx.from?.id || "");
+  const pending = pendingAdminInputs.get(telegramId);
+  if (!pending) return false;
+
+  if (text.startsWith("/cancel")) {
+    pendingAdminInputs.delete(telegramId);
+    await ctx.reply("Đã hủy thao tác cài đặt.");
+    return true;
+  }
+
+  if (pending.action === "REPLACE_GEMINI_KEY") {
+    const userType = ctx.identity?.userType;
+    if (userType !== "SUPER_ADMIN") {
+      pendingAdminInputs.delete(telegramId);
+      await ctx.reply("⛔ Chỉ Super Admin mới có quyền cập nhật API Key.");
+      return true;
+    }
+
+    // Try deleting secret message to avoid leaking key in chat history (Requirement 10)
+    try {
+      await ctx.deleteMessage();
+    } catch {}
+
+    const newKey = text.trim();
+    if (newKey.length < 20) {
+      await ctx.reply("❌ Gemini API Key không hợp lệ. Vui lòng cung cấp key hợp lệ từ Google AI Studio (bắt đầu bằng AIza...).");
+      return true;
+    }
+
+    const waitMsg = await ctx.reply("⏳ Đang xác thực API Key mới với Google Gemini API...");
+    const testRes = await AiProvider.testGeminiConnection(newKey);
+
+    if (!testRes.ok) {
+      await ctx.api.editMessageText(
+        ctx.chat!.id,
+        waitMsg.message_id,
+        `❌ <b>Gemini API Key không hợp lệ.</b>\n\n` +
+          `• Chi tiết lỗi: <code>${testRes.error}</code>\n\n` +
+          `Hệ thống KHÔNG lưu key này. Vui lòng gửi lại key hợp lệ hoặc gửi /cancel để thoát.`,
+        { parse_mode: "HTML" }
+      );
+      return true;
+    }
+
+    // Success: Encrypt, persist, invalidate cache
+    await SystemSecretService.setSecret("GEMINI_API_KEY", newKey, ctx.identity?.telegramId || "SUPER_ADMIN");
+    AiProvider.invalidateClient();
+    pendingAdminInputs.delete(telegramId);
+
+    const maskedKey = EncryptionService.maskApiKey(newKey);
+    await ctx.api.editMessageText(
+      ctx.chat!.id,
+      waitMsg.message_id,
+      `✅ <b>ĐÃ CẬP NHẬT GOOGLE GEMINI API KEY THÀNH CÔNG!</b>\n\n` +
+        `• <b>API Key:</b> <code>${maskedKey}</code>\n` +
+        `• <b>Model:</b> <code>${testRes.actualModel || testRes.primaryModel}</code>\n` +
+        `• <b>Độ trễ:</b> <code>${testRes.latencyMs} ms</code>\n` +
+        `• <b>Lưu trữ:</b> <b>Mã hóa AES-256-GCM an toàn trên VPS</b>\n\n` +
+        `Key mới đã được kích hoạt ngay lập tức!`,
+      { parse_mode: "HTML" }
+    );
+    return true;
+  }
+
+  return false;
+}
 
 adminHandler.callbackQuery("admin:settings:ask_key", async (ctx) => {
   await ctx.answerCallbackQuery();
@@ -1421,11 +1675,11 @@ adminHandler.callbackQuery("admin:settings:ask_key", async (ctx) => {
 adminHandler.callbackQuery("admin:settings:model_select", async (ctx) => {
   await ctx.answerCallbackQuery();
   const keyboard = new InlineKeyboard()
-    .text("⚡ gemini-3.6-flash (Khuyên dùng)", "admin:set_model:gemini-3.6-flash")
+    .text("⚡ gemini-3.8-flash (Primary)", "admin:set_model:gemini-3.8-flash")
     .row()
-    .text("🪶 gemini-3.5-flash-lite (Siêu nhanh)", "admin:set_model:gemini-3.5-flash-lite")
+    .text("🛡 gemini-3.6-flash (Fallback)", "admin:set_model:gemini-3.6-flash")
     .row()
-    .text("🧠 gemini-3.8-flash (Model mới)", "admin:set_model:gemini-3.8-flash")
+    .text("🪶 gemini-3.5-flash-lite (Lite)", "admin:set_model:gemini-3.5-flash-lite")
     .row()
     .text("🔙 Quay lại Cài đặt", "admin:menu:settings");
 
@@ -1469,7 +1723,7 @@ adminHandler.callbackQuery("admin:settings:test_ai", async (ctx) => {
       ctx.chat!.id,
       waitMsg.message_id,
       `✅ <b>GOOGLE GEMINI AI HOẠT ĐỘNG TỐT!</b>\n\n` +
-        `• <b>Model:</b> <code>${result.model}</code>\n` +
+        `• <b>Model:</b> <code>${result.actualModel || result.primaryModel}</code>\n` +
         `• <b>Độ trễ:</b> <code>${result.latencyMs} ms</code>\n` +
         `• <b>Phản hồi:</b>\n<i>"${result.reply}"</i>`,
       { parse_mode: "HTML" }

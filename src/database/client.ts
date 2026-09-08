@@ -106,7 +106,8 @@ const inMemoryStore = {
   staffInvites: new Map<string, any>(),
   backupRuns: new Map<string, any>(),
   auditLogs: new Map<string, any>(),
-  fileEvidence: new Map<string, any>()
+  fileEvidence: new Map<string, any>(),
+  systemSecrets: new Map<string, any>()
 };
 
 function matchesWhere(item: any, where?: any): boolean {
@@ -288,7 +289,8 @@ const mockMap: Record<string, { store: Map<string, any>; key: string }> = {
   staffInvite: { store: inMemoryStore.staffInvites, key: "code" },
   backupRun: { store: inMemoryStore.backupRuns, key: "id" },
   auditLog: { store: inMemoryStore.auditLogs, key: "id" },
-  fileEvidence: { store: inMemoryStore.fileEvidence, key: "id" }
+  fileEvidence: { store: inMemoryStore.fileEvidence, key: "id" },
+  systemSecret: { store: inMemoryStore.systemSecrets, key: "key" }
 };
 
 let prismaClientInstance: any;
@@ -367,6 +369,7 @@ try {
     backupRun: createMockCollection(inMemoryStore.backupRuns, "id"),
     auditLog: createMockCollection(inMemoryStore.auditLogs, "id"),
     fileEvidence: createMockCollection(inMemoryStore.fileEvidence, "id"),
+    systemSecret: createMockCollection(inMemoryStore.systemSecrets, "key"),
     $connect: async () => {},
     $disconnect: async () => {},
     $transaction: async (arg: any) => {

@@ -277,3 +277,14 @@ model BackupRun {
 
   @@index([status])
 }
+
+model SystemSecret {
+  id             String   @id @default(cuid())
+  key            String   @unique
+  encryptedValue String
+  iv             String
+  authTag        String
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  updatedBy      String
+}

@@ -2,7 +2,7 @@ import { Composer } from "grammy";
 import { BotContext, identityMiddleware } from "./middleware/identity.js";
 import { customerHandler, showCustomerStart, handleCustomerTextMessage, handleCustomerPhoto, handleCustomerVoice } from "./handlers/customer-handler.js";
 import { cskhHandler, showCskhStart } from "./handlers/cskh-handler.js";
-import { adminHandler, showAdminStart, handleAdminPhoto } from "./handlers/admin-handler.js";
+import { adminHandler, showAdminStart, handleAdminPhoto, handleAdminTextMessage } from "./handlers/admin-handler.js";
 import { PermissionService } from "../modules/permissions/permission-service.js";
 import { sendToAdminNotificationChat } from "./notifications.js";
 
@@ -115,6 +115,11 @@ mainRouter.on("message:text", async (ctx) => {
   }
 
   const userType = ctx.identity?.userType;
+  if (userType === "SUPER_ADMIN" || userType === "ADMIN") {
+    const handled = await handleAdminTextMessage(ctx, text);
+    if (handled) return;
+  }
+
   if (userType === "CUSTOMER") {
     await handleCustomerTextMessage(ctx, text);
   } else if (userType === "CSKH") {

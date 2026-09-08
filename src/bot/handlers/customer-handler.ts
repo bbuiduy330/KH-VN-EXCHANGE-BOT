@@ -7,6 +7,7 @@ import { QuoteService } from "../../modules/quotes/quote-service.js";
 import { OrderService } from "../../modules/orders/order-service.js";
 import { ConversationService } from "../../modules/conversation/conversation-service.js";
 import { AiProvider } from "../../modules/ai/ai-provider.js";
+import { ConversationalAIService } from "../../modules/ai/customer-ai-service.js";
 import { FileService } from "../../modules/files/file-service.js";
 import { sendToStaff, sendToAdminNotificationChat } from "../notifications.js";
 import { getCustomerMenuKeyboard, renderCustomerStartText } from "../menus/customer-menu.js";
@@ -279,7 +280,7 @@ export async function handleCustomerTextMessage(ctx: BotContext, text: string) {
   });
 
   if (conv.mode === "HUMAN") {
-    // In HUMAN mode, CSKH takes over; customer AI stops automatic replies
+    // In HUMAN mode, CSKH takes over; customer AI stops automatic replies (Requirement 18)
     logger.info({ customerId: customer.id }, "Conversation in HUMAN mode; AI reply paused");
 
     if (conv.claimedById) {
@@ -300,10 +301,27 @@ export async function handleCustomerTextMessage(ctx: BotContext, text: string) {
     return;
   }
 
-  // AUTO mode: Try parsing exchange intent
+  // Check active order context
+  const activeOrder = await OrderService.getLatestActiveOrderForCustomer(customer.id);
+  let activeOrderContext = null;
+  if (activeOrder) {
+    const recv = activeOrder.receivingAccountSnapshot as any;
+    activeOrderContext = {
+      orderId: activeOrder.id,
+      status: activeOrder.status,
+      sourceAmount: activeOrder.sourceAmount,
+      sourceCurrency: activeOrder.sourceCurrency,
+      targetAmount: activeOrder.targetAmount,
+      targetCurrency: activeOrder.targetCurrency,
+      receivingBank: recv?.bankName
+    };
+  }
+
+  // 1. Check exchange intent (structured parser -> QuoteService)
   const intent = await AiProvider.parseExchangeIntent(text);
   if (intent) {
     try {
+      // Deterministic calculation handled strictly by QuoteService / MoneyService (Requirement 4)
       const quote = await QuoteService.calculateQuote(intent.sourceCurrency, intent.targetCurrency, intent.amount);
       const quoteKey = `${customer.id}_${Date.now()}`;
       pendingCustomerQuotes.set(quoteKey, quote);
@@ -320,24 +338,23 @@ export async function handleCustomerTextMessage(ctx: BotContext, text: string) {
           `Bấm nút dưới đây để tạo đơn và nhận tài khoản chuyển tiền:`,
         { parse_mode: "HTML", reply_markup: keyboard }
       );
+      return;
     } catch (err: any) {
       await ctx.reply(`⚠️ ${err.message}`);
+      return;
     }
-    return;
   }
 
-  // If not a structured exchange formula, generate intelligent AI consultation with Gemini
+  // 2. General conversation -> ConversationalAIService (Requirement 3, 4, 5, 6)
   let aiReply: string | null = null;
-  if (AiProvider.isAvailable()) {
+  const isAvailable = await AiProvider.isAvailable();
+  if (isAvailable) {
     try {
-      const allRates = await QuoteService.getAllRates();
-      const ratesSummary = allRates && allRates.length > 0
-        ? allRates.map((r: any) => `• ${r.pair}: Tỷ giá cơ sở ${r.baseRate}`).join("\n")
-        : "USD_VND, VND_USD, KHR_VND, VND_KHR";
-
-      aiReply = await AiProvider.generateCustomerConsultation(text, {
-        ratesSummary,
-        customerName: customer.fullName || customer.username || "Quý khách"
+      aiReply = await ConversationalAIService.generateReply({
+        customerMessage: text,
+        customerName: customer.fullName || customer.username || "Quý khách",
+        customerId: customer.id,
+        activeOrderContext
       });
     } catch (err) {
       logger.warn({ err }, "Failed to generate AI consultation reply");
@@ -466,7 +483,7 @@ export async function handleCustomerPhoto(ctx: BotContext) {
   }
 }
 
-// Customer voice handler
+// Customer voice handler (Requirement 16)
 export async function handleCustomerVoice(ctx: BotContext) {
   const telegramId = String(ctx.from?.id || "");
   const customer = await CustomerService.getOrCreateCustomer({ telegramId });
@@ -480,16 +497,32 @@ export async function handleCustomerVoice(ctx: BotContext) {
     const res = await fetch(url);
     const buffer = Buffer.from(await res.arrayBuffer());
 
-    // Save evidence
-    await FileService.saveEvidenceFile(buffer, `voice_${Date.now()}.ogg`, "VOICE", "audio/ogg");
+    // 1. Preserve original Telegram voice file locally (Requirement 16)
+    const savedEvidence = await FileService.saveEvidenceFile(
+      buffer,
+      `voice_${customer.id}_${Date.now()}.ogg`,
+      "VOICE",
+      "audio/ogg"
+    );
 
-    // Transcribe
-    const transcribed = await AiProvider.transcribeAudio(buffer, "audio/ogg");
-    if (transcribed) {
-      await ctx.reply(`🎙 <i>Bạn vừa nói:</i> "${transcribed}"`, { parse_mode: "HTML" });
-      await handleCustomerTextMessage(ctx, transcribed);
+    // 2. Transcribe using Gemini
+    const transcribeResult = await AiProvider.transcribeAudio(buffer, "audio/ogg");
+    if (transcribeResult && transcribeResult.transcript) {
+      const langTag = transcribeResult.detectedLanguage?.toUpperCase() || "VI";
+      await ctx.reply(`🎙 [${langTag}] <i>"${transcribeResult.transcript}"</i>`, { parse_mode: "HTML" });
+      logger.info(
+        {
+          customerId: customer.id,
+          sha256: savedEvidence.sha256,
+          detectedLanguage: transcribeResult.detectedLanguage
+        },
+        "Customer voice transcribed successfully"
+      );
+      await handleCustomerTextMessage(ctx, transcribeResult.transcript);
     } else {
-      await ctx.reply("🎙 Đã lưu file ghi âm nhưng hiện tại chưa thể chuyển thành văn bản. Xin vui lòng nhắn tin trực tiếp.");
+      await ctx.reply(
+        "🎙 Đã lưu file ghi âm nhưng hiện tại chưa thể chuyển thành văn bản. Xin vui lòng nhắn tin trực tiếp."
+      );
     }
   } catch (err: any) {
     logger.error({ err }, "Voice processing error");

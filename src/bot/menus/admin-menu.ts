@@ -18,6 +18,7 @@ export function getAdminMenuKeyboard(isSuperAdmin: boolean = false): InlineKeybo
     .text("💾 Sao lưu", "admin:menu:backup");
 
   if (isSuperAdmin) {
+    keyboard.row().text("🤖 AI / Gemini", "admin:menu:ai");
     keyboard.row().text("⚙️ Cài đặt hệ thống (Settings)", "admin:menu:settings");
     keyboard.row().text("👑 Super Admin Controls", "admin:menu:super_admin");
   } else {

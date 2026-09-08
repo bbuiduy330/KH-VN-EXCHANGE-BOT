@@ -1,7 +1,8 @@
 import { GoogleGenAI } from "@google/genai";
-import { env } from "../../config/env.js";
 import { logger } from "../../shared/logger.js";
+import { SystemSecretService } from "../system-config/system-secret-service.js";
 import { SystemConfigService } from "../system-config/system-config-service.js";
+import { GeminiModelStrategy, GeminiErrorClassification } from "./gemini-models.js";
 
 export interface ParsedExchangeIntent {
   sourceCurrency: string;
@@ -11,160 +12,197 @@ export interface ParsedExchangeIntent {
 }
 
 export interface ExtractedBillData {
-  transactionId?: string;
-  senderName?: string;
-  receiverAccount?: string;
+  bank?: string;
   amount?: number;
   currency?: string;
-  timestamp?: string;
+  sender?: string;
+  receiver?: string;
+  transactionId?: string;
+  transactionTime?: string;
+  reference?: string;
+  confidence?: number;
   notes?: string;
 }
 
-export class AiProvider {
-  private static aiClient: GoogleGenAI | null = null;
-  private static activeKey: string = "";
+export interface TranscribeResult {
+  transcript: string;
+  detectedLanguage?: string;
+}
 
-  private static getClient(): GoogleGenAI | null {
-    const key = SystemConfigService.getGeminiApiKey();
-    if (!key) return null;
-
-    if (!this.aiClient || this.activeKey !== key) {
-      try {
-        this.aiClient = new GoogleGenAI({ apiKey: key });
-        this.activeKey = key;
-        logger.info("Initialized GoogleGenAI client with active dynamic API key");
-      } catch (err) {
-        logger.warn({ err }, "Failed to initialize GoogleGenAI");
-        return null;
-      }
-    }
-    return this.aiClient;
-  }
-
-  static isAvailable(): boolean {
-    return Boolean(SystemConfigService.getGeminiApiKey());
-  }
-
-  // Models list in order of priority
-  private static getModelCandidates(primaryModel?: string): string[] {
-    const primary = primaryModel || SystemConfigService.getGeminiTextModel();
-    const candidates = [primary, "gemini-3.6-flash", "gemini-3.5-flash-lite"];
-    return Array.from(new Set(candidates));
-  }
-
-  // Diagnostic test to verify Gemini API key & model connectivity
-  static async testGeminiConnection(overrideKey?: string): Promise<{
-    ok: boolean;
+export interface DiagnosticResult {
+  ok: boolean;
+  configured: boolean;
+  source: "ENCRYPTED_DB" | "ENV" | "NONE";
+  primaryModel: string;
+  actualModel?: string;
+  fallbackUsed?: boolean;
+  latencyMs: number;
+  reply?: string;
+  error?: string;
+  errorCategory?: string;
+  attempts?: Array<{
     model: string;
     latencyMs: number;
-    reply?: string;
-    error?: string;
+    error?: GeminiErrorClassification;
+  }>;
+}
+
+export class AiProvider {
+  private static cachedClient: GoogleGenAI | null = null;
+  private static cachedClientKey: string = "";
+
+  static invalidateClient(): void {
+    this.cachedClient = null;
+    this.cachedClientKey = "";
+    SystemSecretService.invalidateCache();
+    logger.info("AiProvider client cache invalidated");
+  }
+
+  private static async getClient(overrideKey?: string): Promise<{
+    client: GoogleGenAI | null;
+    key: string | null;
+    source: "ENCRYPTED_DB" | "ENV" | "NONE";
   }> {
-    const key = overrideKey || SystemConfigService.getGeminiApiKey();
-    const primaryModel = SystemConfigService.getGeminiTextModel();
-
-    if (!key) {
+    if (overrideKey) {
       return {
-        ok: false,
-        model: primaryModel,
-        latencyMs: 0,
-        error: "GEMINI_API_KEY chưa được cấu hình. Dùng lệnh /setkey <key> trên Telegram để kích hoạt."
+        client: new GoogleGenAI({ apiKey: overrideKey }),
+        key: overrideKey,
+        source: "ENCRYPTED_DB"
       };
     }
 
-    const testClient = overrideKey ? new GoogleGenAI({ apiKey: overrideKey }) : this.getClient();
-    if (!testClient) {
-      return {
-        ok: false,
-        model: primaryModel,
-        latencyMs: 0,
-        error: "Không thể khởi tạo Gemini Client với key này."
-      };
+    const resolved = await SystemSecretService.resolveGeminiApiKey();
+    if (!resolved.key) {
+      return { client: null, key: null, source: "NONE" };
     }
 
-    const startTime = Date.now();
-    const models = this.getModelCandidates(primaryModel);
-
-    let lastError: any = null;
-    for (const model of models) {
-      try {
-        const response = await testClient.models.generateContent({
-          model,
-          contents: "Xin chào! Hãy phản hồi ngắn gọn: 'Gemini AI đang hoạt động tốt trên hệ thống KH-VN Exchange.'"
-        });
-        const latencyMs = Date.now() - startTime;
-        return {
-          ok: true,
-          model,
-          latencyMs,
-          reply: response.text?.trim()
-        };
-      } catch (err: any) {
-        lastError = err;
-        logger.warn({ model, err: err?.message || err }, "Gemini test failed for model, trying next");
-      }
+    if (!this.cachedClient || this.cachedClientKey !== resolved.key) {
+      this.cachedClient = new GoogleGenAI({ apiKey: resolved.key });
+      this.cachedClientKey = resolved.key;
+      logger.info({ source: resolved.source }, "Initialized GoogleGenAI client");
     }
 
     return {
-      ok: false,
-      model: primaryModel,
-      latencyMs: Date.now() - startTime,
-      error: lastError?.message || "All Gemini models failed"
+      client: this.cachedClient,
+      key: resolved.key,
+      source: resolved.source
     };
   }
 
-  // Intelligent Customer Support / Chat consultation with Gemini
-  static async generateCustomerConsultation(
-    customerMessage: string,
-    context?: {
-      ratesSummary?: string;
-      customerName?: string;
-    }
-  ): Promise<string | null> {
-    const client = this.getClient();
-    if (!client) return null;
-
-    const ratesInfo = context?.ratesSummary || "USD, VND, KHR (hỗ trợ chuyển hai chiều)";
-    const prompt = `Bạn là Trợ lý Ảo chăm sóc khách hàng của dịch vụ đổi tiền "KH-VN Exchange" (chuyên chuyển tiền và đổi tiền hai chiều Việt Nam - Campuchia).
-
-THÔNG TIN HỆ THỐNG:
-- Tỷ giá hiện hành:
-${ratesInfo}
-- Phương thức nhận & chuyển:
-  + Việt Nam: Chuyển khoản mọi ngân hàng nội địa (Vietcombank, MB, Techcombank, VPBank...) và ví điện tử.
-  + Campuchia: ABA Bank, Wing, TrueMoney, Acleda, tiền mặt USD/KHR.
-- Quy trình: Khách gửi yêu cầu -> Nhận báo giá & mã QR -> Khách chuyển khoản & gửi ảnh biên lai -> Nhân viên đối soát tài khoản và giải ngân trong 5-10 phút.
-
-YÊU CẦU TRẢ LỜI:
-- Khách hàng [${context?.customerName || "Khách"}]: "${customerMessage}"
-- Hãy trả lời lịch sự, thân thiện, súc tích (khoảng 2-4 câu).
-- Hướng dẫn khách cụ thể: Nếu muốn đổi tiền, khách có thể gửi tin nhắn theo cú pháp ví dụ: "đổi 500 USD sang VND" hoặc nhấn nút "💱 Đổi tiền".
-- Nếu khách cần hỗ trợ đặc biệt hoặc gặp vấn đề, hướng dẫn khách nhấn nút "💬 Hỗ trợ" để gặp nhân viên trực tiếp.
-- QUY TẮC AN TOÀN: Tuyệt đối không tự ý bịa số tài khoản ngân hàng hoặc xác nhận đã nhận tiền (chỉ hệ thống tạo đơn và nhân viên đối soát).
-- Định dạng: Văn bản thuần túy, có thể dùng emoji phù hợp, KHÔNG dùng Markdown phức tạp (tránh lỗi ký tự đặc biệt).`;
-
-    const models = this.getModelCandidates();
-    for (const model of models) {
-      try {
-        const response = await client.models.generateContent({
-          model,
-          contents: prompt
-        });
-        const reply = response.text?.trim();
-        if (reply) return reply;
-      } catch (err: any) {
-        logger.warn({ model, err: err?.message || err }, "Gemini consultation failed, trying fallback model");
-      }
-    }
-
-    return null;
+  static async isAvailable(): Promise<boolean> {
+    const resolved = await SystemSecretService.resolveGeminiApiKey();
+    return Boolean(resolved.key && resolved.key.length > 0);
   }
 
-  // Regex fallback parser when Gemini is not configured
+  /**
+   * Executes a text prompt through the safe fallback model chain.
+   */
+  static async executeTextPrompt(prompt: string, systemInstruction?: string): Promise<string | null> {
+    const { client } = await this.getClient();
+    if (!client) return null;
+
+    const configuredModel = SystemConfigService.getGeminiTextModel();
+    const models = GeminiModelStrategy.getTextModelChain(configuredModel);
+
+    try {
+      const execution = await GeminiModelStrategy.executeWithFallback(
+        models,
+        async (model) => {
+          const config: Record<string, any> = {};
+          if (systemInstruction) {
+            config.systemInstruction = systemInstruction;
+          }
+
+          const response = await client.models.generateContent({
+            model,
+            contents: prompt,
+            config: Object.keys(config).length > 0 ? config : undefined
+          });
+
+          return response.text?.trim() || "";
+        },
+        { contextName: "executeTextPrompt" }
+      );
+
+      return execution.result || null;
+    } catch (err: any) {
+      logger.warn({ err: err?.message || err }, "Failed to execute text prompt across fallback models");
+      return null;
+    }
+  }
+
+  /**
+   * Diagnostic test with model fallback visibility (Requirement 11 & 12).
+   * Uses minimal test prompt: "Return exactly: OK" (does not expose customer/payment data).
+   */
+  static async testGeminiConnection(overrideKey?: string): Promise<DiagnosticResult> {
+    const { client, key, source } = await this.getClient(overrideKey);
+    const primaryModel = SystemConfigService.getGeminiTextModel() || GeminiModelStrategy.getPrimaryModel();
+
+    if (!client || !key) {
+      return {
+        ok: false,
+        configured: false,
+        source: "NONE",
+        primaryModel,
+        latencyMs: 0,
+        error: "Gemini API key chưa được cấu hình. Dùng lệnh /setkey <key> để kích hoạt."
+      };
+    }
+
+    const models = GeminiModelStrategy.getTextModelChain(primaryModel);
+    const startTime = Date.now();
+
+    try {
+      const execution = await GeminiModelStrategy.executeWithFallback(
+        models,
+        async (model) => {
+          const response = await client.models.generateContent({
+            model,
+            contents: "Return exactly: OK"
+          });
+          const text = response.text?.trim() || "";
+          if (!text) {
+            throw new Error("Empty response returned from model");
+          }
+          return text;
+        },
+        { contextName: "testGeminiConnection" }
+      );
+
+      const fallbackUsed = execution.actualModel !== primaryModel;
+
+      return {
+        ok: true,
+        configured: true,
+        source,
+        primaryModel,
+        actualModel: execution.actualModel,
+        fallbackUsed,
+        latencyMs: execution.latencyMs,
+        reply: execution.result,
+        attempts: execution.attempts
+      };
+    } catch (err: any) {
+      const classification = GeminiModelStrategy.classifyError(err);
+      return {
+        ok: false,
+        configured: true,
+        source,
+        primaryModel,
+        latencyMs: Date.now() - startTime,
+        error: classification.message,
+        errorCategory: classification.category
+      };
+    }
+  }
+
+  /**
+   * Fast regex parser for zero-cost immediate extraction.
+   */
   static parseWithRegex(text: string): ParsedExchangeIntent | null {
     const clean = text.toLowerCase().trim();
-    // Pattern: đổi 1000 USD sang VND, 1000 usd to vnd, 1000usd -> vnd
-    const regex = /(?:đổi|chuyển|exchange)?\s*([\d.,]+)\s*([a-zA-Z]{3})\s*(?:sang|to|->|-)\s*([a-zA-Z]{3})/i;
+    const regex = /(?:đổi|chuyển|exchange)?\s*([\d.,]+)\s*([a-zA-Z]{3})\s*(?:sang|to|->|-|được|nhận)\s*([a-zA-Z]{3})/i;
     const match = clean.match(regex);
 
     if (match && match[1] && match[2] && match[3]) {
@@ -182,145 +220,217 @@ YÊU CẦU TRẢ LỜI:
     return null;
   }
 
+  /**
+   * Intent vs. Conversational Routing:
+   * Extracts structured exchange intent using Gemini, falling back to Regex.
+   */
   static async parseExchangeIntent(text: string): Promise<ParsedExchangeIntent | null> {
-    const client = this.getClient();
+    const { client } = await this.getClient();
     if (!client) {
       return this.parseWithRegex(text);
     }
 
-    const models = this.getModelCandidates();
-    for (const model of models) {
-      try {
-        const prompt = `Bạn là trợ lý trích xuất yêu cầu đổi tiền tệ.
-Văn bản của khách: "${text}"
-Hãy trích xuất:
-- sourceCurrency (USD, VND, hoặc KHR)
-- targetCurrency (USD, VND, hoặc KHR)
-- amount (số tiền dạng số)
-Nếu không xác định được, trả về {"valid": false}.
-Trả về JSON định dạng duy nhất:
-{"valid": true, "sourceCurrency": "USD", "targetCurrency": "VND", "amount": 1000}`;
+    const models = GeminiModelStrategy.getTextModelChain();
+    const prompt = `Trích xuất thông tin đổi tiền từ tin nhắn khách hàng: "${text}"
+Nếu tin nhắn thể hiện ý định đổi tiền từ loại tiền A sang B (ví dụ USD sang VND, VND sang KHR...):
+Trả về định dạng JSON duy nhất:
+{"valid": true, "sourceCurrency": "USD", "targetCurrency": "VND", "amount": 1000}
+Nếu tin nhắn chỉ là câu hỏi thông thường ("rate thế nào", "alo", "xin chào") không có số tiền và chiều đổi rõ ràng:
+Trả về duy nhất:
+{"valid": false}`;
 
-        const response = await client.models.generateContent({
-          model,
-          contents: prompt
-        });
+    try {
+      const execution = await GeminiModelStrategy.executeWithFallback(
+        models,
+        async (model) => {
+          const response = await client.models.generateContent({
+            model,
+            contents: prompt
+          });
+          return response.text?.trim() || "";
+        },
+        { contextName: "parseExchangeIntent" }
+      );
 
-        const raw = response.text || "";
-        const jsonMatch = raw.match(/\{[\s\S]*\}/);
-        if (jsonMatch) {
-          const parsed = JSON.parse(jsonMatch[0]);
-          if (parsed.valid && parsed.sourceCurrency && parsed.targetCurrency && parsed.amount) {
-            return {
-              sourceCurrency: parsed.sourceCurrency.toUpperCase(),
-              targetCurrency: parsed.targetCurrency.toUpperCase(),
-              amount: Number(parsed.amount),
-              confidence: 0.95
-            };
-          }
+      const raw = execution.result;
+      const jsonMatch = raw.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        const parsed = JSON.parse(jsonMatch[0]);
+        if (parsed.valid && parsed.sourceCurrency && parsed.targetCurrency && Number(parsed.amount) > 0) {
+          return {
+            sourceCurrency: String(parsed.sourceCurrency).toUpperCase(),
+            targetCurrency: String(parsed.targetCurrency).toUpperCase(),
+            amount: Number(parsed.amount),
+            confidence: 0.95
+          };
         }
-        // If parsed as { valid: false }
-        break;
-      } catch (err: any) {
-        logger.warn({ model, err: err?.message || err }, "Gemini parsing error, trying next model candidate");
       }
+    } catch (err: any) {
+      logger.warn({ err: err?.message || err }, "Gemini intent parse failed, using regex fallback");
     }
 
     return this.parseWithRegex(text);
   }
 
+  /**
+   * Multimodal Bill Analysis (Requirement 15):
+   * Primary model: gemini-3.8-flash.
+   * Structured output + validation for bank, amount, currency, sender, receiver, transactionId, etc.
+   * NOTE: AI extraction is strictly secondary advisory metadata. AI NEVER confirms payment!
+   */
   static async analyzeBillImage(
     imageBuffer: Buffer,
     mimeType: string = "image/jpeg"
   ): Promise<ExtractedBillData | null> {
-    const client = this.getClient();
+    const { client } = await this.getClient();
     if (!client) {
-      return { notes: "AI unconfigured. Manual admin check required." };
+      return { notes: "AI unconfigured. Manual check required." };
     }
 
-    const models = this.getModelCandidates();
-    for (const model of models) {
-      try {
-        const prompt = `Phân tích biên lai chuyển khoản này và trích xuất thông tin để tham khảo (LƯU Ý: Đây chỉ là metadata hỗ trợ, admin sẽ kiểm tra tài khoản thực tế).
-Trả về JSON duy nhất với các trường:
+    const models = GeminiModelStrategy.getMultimodalModelChain();
+    const prompt = `Bạn là trợ lý phân tích hóa đơn chuyển khoản ngân hàng.
+Trích xuất các thông tin từ biên lai để nhân viên kiểm tra đối soát:
+- bank: Tên ngân hàng hoặc ví điện tử (VD: Vietcombank, MB Bank, ABA Bank, Wing, TrueMoney...)
+- amount: Số tiền chuyển (dạng số nguyên hoặc số thực, ví dụ 1500000 hoặc 50)
+- currency: Đơn vị tiền tệ (VND, USD, KHR)
+- sender: Tên người gửi/tài khoản chuyển nếu hiển thị
+- receiver: Số tài khoản hoặc tên người thụ hưởng
+- transactionId: Mã giao dịch/Mã bút toán/FT number
+- transactionTime: Thời gian giao dịch trên bill
+- reference: Nội dung chuyển khoản/lời nhắn
+- confidence: Độ rõ nét và tin cậy (từ 0.1 đến 1.0)
+- notes: Bất kỳ dấu hiệu bất thường hoặc lưu ý nào
+
+Trả về DUY NHẤT một JSON hợp lệ dạng:
 {
-  "transactionId": "mã giao dịch nếu có",
-  "senderName": "tên người chuyển",
-  "receiverAccount": "tài khoản nhận",
-  "amount": 1000,
-  "currency": "USD",
-  "timestamp": "thời gian trên biên lai",
-  "notes": "ghi chú thêm"
+  "bank": "Vietcombank",
+  "amount": 26300000,
+  "currency": "VND",
+  "sender": "NGUYEN VAN A",
+  "receiver": "KH-VN EXCHANGE",
+  "transactionId": "FT240987123",
+  "transactionTime": "2026-09-08 14:30:00",
+  "reference": "ORD-123456",
+  "confidence": 0.95,
+  "notes": "Biên lai rõ nét"
 }`;
 
-        const response = await client.models.generateContent({
-          model,
-          contents: [
-            prompt,
-            {
-              inlineData: {
-                mimeType,
-                data: imageBuffer.toString("base64")
+    try {
+      const execution = await GeminiModelStrategy.executeWithFallback(
+        models,
+        async (model) => {
+          const response = await client.models.generateContent({
+            model,
+            contents: [
+              prompt,
+              {
+                inlineData: {
+                  mimeType,
+                  data: imageBuffer.toString("base64")
+                }
               }
-            }
-          ]
-        });
+            ]
+          });
+          return response.text?.trim() || "";
+        },
+        { contextName: "analyzeBillImage" }
+      );
 
-        const raw = response.text || "";
-        const jsonMatch = raw.match(/\{[\s\S]*\}/);
-        if (jsonMatch) {
-          return JSON.parse(jsonMatch[0]);
-        }
-      } catch (err: any) {
-        logger.warn({ model, err: err?.message || err }, "Gemini image analysis failed, trying next candidate");
+      const raw = execution.result;
+      const jsonMatch = raw.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        const parsed = JSON.parse(jsonMatch[0]);
+        // Validate structured output
+        return {
+          bank: parsed.bank ? String(parsed.bank).trim() : undefined,
+          amount: typeof parsed.amount === "number" ? parsed.amount : parseFloat(parsed.amount) || undefined,
+          currency: parsed.currency ? String(parsed.currency).toUpperCase().trim() : undefined,
+          sender: parsed.sender ? String(parsed.sender).trim() : undefined,
+          receiver: parsed.receiver ? String(parsed.receiver).trim() : undefined,
+          transactionId: parsed.transactionId ? String(parsed.transactionId).trim() : undefined,
+          transactionTime: parsed.transactionTime ? String(parsed.transactionTime).trim() : undefined,
+          reference: parsed.reference ? String(parsed.reference).trim() : undefined,
+          confidence: typeof parsed.confidence === "number" ? parsed.confidence : 0.8,
+          notes: parsed.notes ? String(parsed.notes).trim() : undefined
+        };
       }
+    } catch (err: any) {
+      logger.warn({ err: err?.message || err }, "Gemini bill analysis failed across models");
     }
 
     return null;
   }
 
+  /**
+   * Voice Transcription (Requirement 16):
+   * Preserves original audio and transcribes accurately, detecting language.
+   */
   static async transcribeAudio(
     audioBuffer: Buffer,
     mimeType: string = "audio/ogg"
-  ): Promise<string | null> {
-    const client = this.getClient();
+  ): Promise<TranscribeResult | null> {
+    const { client } = await this.getClient();
     if (!client) return null;
 
+    const models = GeminiModelStrategy.getTranscribeModelChain();
+    const prompt = `Hãy nghe đoạn âm thanh này và chuyển thành văn bản chính xác.
+Đồng thời xác định ngôn ngữ (vi: Tiếng Việt, km: Tiếng Khmer, en: Tiếng Anh, zh: Tiếng Trung).
+Trả về duy nhất định dạng JSON:
+{"transcript": "nội dung đã chuyển thành văn bản", "detectedLanguage": "vi"}`;
+
     try {
-      const response = await client.models.generateContent({
-        model: env.GEMINI_TRANSCRIBE_MODEL,
-        contents: [
-          "Hãy chuyển đổi đoạn âm thanh tin nhắn thoại này thành văn bản chính xác.",
-          {
-            inlineData: {
-              mimeType,
-              data: audioBuffer.toString("base64")
-            }
-          }
-        ]
-      });
-      return response.text || null;
-    } catch (err) {
-      logger.warn({ err }, "Gemini voice transcription failed");
-      return null;
+      const execution = await GeminiModelStrategy.executeWithFallback(
+        models,
+        async (model) => {
+          const response = await client.models.generateContent({
+            model,
+            contents: [
+              prompt,
+              {
+                inlineData: {
+                  mimeType,
+                  data: audioBuffer.toString("base64")
+                }
+              }
+            ]
+          });
+          return response.text?.trim() || "";
+        },
+        { contextName: "transcribeAudio" }
+      );
+
+      const raw = execution.result;
+      const jsonMatch = raw.match(/\{[\s\S]*\}/);
+      if (jsonMatch) {
+        const parsed = JSON.parse(jsonMatch[0]);
+        if (parsed.transcript) {
+          return {
+            transcript: String(parsed.transcript).trim(),
+            detectedLanguage: parsed.detectedLanguage ? String(parsed.detectedLanguage).trim() : "vi"
+          };
+        }
+      }
+
+      // If raw response was text directly without JSON formatting
+      if (raw && raw.length > 0) {
+        return {
+          transcript: raw.trim(),
+          detectedLanguage: "vi"
+        };
+      }
+    } catch (err: any) {
+      logger.warn({ err: err?.message || err }, "Gemini voice transcription failed across models");
     }
+
+    return null;
   }
 
+  /**
+   * Helper translation for staff previews
+   */
   static async translateText(text: string, targetLanguage: string): Promise<string> {
-    const client = this.getClient();
-    if (!client) return text;
-
-    try {
-      const prompt = `Dịch văn bản sau sang ngôn ngữ ${targetLanguage}. Chỉ trả về câu dịch hoàn chỉnh, không thêm lời giải thích:
-"${text}"`;
-      const response = await client.models.generateContent({
-        model: env.GEMINI_TEXT_MODEL,
-        contents: prompt
-      });
-      return response.text?.trim() || text;
-    } catch (err) {
-      logger.warn({ err }, "Translation error");
-      return text;
-    }
+    const prompt = `Translate the following text into ${targetLanguage}. Maintain tone, clarity, and business terminology. Output ONLY the translated text without commentary:\n\n${text}`;
+    const result = await this.executeTextPrompt(prompt);
+    return result || text;
   }
 }
