@@ -3,6 +3,7 @@ import { logger } from "../../shared/logger.js";
 import { SystemSecretService } from "../system-config/system-secret-service.js";
 import { SystemConfigService } from "../system-config/system-config-service.js";
 import { GeminiModelStrategy, GeminiErrorClassification } from "./gemini-models.js";
+import { MoneyService } from "../money/money-service.js";
 
 export interface ParsedExchangeIntent {
   sourceCurrency: string;
@@ -28,6 +29,22 @@ export interface TranscribeResult {
   transcript: string;
   detectedLanguage?: string;
 }
+
+// Supported business currencies (USD <-> VND only in current scope).
+// Centralized so future currencies (e.g. CNY) can be added in one place.
+const SUPPORTED_CURRENCIES = ["USD", "VND"] as const;
+type SupportedCurrency = (typeof SUPPORTED_CURRENCIES)[number];
+
+// Ordered alias list: longer/more specific aliases must come first
+// to avoid substring collisions (e.g. "dong" before "do").
+const CURRENCY_ALIASES: Array<[string, string]> = [
+  ["do la", "USD"],
+  ["usd", "USD"],
+  ["$", "USD"],
+  ["dong", "VND"],
+  ["vnd", "VND"],
+  ["do", "USD"],
+];
 
 export interface DiagnosticResult {
   ok: boolean;
@@ -198,41 +215,184 @@ export class AiProvider {
   }
 
   /**
-   * Fast regex parser for zero-cost immediate extraction.
+   * Normalizes Vietnamese text: lowercase, strips diacritics, replaces đ -> d.
+   * "đổi 100 đô" -> "doi 100 do"
    */
-  static parseWithRegex(text: string): ParsedExchangeIntent | null {
-    const clean = text.toLowerCase().trim();
-    const regex = /(?:đổi|chuyển|exchange)?\s*([\d.,]+)\s*([a-zA-Z]{3})\s*(?:sang|to|->|-|được|nhận)\s*([a-zA-Z]{3})/i;
-    const match = clean.match(regex);
+  static normalizeText(text: string): string {
+    return text
+      .toLowerCase()
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .replace(/đ/g, "d")
+      .trim();
+  }
 
-    if (match && match[1] && match[2] && match[3]) {
-      const rawAmount = match[1].replace(/,/g, "");
-      const amount = parseFloat(rawAmount);
-      if (!isNaN(amount) && amount > 0) {
-        return {
-          amount,
-          sourceCurrency: match[2].toUpperCase(),
-          targetCurrency: match[3].toUpperCase(),
-          confidence: 0.9
-        };
+  /**
+   * Extracts the first amount token from normalized text and delegates
+   * to the centralized MoneyService.parseHumanAmount for safe parsing.
+   * "100" -> 100, "100k" -> 100000, "1 trieu" -> 1000000, "2m" -> 2000000
+   */
+  static parseAmount(normalized: string): number | null {
+    const match = normalized.match(/(-?\d[\d\s.,]*?)\s*(trieu|nghin|ngan|tr|m|k)?(?=\s|$)/);
+    if (!match || !match[1]) return null;
+    const token = (match[1] + (match[2] ? ` ${match[2]}` : "")).trim();
+    return MoneyService.parseHumanAmount(token);
+  }
+
+  /**
+   * Detects a supported currency alias in normalized text.
+   * Returns ISO code ("USD" | "VND") or null.
+   */
+  static detectCurrency(normalized: string): string | null {
+    for (const [alias, code] of CURRENCY_ALIASES) {
+      if (alias === "$") {
+        if (normalized.includes("$")) return code;
+      } else {
+        const regex = new RegExp(`\\b${this.escapeRegex(alias)}\\b`, "i");
+        if (regex.test(normalized)) return code;
       }
     }
     return null;
   }
 
   /**
+   * Infers the target currency from the source currency.
+   * USD -> VND, VND -> USD. Returns null for unsupported sources.
+   */
+  static inferTargetCurrency(sourceCurrency: string): string | null {
+    if (sourceCurrency === "USD") return "VND";
+    if (sourceCurrency === "VND") return "USD";
+    return null;
+  }
+
+  /**
+   * Checks if the normalized text contains an exchange signal:
+   * exchange verbs (doi, chuyen, exchange), direction separators (sang, to, ->, duoc, nhan),
+   * or the $ symbol.
+   */
+  private static hasExchangeSignal(normalized: string): boolean {
+    if (/\b(?:doi|chuyen|exchange)\b/.test(normalized)) return true;
+    if (/\b(?:sang|to|duoc|nhan)\b/.test(normalized)) return true;
+    if (normalized.includes("->")) return true;
+    if (normalized.includes("$")) return true;
+    return false;
+  }
+
+  /**
+   * Checks if the normalized text is a compact amount+currency message
+   * (e.g. "100 usd", "500k vnd", "100$", "100 do").
+   * After removing the amount token and currency aliases, only whitespace should remain.
+   */
+  private static isCompactAmountCurrency(normalized: string): boolean {
+    let stripped = normalized;
+    // Remove amount token (number + optional multiplier)
+    stripped = stripped.replace(/(-?\d[\d\s.,]*)\s*(trieu|nghin|ngan|tr|m|k)?/, "");
+    // Remove currency aliases (word-bounded)
+    for (const [alias] of CURRENCY_ALIASES) {
+      if (alias === "$") {
+        stripped = stripped.replace(/\$/g, "");
+      } else {
+        const regex = new RegExp(`\\b${this.escapeRegex(alias)}\\b`, "gi");
+        stripped = stripped.replace(regex, "");
+      }
+    }
+    return stripped.trim() === "";
+  }
+
+  /**
+   * Escapes regex special characters in a string.
+   */
+  private static escapeRegex(s: string): string {
+    return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  }
+
+  /**
+   * Deterministic local exchange-intent parser.
+   * Recognizes: "doi 100 do", "100$", "100k vnd", "1 trieu vnd sang usd", etc.
+   * Returns null when the text is not a recognizable exchange request.
+   */
+  static parseLocalExchangeIntent(text: string): ParsedExchangeIntent | null {
+    const normalized = this.normalizeText(text);
+    if (!normalized) return null;
+
+    const amount = this.parseAmount(normalized);
+    if (!amount) return null;
+
+    // Require an exchange signal (verb, separator, $) OR a compact amount+currency message.
+    // This prevents false positives like "gia 100 usd" or "doanh thu 100 usd".
+    if (!this.hasExchangeSignal(normalized) && !this.isCompactAmountCurrency(normalized)) {
+      return null;
+    }
+
+    // Split on direction separator: sang | to | -> | duoc | nhan
+    const separatorMatch = normalized.match(/\b(?:sang|to|duoc|nhan)\b|\s*->\s*/);
+
+    let sourceCurrency: string | null = null;
+    let targetCurrency: string | null = null;
+
+    if (separatorMatch && separatorMatch.index !== undefined) {
+      const before = normalized.slice(0, separatorMatch.index);
+      const after = normalized.slice(separatorMatch.index + separatorMatch[0].length);
+      sourceCurrency = this.detectCurrency(before);
+      targetCurrency = this.detectCurrency(after);
+    } else {
+      sourceCurrency = this.detectCurrency(normalized);
+    }
+
+    if (!sourceCurrency) return null;
+    if (!SUPPORTED_CURRENCIES.includes(sourceCurrency as SupportedCurrency)) return null;
+
+    if (separatorMatch && separatorMatch.index !== undefined) {
+      // User explicitly stated a target: it must be recognized and supported.
+      // Do NOT infer a different target (e.g. "100 usd sang khr" must be rejected).
+      if (!targetCurrency) return null;
+      if (!SUPPORTED_CURRENCIES.includes(targetCurrency as SupportedCurrency)) return null;
+    } else {
+      // No target stated: infer from source (USD -> VND, VND -> USD).
+      targetCurrency = this.inferTargetCurrency(sourceCurrency);
+      if (!targetCurrency) return null;
+    }
+
+    if (sourceCurrency === targetCurrency) return null;
+
+    return {
+      amount,
+      sourceCurrency,
+      targetCurrency,
+      confidence: 0.9
+    };
+  }
+
+  /**
+   * Backward-compatible alias for the deterministic local parser.
+   */
+  static parseWithRegex(text: string): ParsedExchangeIntent | null {
+    return this.parseLocalExchangeIntent(text);
+  }
+
+  /**
    * Intent vs. Conversational Routing:
-   * Extracts structured exchange intent using Gemini, falling back to Regex.
+   * 1. Deterministic local parser first (no Gemini call for simple requests).
+   * 2. Gemini fallback for complex sentences.
+   * 3. Returns null -> existing conversation/help fallback.
    */
   static async parseExchangeIntent(text: string): Promise<ParsedExchangeIntent | null> {
+    // 1. Local deterministic parser first
+    const localIntent = this.parseLocalExchangeIntent(text);
+    if (localIntent) return localIntent;
+
+    // 2. Gemini fallback for complex sentences
     const { client } = await this.getClient();
-    if (!client) {
-      return this.parseWithRegex(text);
-    }
+    if (!client) return null;
 
     const models = GeminiModelStrategy.getTextModelChain();
     const prompt = `Trích xuất thông tin đổi tiền từ tin nhắn khách hàng: "${text}"
-Nếu tin nhắn thể hiện ý định đổi tiền từ loại tiền A sang B (ví dụ USD sang VND, VND sang KHR...):
+Chỉ hỗ trợ 2 loại tiền tệ: USD và VND.
+Nhận diện từ viết tắt: "đô", "$", "do" = USD; "đồng", "dong" = VND.
+Số tiền có thể có hậu tố: "k" = x1000, "triệu"/"trieu" = x1000000.
+Nếu khách chỉ nêu 1 loại tiền (ví dụ "100 đô"), tự suy ra loại tiền còn lại:
+- Nguồn USD -> Đích VND
+- Nguồn VND -> Đích USD
 Trả về định dạng JSON duy nhất:
 {"valid": true, "sourceCurrency": "USD", "targetCurrency": "VND", "amount": 1000}
 Nếu tin nhắn chỉ là câu hỏi thông thường ("rate thế nào", "alo", "xin chào") không có số tiền và chiều đổi rõ ràng:
@@ -256,20 +416,31 @@ Trả về duy nhất:
       const jsonMatch = raw.match(/\{[\s\S]*\}/);
       if (jsonMatch) {
         const parsed = JSON.parse(jsonMatch[0]);
-        if (parsed.valid && parsed.sourceCurrency && parsed.targetCurrency && Number(parsed.amount) > 0) {
+        const source = String(parsed.sourceCurrency || "").toUpperCase();
+        const target = String(parsed.targetCurrency || "").toUpperCase();
+        const amount = Number(parsed.amount);
+
+        if (
+          parsed.valid &&
+          SUPPORTED_CURRENCIES.includes(source as SupportedCurrency) &&
+          SUPPORTED_CURRENCIES.includes(target as SupportedCurrency) &&
+          source !== target &&
+          isFinite(amount) &&
+          amount > 0
+        ) {
           return {
-            sourceCurrency: String(parsed.sourceCurrency).toUpperCase(),
-            targetCurrency: String(parsed.targetCurrency).toUpperCase(),
-            amount: Number(parsed.amount),
+            sourceCurrency: source,
+            targetCurrency: target,
+            amount,
             confidence: 0.95
           };
         }
       }
     } catch (err: any) {
-      logger.warn({ err: err?.message || err }, "Gemini intent parse failed, using regex fallback");
+      logger.warn({ err: err?.message || err }, "Gemini intent parse failed");
     }
 
-    return this.parseWithRegex(text);
+    return null;
   }
 
   /**

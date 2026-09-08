@@ -7,6 +7,17 @@ export class MoneyService {
     KHR: 0
   };
 
+  // Human amount multipliers (normalized: lowercase, no diacritics).
+  // "k" is ALWAYS a multiplier, never a currency.
+  private static readonly AMOUNT_MULTIPLIERS: Record<string, number> = {
+    m: 1000000,
+    tr: 1000000,
+    trieu: 1000000,
+    k: 1000,
+    nghin: 1000,
+    ngan: 1000
+  };
+
   /**
    * Returns decimal places allowed for the currency (default 2)
    */
@@ -74,23 +85,155 @@ export class MoneyService {
   /**
    * Rounds target amounts consistently using Decimal per currency configuration:
    * USD -> 2 decimals
-   * VND -> 0 decimals
+   * VND -> nearest 100 (normal half-up rounding)
    * KHR -> 0 decimals
    */
   static roundTargetAmount(amount: Decimal | number | string, currency: string): Decimal {
     const dec = new Decimal(amount);
-    const decimalPlaces = this.getDecimals(currency);
+    const code = currency.toUpperCase().trim();
+    if (code === "VND") {
+      return this.roundVnd(dec);
+    }
+    const decimalPlaces = this.getDecimals(code);
     return dec.toDecimalPlaces(decimalPlaces, Decimal.ROUND_HALF_UP);
   }
 
   /**
-   * Human-friendly formatted string with thousands separator
+   * Rounds VND to the nearest 100 (normal half-up rounding).
+   * 2635742 -> 2635700, 2635750 -> 2635800
+   */
+  static roundVnd(amount: Decimal | number | string): Decimal {
+    // Explicit nearest-100 rounding (does not rely on negative decimal places).
+    return new Decimal(amount).div(100).toDecimalPlaces(0, Decimal.ROUND_HALF_UP).mul(100);
+  }
+
+  /**
+   * Parses a human-friendly amount expression.
+   * Supports: "2M", "2m", "2 triệu", "2 trieu", "2tr", "100k", "500k",
+   * "1 nghìn", "1 ngàn", "1 000 000", "100", "1000", "100.50", "100,50", "100.5", "100,5".
+   * Rejects ambiguous forms (e.g. "1.000.000", "1,000,000", "1.000,50", "1,000.50", "1.000", "1,000").
+   * Returns null for zero, negative, NaN, Infinity, or unrecognized input.
+   */
+  static parseHumanAmount(input: string): number | null {
+    const raw = String(input || "").trim().toLowerCase();
+    if (!raw) return null;
+
+    // Normalize diacritics (idempotent for already-normalized input)
+    const normalized = raw
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .replace(/đ/g, "d");
+
+    if (normalized.startsWith("-")) return null;
+
+    // Match: number part + optional multiplier suffix
+    const match = normalized.match(/^(\d[\d\s.,]*?)\s*(m|tr|trieu|k|nghin|ngan)?$/);
+    if (!match || !match[1]) return null;
+
+    const numberPart = (match[1] || "").trim();
+    const multiplier = match[2] || undefined;
+
+    let value: number;
+
+    // Space-grouped thousands: "1 000 000"
+    if (numberPart.includes(" ")) {
+      const groups = numberPart.split(/\s+/);
+      if (groups.length < 2) return null;
+      for (let i = 0; i < groups.length; i++) {
+        const g = groups[i];
+        if (!g || !/^\d+$/.test(g)) return null;
+        if (i > 0 && g.length !== 3) return null;
+      }
+      value = parseFloat(groups.join(""));
+    } else if (numberPart.includes(".") && numberPart.includes(",")) {
+      return null; // mixed separators -> ambiguous
+    } else if (numberPart.includes(".")) {
+      const parts = numberPart.split(".");
+      if (parts.length > 2) return null; // "1.000.000" -> ambiguous
+      const [intPart, decPart] = parts;
+      if (!intPart || !decPart || !/^\d+$/.test(intPart) || !/^\d{1,2}$/.test(decPart)) return null;
+      value = parseFloat(`${intPart}.${decPart}`);
+    } else if (numberPart.includes(",")) {
+      const parts = numberPart.split(",");
+      if (parts.length > 2) return null; // "1,000,000" -> ambiguous
+      const [intPart, decPart] = parts;
+      if (!intPart || !decPart || !/^\d+$/.test(intPart) || !/^\d{1,2}$/.test(decPart)) return null;
+      value = parseFloat(`${intPart}.${decPart}`);
+    } else {
+      if (!/^\d+$/.test(numberPart)) return null;
+      value = parseFloat(numberPart);
+    }
+
+    if (!isFinite(value) || value <= 0) return null;
+
+    if (multiplier && this.AMOUNT_MULTIPLIERS[multiplier]) {
+      value *= this.AMOUNT_MULTIPLIERS[multiplier];
+    }
+
+    return value;
+  }
+
+  /**
+   * Formats a monetary value for customer-facing display (number only, no currency code).
+   * VND: space thousands, no decimals.
+   * USD: space thousands, comma decimal separator, at most 2 meaningful decimals.
+   * Other currencies: fallback to existing behavior.
+   * Handlers append the currency code separately.
    */
   static formatAmount(amount: Decimal | number | string, currency: string): string {
-    const rounded = this.roundTargetAmount(amount, currency);
-    const decimals = this.getDecimals(currency);
-    const parts = rounded.toFixed(decimals).split(".");
-    parts[0] = parts[0].replace(/\B(?=(\d{3})+(?!\d))/g, ",");
-    return parts.join(".");
+    const code = currency.toUpperCase().trim();
+    const dec = new Decimal(amount);
+
+    if (code === "VND") {
+      // Display only: do NOT apply business rounding (nearest 100).
+      // The stored value is already rounded by roundTargetAmount in calculateQuote.
+      return this.groupThousands(dec.toFixed(0));
+    }
+
+    if (code === "USD") {
+      const rounded = dec.toDecimalPlaces(2, Decimal.ROUND_HALF_UP);
+      const fixed = rounded.toFixed(2).replace(/\.?0+$/, "");
+      const [intPart, decPart] = fixed.split(".");
+      const grouped = this.groupThousands(intPart);
+      return decPart ? `${grouped},${decPart}` : grouped;
+    }
+
+    // Fallback for other currencies (e.g. historical KHR data)
+    const decimalPlaces = this.getDecimals(code);
+    const rounded = dec.toDecimalPlaces(decimalPlaces, Decimal.ROUND_HALF_UP);
+    return this.groupThousands(rounded.toFixed(decimalPlaces));
+  }
+
+  /**
+   * Formats a monetary value with the currency code appended.
+   * VND: "2 635 700 VND", USD: "1 234,5 USD"
+   */
+  static formatMoney(amount: Decimal | number | string, currency: string): string {
+    const code = currency.toUpperCase().trim();
+    return `${this.formatAmount(amount, code)} ${code}`;
+  }
+
+  /**
+   * Formats VND: space thousands, no decimals, " VND" suffix.
+   * 2000000 -> "2 000 000 VND", 2635742 -> "2 635 742 VND" (display only, no rounding)
+   */
+  static formatVnd(amount: Decimal | number | string): string {
+    return `${this.formatAmount(amount, "VND")} VND`;
+  }
+
+  /**
+   * Formats USD: space thousands, comma decimal separator, at most 2 meaningful decimals.
+   * 100 -> "100 USD", 100.5 -> "100,5 USD", 1234.5 -> "1 234,5 USD"
+   */
+  static formatUsd(amount: Decimal | number | string): string {
+    return `${this.formatAmount(amount, "USD")} USD`;
+  }
+
+  /**
+   * Groups integer digits with spaces as thousands separators.
+   * "2635700" -> "2 635 700"
+   */
+  private static groupThousands(intPart: string): string {
+    return intPart.replace(/\B(?=(\d{3})+(?!\d))/g, " ");
   }
 }
