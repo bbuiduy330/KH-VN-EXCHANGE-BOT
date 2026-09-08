@@ -1,5 +1,12 @@
-import { PrismaClient } from "@prisma/client";
 import { logger } from "../shared/logger.js";
+
+let PrismaClientConstructor: any = null;
+try {
+  const prismaModule = await import("@prisma/client");
+  PrismaClientConstructor = (prismaModule as any).PrismaClient;
+} catch {
+  // Prisma client not yet generated or failed to load
+}
 
 // Safe in-memory fallback store for unit tests or environments without a running Postgres
 const inMemoryStore = {
@@ -287,7 +294,10 @@ const mockMap: Record<string, { store: Map<string, any>; key: string }> = {
 let prismaClientInstance: any;
 
 try {
-  const realPrisma = new PrismaClient();
+  if (!PrismaClientConstructor) {
+    throw new Error("PrismaClient is not initialized");
+  }
+  const realPrisma = new PrismaClientConstructor();
 
   // Create a proxy that wraps real Prisma calls and falls back to in-memory store if DB is unreachable
   prismaClientInstance = new Proxy(realPrisma, {

@@ -326,7 +326,38 @@ export async function handleCustomerTextMessage(ctx: BotContext, text: string) {
     return;
   }
 
-  // Fallback friendly AI message
+  // If not a structured exchange formula, generate intelligent AI consultation with Gemini
+  let aiReply: string | null = null;
+  if (AiProvider.isAvailable()) {
+    try {
+      const allRates = await QuoteService.getAllRates();
+      const ratesSummary = allRates && allRates.length > 0
+        ? allRates.map((r: any) => `• ${r.pair}: Tỷ giá cơ sở ${r.baseRate}`).join("\n")
+        : "USD_VND, VND_USD, KHR_VND, VND_KHR";
+
+      aiReply = await AiProvider.generateCustomerConsultation(text, {
+        ratesSummary,
+        customerName: customer.fullName || customer.username || "Quý khách"
+      });
+    } catch (err) {
+      logger.warn({ err }, "Failed to generate AI consultation reply");
+    }
+  }
+
+  if (aiReply) {
+    await ConversationService.addMessage({
+      customerId: customer.id,
+      senderType: "SYSTEM",
+      content: aiReply
+    });
+
+    await ctx.reply(aiReply, {
+      reply_markup: getCustomerMenuKeyboard()
+    });
+    return;
+  }
+
+  // Fallback friendly message if Gemini is unconfigured or failed
   await ctx.reply(
     `Xin chào! Quý khách có thể nhắn tin yêu cầu đổi tiền, ví dụ: <i>'đổi 500 USD sang VND'</i> hoặc nhấn <b>💬 Hỗ trợ</b> để gặp nhân viên tư vấn.`,
     { parse_mode: "HTML", reply_markup: getCustomerMenuKeyboard() }

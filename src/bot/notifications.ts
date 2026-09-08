@@ -1,6 +1,7 @@
 import { Bot } from "grammy";
 import { env } from "../config/env.js";
 import { logger } from "../shared/logger.js";
+import { SystemConfigService } from "../modules/system-config/system-config-service.js";
 
 let botInstance: Bot<any> | null = null;
 
@@ -58,7 +59,7 @@ export async function sendToAdminNotificationChat(
   text: string,
   options: { parse_mode?: "HTML" | "MarkdownV2"; reply_markup?: any } = { parse_mode: "HTML" }
 ): Promise<boolean> {
-  const chatId = env.ADMIN_NOTIFICATION_CHAT_ID?.trim();
+  const chatId = SystemConfigService.getAdminNotificationChatId()?.trim();
   if (!chatId || !botInstance) {
     return false;
   }

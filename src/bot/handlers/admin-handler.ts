@@ -12,6 +12,9 @@ import { env } from "../../config/env.js";
 import { sendToCustomer, sendToAdminNotificationChat } from "../notifications.js";
 import { getAdminMenuKeyboard, renderAdminStartText } from "../menus/admin-menu.js";
 import { prisma } from "../../database/client.js";
+import { AiProvider } from "../../modules/ai/ai-provider.js";
+import { SystemConfigService } from "../../modules/system-config/system-config-service.js";
+import { BackupService } from "../../modules/backup/backup-service.js";
 
 export const adminHandler = new Composer<BotContext>();
 
@@ -31,6 +34,336 @@ adminHandler.command("admin", async (ctx) => {
     return ctx.reply("⛔ Bạn không có quyền truy cập chức năng này.");
   }
   await showAdminStart(ctx);
+});
+
+// /testai and /testgemini commands for quick diagnostic in Telegram
+adminHandler.command(["testai", "testgemini"], async (ctx) => {
+  const userType = ctx.identity?.userType;
+  if (userType !== "ADMIN" && userType !== "SUPER_ADMIN") {
+    return ctx.reply("⛔ Chỉ quản trị viên mới có quyền kiểm tra kết nối AI.");
+  }
+
+  const waitMsg = await ctx.reply("⏳ Đang gửi yêu cầu kiểm tra tới Google Gemini API...");
+
+  const result = await AiProvider.testGeminiConnection();
+
+  if (result.ok) {
+    await ctx.api.editMessageText(
+      ctx.chat!.id,
+      waitMsg.message_id,
+      `✅ <b>GOOGLE GEMINI AI HOẠT ĐỘNG TỐT!</b>\n\n` +
+        `• <b>Model:</b> <code>${result.model}</code>\n` +
+        `• <b>Độ trễ:</b> <code>${result.latencyMs} ms</code>\n` +
+        `• <b>Phản hồi:</b>\n<i>"${result.reply}"</i>\n\n` +
+        `💡 <i>API Key đã kết nối thành công và đã ghi nhận token sử dụng trên Google AI Studio.</i>`,
+      { parse_mode: "HTML" }
+    );
+  } else {
+    await ctx.api.editMessageText(
+      ctx.chat!.id,
+      waitMsg.message_id,
+      `❌ <b>KẾT NỐI GEMINI AI THẤT BẠI!</b>\n\n` +
+        `• <b>Model:</b> <code>${result.model}</code>\n` +
+        `• <b>Chi tiết lỗi:</b>\n<code>${result.error}</code>\n\n` +
+        `🔧 <b>Khắc phục:</b>\n` +
+        `1. Kiểm tra biến <code>GEMINI_API_KEY</code> trong file <code>.env</code> trên VPS.\n` +
+        `2. Xem quota tại <a href="https://aistudio.google.com/">Google AI Studio</a>.\n` +
+        `3. Đảm bảo cấu hình <code>GEMINI_TEXT_MODEL=gemini-3.6-flash</code>.`,
+      { parse_mode: "HTML", link_preview_options: { is_disabled: true } }
+    );
+  }
+});
+
+// Helper for rendering dynamic settings view
+function renderSystemSettingsView(): { text: string; keyboard: InlineKeyboard } {
+  const cfg = SystemConfigService.getConfig();
+  const maskedKey = cfg.geminiApiKey
+    ? `${cfg.geminiApiKey.slice(0, 7)}...${cfg.geminiApiKey.slice(-4)} (Đã kích hoạt)`
+    : "❌ Chưa cài đặt (Dùng /setkey <key> để cài)";
+
+  const history = BackupService.getHistory();
+  const lastBackup = history[0];
+  const lastBackupStr = lastBackup
+    ? `${new Date(lastBackup.timestamp).toLocaleString("vi-VN")} (${lastBackup.sizeFormatted})`
+    : "Chưa có bản sao lưu";
+
+  const text =
+    `⚙️ <b>BẢNG ĐIỀU KHIỂN CẤU HÌNH HỆ THỐNG (TELEGRAM CONTROL)</b>\n\n` +
+    `🤖 <b>Google Gemini AI:</b>\n` +
+    `• API Key: <code>${maskedKey}</code>\n` +
+    `• Model AI: <code>${cfg.geminiTextModel}</code>\n\n` +
+    `📢 <b>Kênh nhận thông báo đơn hàng:</b>\n` +
+    `• Chat ID: <code>${cfg.adminNotificationChatId || "Chưa cấu hình (Gõ /sethere)"}</code>\n\n` +
+    `💾 <b>Sao lưu hệ thống (Backup):</b>\n` +
+    `• Tự động sao lưu: <b>${cfg.backupEnabled ? "BẬT" : "TẮT"}</b> (Chu kỳ: <b>${cfg.backupScheduleHours}h/lần</b>)\n` +
+    `• Lần sao lưu gần nhất: <i>${lastBackupStr}</i>\n\n` +
+    `💵 <b>Thông số tài chính:</b>\n` +
+    `• Phí dịch vụ mặc định: <b>${cfg.defaultServiceFeeUsd} USD</b>\n` +
+    `• Ngưỡng GD lớn: <b>${cfg.largeTransactionThresholdUsd.toLocaleString()} USD</b>\n` +
+    `• Thời hạn giữ báo giá: <b>${cfg.quoteExpiryMinutes} phút</b>\n\n` +
+    `📌 <b>CÁC LỆNH CÀI ĐẶT NHANH TỪ TELEGRAM:</b>\n` +
+    `• <code>/setkey &lt;key&gt;</code> - Cài/Đổi Gemini API Key trực tiếp\n` +
+    `• <code>/setmodel &lt;model&gt;</code> - Đổi Model AI\n` +
+    `• <code>/sethere</code> - Đặt phòng chat này làm kênh nhận thông báo đơn hàng\n` +
+    `• <code>/backup</code> - Kích hoạt sao lưu hệ thống ngay lập tức\n` +
+    `• <code>/backups</code> - Xem lịch sử các bản sao lưu VPS\n` +
+    `• <code>/setbackup &lt;giờ&gt;</code> - Đổi chu kỳ sao lưu (VD: <code>/setbackup 6</code>)\n` +
+    `• <code>/togglebackup</code> - Bật/Tắt tự động sao lưu định kỳ\n` +
+    `• <code>/setfee &lt;usd&gt;</code> - Đổi phí giao dịch mặc định\n` +
+    `• <code>/setthreshold &lt;usd&gt;</code> - Đổi ngưỡng GD lớn\n` +
+    `• <code>/testai</code> - Kiểm tra kết nối và độ trễ Gemini AI\n`;
+
+  const keyboard = new InlineKeyboard()
+    .text("🔑 Hướng dẫn đổi Key", "admin:settings:ask_key")
+    .text("🤖 Chọn Model AI", "admin:settings:model_select")
+    .row()
+    .text("📢 Đặt kênh này (/sethere)", "admin:settings:sethere")
+    .text("💾 Sao lưu ngay", "admin:backup:run_now")
+    .row()
+    .text("📜 Lịch sử Sao lưu", "admin:backup:history")
+    .text("🧪 Test Gemini AI", "admin:settings:test_ai")
+    .row()
+    .text("🔄 Làm mới", "admin:settings:refresh")
+    .text("🔙 Về Menu chính", "admin:menu:back_start");
+
+  return { text, keyboard };
+}
+
+// /settings and /config commands
+adminHandler.command(["settings", "config"], async (ctx) => {
+  const userType = ctx.identity?.userType;
+  if (userType !== "ADMIN" && userType !== "SUPER_ADMIN") {
+    return ctx.reply("⛔ Bạn không có quyền truy cập bảng cài đặt hệ thống.");
+  }
+  const view = renderSystemSettingsView();
+  await ctx.reply(view.text, { parse_mode: "HTML", reply_markup: view.keyboard });
+});
+
+// /setkey command: Set Gemini API key directly from chat
+adminHandler.command("setkey", async (ctx) => {
+  const userType = ctx.identity?.userType;
+  if (userType !== "ADMIN" && userType !== "SUPER_ADMIN") {
+    return ctx.reply("⛔ Chỉ quản trị viên mới có quyền cài đặt API Key.");
+  }
+
+  const newKey = ctx.match?.trim();
+  if (!newKey) {
+    return ctx.reply(
+      "🔑 <b>HƯỚNG DẪN CÀI ĐẶT GOOGLE GEMINI API KEY:</b>\n\n" +
+        "1. Lấy API Key miễn phí tại: https://aistudio.google.com/app/apikey\n" +
+        "2. Gửi lệnh theo cú pháp:\n" +
+        "<code>/setkey AIzaSyDxxxxxxxxxxxxxx</code>\n\n" +
+        "💡 <i>Hệ thống sẽ kiểm tra kết nối với Google trước khi lưu. Khi lưu thành công, AI sẽ hoạt động ngay lập tức mà không cần khởi động lại VPS.</i>",
+      { parse_mode: "HTML", link_preview_options: { is_disabled: true } }
+    );
+  }
+
+  const waitMsg = await ctx.reply("⏳ Đang kiểm tra kết nối với Google Gemini API...");
+  const testRes = await AiProvider.testGeminiConnection(newKey);
+
+  if (!testRes.ok) {
+    return ctx.api.editMessageText(
+      ctx.chat!.id,
+      waitMsg.message_id,
+      `❌ <b>API KEY KHÔNG HỢP LỆ HOẶC KHÔNG KẾT NỐI ĐƯỢC:</b>\n\n` +
+        `• Chi tiết lỗi:\n<code>${testRes.error}</code>\n\n` +
+        `🔧 Hệ thống chưa lưu key này. Vui lòng kiểm tra lại key trên Google AI Studio.`,
+      { parse_mode: "HTML" }
+    );
+  }
+
+  SystemConfigService.updateConfig({ geminiApiKey: newKey }, ctx.identity?.telegramId || "ADMIN");
+
+  await ctx.api.editMessageText(
+    ctx.chat!.id,
+    waitMsg.message_id,
+    `✅ <b>ĐÃ CẬP NHẬT GOOGLE GEMINI API KEY THÀNH CÔNG!</b>\n\n` +
+      `• Model: <code>${testRes.model}</code>\n` +
+      `• Độ trễ: <code>${testRes.latencyMs} ms</code>\n` +
+      `• Phản hồi thử nghiệm: <i>"${testRes.reply}"</i>\n\n` +
+      `💾 <i>Key đã được lưu an toàn vào hệ thống VPS và kích hoạt ngay lập tức. Khách hàng giờ đây có thể trò chuyện với Trợ lý AI và phân tích hóa đơn thông minh!</i>`,
+    { parse_mode: "HTML" }
+  );
+});
+
+// /setmodel command: Set Gemini model
+adminHandler.command("setmodel", async (ctx) => {
+  const userType = ctx.identity?.userType;
+  if (userType !== "ADMIN" && userType !== "SUPER_ADMIN") {
+    return ctx.reply("⛔ Bạn không có quyền đổi Model AI.");
+  }
+
+  const model = ctx.match?.trim();
+  if (!model) {
+    const keyboard = new InlineKeyboard()
+      .text("⚡ gemini-3.6-flash (Khuyên dùng)", "admin:set_model:gemini-3.6-flash")
+      .row()
+      .text("🪶 gemini-3.5-flash-lite (Siêu nhẹ)", "admin:set_model:gemini-3.5-flash-lite")
+      .row()
+      .text("🧠 gemini-3.8-flash (Model mới)", "admin:set_model:gemini-3.8-flash")
+      .row()
+      .text("🔙 Quay lại Cài đặt", "admin:menu:settings");
+
+    return ctx.reply("🤖 <b>CHỌN MODEL GOOGLE GEMINI AI:</b>\n\nChọn một trong các model bên dưới:", {
+      parse_mode: "HTML",
+      reply_markup: keyboard
+    });
+  }
+
+  SystemConfigService.updateConfig({ geminiTextModel: model }, ctx.identity?.telegramId || "ADMIN");
+  await ctx.reply(`✅ Đã chuyển Model AI sang: <code>${model}</code>`, { parse_mode: "HTML" });
+});
+
+// /sethere command: Set current chat/group as admin notification channel
+adminHandler.command("sethere", async (ctx) => {
+  const userType = ctx.identity?.userType;
+  if (userType !== "ADMIN" && userType !== "SUPER_ADMIN") {
+    return ctx.reply("⛔ Bạn không có quyền đặt kênh thông báo.");
+  }
+
+  const chatId = String(ctx.chat!.id);
+  SystemConfigService.updateConfig({ adminNotificationChatId: chatId }, ctx.identity?.telegramId || "ADMIN");
+
+  await ctx.reply(
+    `✅ <b>ĐÃ ĐẶT PHÒNG CHAT NÀY LÀM KÊNH NHẬN THÔNG BÁO ĐƠN HÀNG!</b>\n\n` +
+      `• Chat ID: <code>${chatId}</code>\n` +
+      `• Tiêu đề: <b>${ctx.chat && "title" in ctx.chat ? ctx.chat.title : "Chat riêng"}</b>\n\n` +
+      `🔔 Từ bây giờ, tất cả thông báo đơn mới, khách gửi bill nạp tiền và các cảnh báo hệ thống sẽ được gửi vào đây.`,
+    { parse_mode: "HTML" }
+  );
+});
+
+// /setnotify command: Set specific chat ID
+adminHandler.command("setnotify", async (ctx) => {
+  const userType = ctx.identity?.userType;
+  if (userType !== "ADMIN" && userType !== "SUPER_ADMIN") {
+    return ctx.reply("⛔ Bạn không có quyền đổi kênh thông báo.");
+  }
+
+  const chatId = ctx.match?.trim();
+  if (!chatId) {
+    return ctx.reply("Vui lòng nhập Chat ID, ví dụ: <code>/setnotify -100123456789</code>\nHoặc vào phòng chat cần nhận và gõ <code>/sethere</code>", { parse_mode: "HTML" });
+  }
+
+  SystemConfigService.updateConfig({ adminNotificationChatId: chatId }, ctx.identity?.telegramId || "ADMIN");
+  await ctx.reply(`✅ Đã đặt Chat ID nhận thông báo thành: <code>${chatId}</code>`, { parse_mode: "HTML" });
+});
+
+// /backup command: Run backup immediately from chat
+adminHandler.command("backup", async (ctx) => {
+  const userType = ctx.identity?.userType;
+  if (userType !== "ADMIN" && userType !== "SUPER_ADMIN") {
+    return ctx.reply("⛔ Bạn không có quyền sao lưu hệ thống.");
+  }
+
+  const waitMsg = await ctx.reply("⏳ <b>ĐANG TIẾN HÀNH SAO LƯU DỮ LIỆU HỆ THỐNG TRÊN VPS...</b>\n<i>Quá trình này bao gồm Database và toàn bộ ảnh biên lai/chứng từ giao dịch.</i>", { parse_mode: "HTML" });
+
+  const result = await BackupService.runBackup(ctx.identity?.telegramId || "ADMIN");
+
+  if (result.success) {
+    await ctx.api.editMessageText(
+      ctx.chat!.id,
+      waitMsg.message_id,
+      `✅ <b>SAO LƯU HỆ THỐNG THÀNH CÔNG!</b>\n\n` +
+        `• Trạng thái: <b>HOÀN TẤT</b>\n` +
+        `• Phương thức: <code>${result.record?.type || "SNAPSHOT"}</code>\n` +
+        `• Dung lượng: <b>${result.record?.sizeFormatted || "OK"}</b>\n` +
+        `• Chi tiết: <i>${result.record?.details || result.message}</i>\n` +
+        `• Thời gian: <code>${new Date().toLocaleString("vi-VN")}</code>\n\n` +
+        `💾 Dữ liệu đã được bảo vệ an toàn trên ổ đĩa VPS.`,
+      { parse_mode: "HTML" }
+    );
+  } else {
+    await ctx.api.editMessageText(
+      ctx.chat!.id,
+      waitMsg.message_id,
+      `❌ <b>SAO LƯU THẤT BẠI:</b>\n\n<code>${result.message}</code>`,
+      { parse_mode: "HTML" }
+    );
+  }
+});
+
+// /backups command: View backup history
+adminHandler.command("backups", async (ctx) => {
+  const userType = ctx.identity?.userType;
+  if (userType !== "ADMIN" && userType !== "SUPER_ADMIN") {
+    return ctx.reply("⛔ Bạn không có quyền xem lịch sử sao lưu.");
+  }
+
+  const history = BackupService.getHistory();
+  if (history.length === 0) {
+    return ctx.reply("Chưa có bản sao lưu nào được tạo. Gõ <code>/backup</code> để tạo bản sao lưu đầu tiên.", { parse_mode: "HTML" });
+  }
+
+  let msg = `💾 <b>DANH SÁCH BẢN SAO LƯU HỆ THỐNG GẦN NHẤT:</b>\n\n`;
+  for (const b of history.slice(0, 10)) {
+    const timeStr = new Date(b.timestamp).toLocaleString("vi-VN");
+    msg += `• <b>${b.id}</b> [${b.type}]\n  📅 ${timeStr} | 📦 ${b.sizeFormatted} | ${b.status === "SUCCESS" ? "✅" : "❌"}\n`;
+  }
+
+  msg += `\n💡 <i>Gõ /backup để chạy sao lưu ngay bây giờ.</i>`;
+  await ctx.reply(msg, { parse_mode: "HTML" });
+});
+
+// /setbackup command: Set backup schedule in hours
+adminHandler.command("setbackup", async (ctx) => {
+  const userType = ctx.identity?.userType;
+  if (userType !== "ADMIN" && userType !== "SUPER_ADMIN") {
+    return ctx.reply("⛔ Bạn không có quyền đổi lịch sao lưu.");
+  }
+
+  const val = parseInt(ctx.match?.trim() || "", 10);
+  if (isNaN(val) || val < 1 || val > 168) {
+    return ctx.reply("Vui lòng nhập chu kỳ sao lưu bằng số giờ (từ 1 đến 168), ví dụ: <code>/setbackup 6</code>", { parse_mode: "HTML" });
+  }
+
+  SystemConfigService.updateConfig({ backupScheduleHours: val }, ctx.identity?.telegramId || "ADMIN");
+  await ctx.reply(`✅ Đã đặt chu kỳ tự động sao lưu thành: <b>Mỗi ${val} giờ</b>`, { parse_mode: "HTML" });
+});
+
+// /togglebackup command: Toggle backup on/off
+adminHandler.command("togglebackup", async (ctx) => {
+  const userType = ctx.identity?.userType;
+  if (userType !== "ADMIN" && userType !== "SUPER_ADMIN") {
+    return ctx.reply("⛔ Bạn không có quyền đổi trạng thái sao lưu.");
+  }
+
+  const current = SystemConfigService.isBackupEnabled();
+  const next = !current;
+  SystemConfigService.updateConfig({ backupEnabled: next }, ctx.identity?.telegramId || "ADMIN");
+  await ctx.reply(`✅ Tự động sao lưu định kỳ hiện đang: <b>${next ? "BẬT" : "TẮT"}</b>`, { parse_mode: "HTML" });
+});
+
+// /setfee command: Set default service fee in USD
+adminHandler.command("setfee", async (ctx) => {
+  const userType = ctx.identity?.userType;
+  if (userType !== "ADMIN" && userType !== "SUPER_ADMIN") {
+    return ctx.reply("⛔ Bạn không có quyền đổi phí dịch vụ.");
+  }
+
+  const val = parseFloat(ctx.match?.trim() || "");
+  if (isNaN(val) || val < 0) {
+    return ctx.reply("Vui lòng nhập phí dạng số (USD), ví dụ: <code>/setfee 2</code> hoặc <code>/setfee 1.5</code>", { parse_mode: "HTML" });
+  }
+
+  SystemConfigService.updateConfig({ defaultServiceFeeUsd: val }, ctx.identity?.telegramId || "ADMIN");
+  await ctx.reply(`✅ Đã đổi phí dịch vụ mặc định thành: <b>${val} USD</b>`, { parse_mode: "HTML" });
+});
+
+// /setthreshold command: Set large transaction threshold in USD
+adminHandler.command("setthreshold", async (ctx) => {
+  const userType = ctx.identity?.userType;
+  if (userType !== "ADMIN" && userType !== "SUPER_ADMIN") {
+    return ctx.reply("⛔ Bạn không có quyền đổi ngưỡng giao dịch lớn.");
+  }
+
+  const val = parseFloat(ctx.match?.trim() || "");
+  if (isNaN(val) || val <= 0) {
+    return ctx.reply("Vui lòng nhập số tiền (USD), ví dụ: <code>/setthreshold 5000</code>", { parse_mode: "HTML" });
+  }
+
+  SystemConfigService.updateConfig({ largeTransactionThresholdUsd: val }, ctx.identity?.telegramId || "ADMIN");
+  await ctx.reply(`✅ Đã đổi ngưỡng cảnh báo giao dịch lớn thành: <b>${val.toLocaleString()} USD</b>`, { parse_mode: "HTML" });
 });
 
 // /rates command
@@ -1047,14 +1380,204 @@ adminHandler.callbackQuery("admin:menu:super_admin", async (ctx) => {
     return ctx.reply("⛔ Chức năng này chỉ dành riêng cho Super Admin.");
   }
 
+  const view = renderSystemSettingsView();
+  await ctx.reply(view.text, { parse_mode: "HTML", reply_markup: view.keyboard });
+});
+
+// Dynamic Settings Callback Handlers
+adminHandler.callbackQuery("admin:menu:settings", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userType = ctx.identity?.userType;
+  if (userType !== "ADMIN" && userType !== "SUPER_ADMIN") {
+    return ctx.reply("⛔ Chỉ quản trị viên mới có quyền truy cập cài đặt.");
+  }
+
+  const view = renderSystemSettingsView();
+  await ctx.reply(view.text, { parse_mode: "HTML", reply_markup: view.keyboard });
+});
+
+adminHandler.callbackQuery("admin:settings:refresh", async (ctx) => {
+  await ctx.answerCallbackQuery("Đã làm mới thông số!");
+  const view = renderSystemSettingsView();
+  try {
+    await ctx.editMessageText(view.text, { parse_mode: "HTML", reply_markup: view.keyboard });
+  } catch {
+    await ctx.reply(view.text, { parse_mode: "HTML", reply_markup: view.keyboard });
+  }
+});
+
+adminHandler.callbackQuery("admin:settings:ask_key", async (ctx) => {
+  await ctx.answerCallbackQuery();
   await ctx.reply(
-    `👑 <b>BẢNG ĐIỀU KHIỂN SUPER ADMIN:</b>\n\n` +
-      `• Telegram ID: <code>${ctx.identity.telegramId}</code>\n` +
-      `• Toàn quyền hệ thống: <b>20/20 Permissions</b>\n` +
-      `• Quyền bất biến: Không thể bị khóa hoặc hạ quyền bởi Admin khác.\n` +
-      `• Quản lý mọi nhân sự, phân quyền, cấu hình tỷ giá và kho lưu trữ Drive.`,
+    `🔑 <b>HƯỚNG DẪN CÀI/ĐỔI GOOGLE GEMINI API KEY:</b>\n\n` +
+      `1. Lấy API key miễn phí tại: https://aistudio.google.com/app/apikey\n` +
+      `2. Nhắn trực tiếp cho bot cú pháp:\n` +
+      `<code>/setkey AIzaSyDxxxxxxxxxxxxxx</code>\n\n` +
+      `⚡ <i>Hệ thống sẽ ping thử API với Google. Khi thành công, bot sẽ lưu vào ổ cứng VPS và kích hoạt ngay tức thì.</i>`,
+    { parse_mode: "HTML", link_preview_options: { is_disabled: true } }
+  );
+});
+
+adminHandler.callbackQuery("admin:settings:model_select", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const keyboard = new InlineKeyboard()
+    .text("⚡ gemini-3.6-flash (Khuyên dùng)", "admin:set_model:gemini-3.6-flash")
+    .row()
+    .text("🪶 gemini-3.5-flash-lite (Siêu nhanh)", "admin:set_model:gemini-3.5-flash-lite")
+    .row()
+    .text("🧠 gemini-3.8-flash (Model mới)", "admin:set_model:gemini-3.8-flash")
+    .row()
+    .text("🔙 Quay lại Cài đặt", "admin:menu:settings");
+
+  await ctx.reply("🤖 <b>CHỌN MODEL GOOGLE GEMINI AI:</b>\n\nChọn model bạn muốn sử dụng:", {
+    parse_mode: "HTML",
+    reply_markup: keyboard
+  });
+});
+
+adminHandler.callbackQuery(/^admin:set_model:(.+)$/, async (ctx) => {
+  const model = ctx.match[1];
+  await ctx.answerCallbackQuery(`Đã chọn ${model}`);
+  SystemConfigService.updateConfig({ geminiTextModel: model }, ctx.identity?.telegramId || "ADMIN");
+
+  await ctx.reply(`✅ <b>ĐÃ ĐỔI MODEL GEMINI SANG:</b> <code>${model}</code>`, {
+    parse_mode: "HTML",
+    reply_markup: new InlineKeyboard().text("⚙️ Mở lại Cài đặt", "admin:menu:settings")
+  });
+});
+
+adminHandler.callbackQuery("admin:settings:sethere", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const chatId = String(ctx.chat!.id);
+  SystemConfigService.updateConfig({ adminNotificationChatId: chatId }, ctx.identity?.telegramId || "ADMIN");
+
+  await ctx.reply(
+    `✅ <b>ĐÃ THIẾT LẬP KÊNH THÔNG BÁO!</b>\n\n` +
+      `• Chat ID: <code>${chatId}</code>\n` +
+      `Tất cả thông báo đơn mới và thanh toán của khách sẽ được gửi tới đây.`,
     { parse_mode: "HTML" }
   );
+});
+
+adminHandler.callbackQuery("admin:settings:test_ai", async (ctx) => {
+  await ctx.answerCallbackQuery("Đang kiểm tra AI...");
+  const waitMsg = await ctx.reply("⏳ Đang gửi yêu cầu kiểm tra tới Google Gemini API...");
+  const result = await AiProvider.testGeminiConnection();
+
+  if (result.ok) {
+    await ctx.api.editMessageText(
+      ctx.chat!.id,
+      waitMsg.message_id,
+      `✅ <b>GOOGLE GEMINI AI HOẠT ĐỘNG TỐT!</b>\n\n` +
+        `• <b>Model:</b> <code>${result.model}</code>\n` +
+        `• <b>Độ trễ:</b> <code>${result.latencyMs} ms</code>\n` +
+        `• <b>Phản hồi:</b>\n<i>"${result.reply}"</i>`,
+      { parse_mode: "HTML" }
+    );
+  } else {
+    await ctx.api.editMessageText(
+      ctx.chat!.id,
+      waitMsg.message_id,
+      `❌ <b>KẾT NỐI GEMINI AI THẤT BẠI:</b>\n\n<code>${result.error}</code>\n\nDùng lệnh <code>/setkey &lt;key&gt;</code> để cài lại API Key.`,
+      { parse_mode: "HTML" }
+    );
+  }
+});
+
+// Backup Menu & Callbacks
+adminHandler.callbackQuery("admin:menu:backup", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const userType = ctx.identity?.userType;
+  if (userType !== "ADMIN" && userType !== "SUPER_ADMIN") {
+    return ctx.reply("⛔ Bạn không có quyền truy cập chức năng sao lưu.");
+  }
+
+  const history = BackupService.getHistory();
+  const last = history[0];
+  const lastStr = last
+    ? `• Lần sao lưu gần nhất: <b>${new Date(last.timestamp).toLocaleString("vi-VN")}</b> (${last.sizeFormatted} - ${last.status})\n• Vị trí: <code>${last.targetPath}</code>\n`
+    : "• Chưa có bản sao lưu nào.\n";
+
+  const cfg = SystemConfigService.getConfig();
+  const keyboard = new InlineKeyboard()
+    .text("💾 Sao lưu ngay bây giờ", "admin:backup:run_now")
+    .row()
+    .text("📜 Xem danh sách bản sao lưu", "admin:backup:history")
+    .text("🔄 Bật/Tắt tự động", "admin:backup:toggle")
+    .row()
+    .text("🔙 Về Menu chính", "admin:menu:back_start");
+
+  await ctx.reply(
+    `💾 <b>HỆ THỐNG SAO LƯU DỮ LIỆU (VPS BACKUP ENGINE):</b>\n\n` +
+      `${lastStr}` +
+      `• Tự động sao lưu định kỳ: <b>${cfg.backupEnabled ? "BẬT" : "TẮT"}</b>\n` +
+      `• Chu kỳ tự động: <b>Mỗi ${cfg.backupScheduleHours} giờ</b>\n\n` +
+      `📌 <i>Dữ liệu sao lưu bao gồm: Toàn bộ cơ sở dữ liệu PostgreSQL + kho chứng từ hóa đơn và mã QR giao dịch.</i>`,
+    { parse_mode: "HTML", reply_markup: keyboard }
+  );
+});
+
+adminHandler.callbackQuery("admin:backup:run_now", async (ctx) => {
+  await ctx.answerCallbackQuery("Đang sao lưu...");
+  const waitMsg = await ctx.reply("⏳ <b>ĐANG TIẾN HÀNH SAO LƯU HỆ THỐNG...</b>\n<i>Vui lòng đợi vài giây...</i>", { parse_mode: "HTML" });
+  const result = await BackupService.runBackup(ctx.identity?.telegramId || "ADMIN");
+
+  if (result.success) {
+    await ctx.api.editMessageText(
+      ctx.chat!.id,
+      waitMsg.message_id,
+      `✅ <b>SAO LƯU THÀNH CÔNG!</b>\n\n` +
+        `• Mã snapshot: <code>${result.record?.id}</code>\n` +
+        `• Dung lượng: <b>${result.record?.sizeFormatted}</b>\n` +
+        `• Chi tiết: <i>${result.record?.details}</i>\n` +
+        `• Thời gian: <code>${new Date().toLocaleString("vi-VN")}</code>`,
+      { parse_mode: "HTML" }
+    );
+  } else {
+    await ctx.api.editMessageText(
+      ctx.chat!.id,
+      waitMsg.message_id,
+      `❌ <b>SAO LƯU THẤT BẠI:</b>\n\n<code>${result.message}</code>`,
+      { parse_mode: "HTML" }
+    );
+  }
+});
+
+adminHandler.callbackQuery("admin:backup:history", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const history = BackupService.getHistory();
+  if (history.length === 0) {
+    return ctx.reply("Chưa có bản sao lưu nào. Bấm '💾 Sao lưu ngay bây giờ' để tạo bản sao lưu đầu tiên.");
+  }
+
+  let msg = `📜 <b>LỊCH SỬ CÁC BẢN SAO LƯU GẦN NHẤT:</b>\n\n`;
+  for (const b of history.slice(0, 8)) {
+    const t = new Date(b.timestamp).toLocaleString("vi-VN");
+    msg += `• <b>${b.id}</b> (${b.type})\n  📅 ${t} | 📦 ${b.sizeFormatted} | ${b.status === "SUCCESS" ? "✅ Thành công" : "❌ Thất bại"}\n`;
+  }
+
+  await ctx.reply(msg, {
+    parse_mode: "HTML",
+    reply_markup: new InlineKeyboard()
+      .text("💾 Sao lưu ngay", "admin:backup:run_now")
+      .text("🔙 Menu sao lưu", "admin:menu:backup")
+  });
+});
+
+adminHandler.callbackQuery("admin:backup:toggle", async (ctx) => {
+  const current = SystemConfigService.isBackupEnabled();
+  const next = !current;
+  SystemConfigService.updateConfig({ backupEnabled: next }, ctx.identity?.telegramId || "ADMIN");
+  await ctx.answerCallbackQuery(`Đã ${next ? "BẬT" : "TẮT"} tự động sao lưu`);
+  await ctx.reply(`✅ Đã đổi trạng thái tự động sao lưu sang: <b>${next ? "BẬT" : "TẮT"}</b>`, {
+    parse_mode: "HTML",
+    reply_markup: new InlineKeyboard().text("🔙 Menu sao lưu", "admin:menu:backup")
+  });
+});
+
+adminHandler.callbackQuery("admin:menu:back_start", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  await showAdminStart(ctx);
 });
 
 // Admin Photo Handler: /addqr or /payout caption

@@ -10,8 +10,8 @@ const envSchema = z.object({
   SUPER_ADMIN_TELEGRAM_ID: z.string().optional().default(""),
   ADMIN_NOTIFICATION_CHAT_ID: z.string().optional().default(""),
   GEMINI_API_KEY: z.string().optional().default(""),
-  GEMINI_TEXT_MODEL: z.string().default("gemini-2.5-flash"),
-  GEMINI_TRANSCRIBE_MODEL: z.string().default("gemini-2.5-flash"),
+  GEMINI_TEXT_MODEL: z.string().default("gemini-3.6-flash"),
+  GEMINI_TRANSCRIBE_MODEL: z.string().default("gemini-3.6-flash"),
   STORAGE_ROOT: z.string().default(process.env.STORAGE_ROOT || process.env.DATA_DIR || "./data/KH-VN-EXCHANGE"),
   BACKUP_ENABLED: z
     .preprocess((val) => val === "true" || val === true, z.boolean())
