@@ -3,7 +3,7 @@ import { env } from "./config/env.js";
 import { logger } from "./shared/logger.js";
 import { LocalStorageService } from "./modules/storage/local-storage-service.js";
 import { startSingleBot, stopSingleBot } from "./bot/index.js";
-import { prisma } from "./database/client.js";
+import { prisma, isRealPrismaClient, sanitizeDatabaseError } from "./database/client.js";
 import { RuntimeConfigService } from "./modules/system-config/runtime-config-service.js";
 import { BackupService } from "./modules/backup/backup-service.js";
 
@@ -14,16 +14,19 @@ app.use(express.json());
 // No public administrative, diagnostic outbound, financial, or order routes are exposed over HTTP.
 // Telegram Bot is the sole operational interface with RBAC.
 app.get("/health", async (_req, res) => {
-  let dbStatus = "ok";
   const hasDbUrl = Boolean(process.env.DATABASE_URL || env.DATABASE_URL);
+  let dbStatus: string;
 
   if (!hasDbUrl) {
     dbStatus = "not_configured";
+  } else if (!isRealPrismaClient()) {
+    // The in-memory mock (non-production/test fallback) is NOT a database.
+    // It must never make /health report the database as OK.
+    dbStatus = "mock";
   } else {
     try {
-      if (typeof (prisma as any).$queryRaw === "function") {
-        await (prisma as any).$queryRaw`SELECT 1`;
-      }
+      await (prisma as any).$queryRaw`SELECT 1`;
+      dbStatus = "ok";
     } catch {
       dbStatus = "degraded";
     }
@@ -34,7 +37,11 @@ app.get("/health", async (_req, res) => {
   const botStatus = Boolean(env.TELEGRAM_BOT_TOKEN) ? "configured" : "not_configured";
   const backupStatus = RuntimeConfigService.isBackupEnabled() ? "enabled" : "disabled";
 
-  const isHealthy = (dbStatus === "ok" || dbStatus === "not_configured") && storageStatus === "ok";
+  // In production a real PostgreSQL round-trip is mandatory for a healthy
+  // verdict; "not_configured" is only acceptable outside production.
+  const dbHealthy =
+    dbStatus === "ok" || (dbStatus === "not_configured" && process.env.NODE_ENV !== "production");
+  const isHealthy = dbHealthy && storageStatus === "ok";
   const overallStatus = isHealthy ? "ok" : "degraded";
 
   // Minimal non-sensitive status payload
@@ -46,6 +53,41 @@ app.get("/health", async (_req, res) => {
     backup: backupStatus
   });
 });
+
+// Production safety gate: PostgreSQL must be reachable through the REAL
+// PrismaClient before the HTTP server (and therefore the Telegram bot) starts.
+// Non-production (local dev / automated tests) may use the in-memory mock.
+async function assertProductionDatabaseReady(): Promise<void> {
+  if (process.env.NODE_ENV !== "production") return;
+
+  if (!process.env.DATABASE_URL && !env.DATABASE_URL) {
+    logger.error("[DB] FATAL: DATABASE_URL is not configured — refusing to start in production");
+    process.exit(1);
+  }
+  if (!isRealPrismaClient()) {
+    logger.error("[DB] FATAL: real PrismaClient unavailable (mock fallback active) — refusing to start in production");
+    process.exit(1);
+  }
+
+  const maxAttempts = 5;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      await (prisma as any).$queryRaw`SELECT 1`;
+      logger.info(`[DB] PostgreSQL connectivity verified at startup (attempt ${attempt})`);
+      return;
+    } catch (err) {
+      const reason = sanitizeDatabaseError(err);
+      if (attempt === maxAttempts) {
+        logger.error({ error: reason }, "[DB] FATAL: PostgreSQL connectivity check failed — refusing to start in production");
+        process.exit(1);
+      }
+      logger.warn({ error: reason, attempt }, "[DB] PostgreSQL not reachable yet — retrying");
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+    }
+  }
+}
+
+await assertProductionDatabaseReady();
 
 // Start HTTP server - Port 3000 is strictly required by reverse proxy
 const PORT = 3000;
