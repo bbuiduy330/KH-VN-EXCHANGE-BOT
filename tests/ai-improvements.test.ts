@@ -220,8 +220,8 @@ describe("Requirement 18: HUMAN Conversation Mode Disables Automatic AI Reply", 
     const conv = await ConversationService.getOrCreateConversation(customer.id);
     expect(conv.mode).toBe("AUTO");
 
-    // Switch to HUMAN mode
-    await ConversationService.setMode(customer.id, "HUMAN");
+    // Switch to HUMAN mode via the controlled claim() API (ownership + audit)
+    await ConversationService.claim(customer.id, "test_cskh_admin");
     const updatedConv = await ConversationService.getOrCreateConversation(customer.id);
     expect(updatedConv.mode).toBe("HUMAN");
 
