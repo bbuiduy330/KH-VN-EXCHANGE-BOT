@@ -5,7 +5,7 @@ services:
     environment:
       POSTGRES_DB: exchange
       POSTGRES_USER: exchange
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Run python3 scripts/configure-vps.py first}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env (see .env.example)}
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
