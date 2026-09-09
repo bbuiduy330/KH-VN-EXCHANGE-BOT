@@ -2,18 +2,16 @@
 
 Bản vá dựa trên commit `a118417aa4d13698d5bee7d0ea20613129896763` của repo bbuiduy330/KH-VN-EXCHANGE-BOT. Giữ Node.js/TypeScript, grammY, PostgreSQL/Prisma và Gemini. Đây là bản sửa để chạy thử có kiểm soát, chưa phải xác nhận đủ điều kiện vận hành tiền thật.
 
-Đọc [báo cáo](docs/REVIEW_VI.md) và [hướng dẫn VPS](docs/INSTALL_VPS_VI.md).
-
 ## Khởi động trên VPS Ubuntu mới
-
-Sau khi đưa bản vá lên nhánh GitHub của anh:
 
 ```bash
 git clone https://github.com/bbuiduy330/KH-VN-EXCHANGE-BOT.git
 cd KH-VN-EXCHANGE-BOT
-# Checkout nhánh đã áp dụng bản vá nếu chưa merge vào main.
-sudo bash scripts/install-docker-ubuntu.sh
-python3 scripts/configure-vps.py
+# Cài Docker nếu chưa có: curl -fsSL https://get.docker.com -o get-docker.sh && sudo sh get-docker.sh && sudo usermod -aG docker $USER
+# Cấu hình secrets:
+cp .env.example .env
+# Đặt POSTGRES_PASSWORD và CONFIG_ENCRYPTION_KEY (dùng: openssl rand -hex 32)
+sudo mkdir -p data
 sudo chown -R 1000:1000 data
 sudo chmod 700 data
 sudo docker compose up -d --build
@@ -21,7 +19,7 @@ sudo docker compose logs --tail=80 app
 curl --fail http://127.0.0.1:3000/health
 ```
 
-Không chạy `configure-vps.py` cho database cũ; nó chỉ tạo cấu hình khi chưa có .env/secrets. Bot sẽ không tạo tài khoản ngân hàng mẫu. Gửi `/start` từ Telegram admin, rồi `/setrate` và ảnh QR thật có caption `/addqr` để cấu hình.
+Chỉ cần tạo `.env` một lần; không tạo lại nếu database đã có dữ liệu. Bot sẽ không tạo tài khoản ngân hàng mẫu. Gửi `/start` từ Telegram admin, rồi `/setrate` và ảnh QR thật có caption `/addqr` để cấu hình.
 
 ## Backup
 
@@ -38,15 +36,14 @@ Backup riêng database và file, mã hóa bằng Restic. Container backup nhìn 
 ## Kiểm thử phát triển
 
 ```bash
-npm ci --ignore-scripts
+npm install --ignore-scripts
 npm run prisma:generate
 npm run typecheck
 npm test
-node scripts/check-migrations.mjs
 npm run build
 ```
 
-Chỉ `NODE_ENV=test` mới dùng mock. Ngoài test, lỗi database được trả ra và không chuyển sang RAM. Test mock không kiểm chứng transaction/rollback PostgreSQL. `check-migrations.mjs` dùng PGlite đã có trong dependency Prisma để smoke test SQL PostgreSQL; vẫn cần nghiệm thu Docker/PostgreSQL thật.
+Chỉ `NODE_ENV=test` mới dùng mock. Ngoài test, lỗi database được trả ra và không chuyển sang RAM. Test mock không kiểm chứng transaction/rollback PostgreSQL; vẫn cần nghiệm thu Docker/PostgreSQL thật.
 
 ## Phạm vi
 

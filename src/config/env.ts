@@ -9,6 +9,9 @@ const envSchema = z.object({
   TELEGRAM_BOT_TOKEN: z.string().optional().default(""),
   SUPER_ADMIN_TELEGRAM_ID: z.string().optional().default(""),
   ADMIN_NOTIFICATION_CHAT_ID: z.string().optional().default(""),
+  // Master encryption key for SystemSecret encryption.
+  // Required in production — the EncryptionService enforces this at runtime
+  // (env var or Docker secret /run/secrets/config-master.key, min 16 chars).
   CONFIG_ENCRYPTION_KEY: z.string().optional().default(""),
   GEMINI_API_KEY: z.string().optional().default(""),
   GEMINI_PRIMARY_MODEL: z.string().default("gemini-3.8-flash"),
