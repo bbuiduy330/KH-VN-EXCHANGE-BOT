@@ -1,4 +1,5 @@
 import { logger } from "../shared/logger.js";
+import { PrismaPg } from "@prisma/adapter-pg";
 
 let PrismaClientConstructor: any = null;
 try {
@@ -276,6 +277,18 @@ function createMockCollection(store: Map<string, any>, keyField: string = "id") 
   };
 }
 
+const isProductionEnv = process.env.NODE_ENV === "production";
+
+/**
+ * Prisma / pg errors can embed the connection URL (which contains credentials).
+ * Strip every scheme://... fragment before logging anything so DATABASE_URL and
+ * its password can never leak into logs. Tokens/API keys are never logged here.
+ */
+export function sanitizeDatabaseError(err: unknown): string {
+  const raw = err instanceof Error ? err.message : String(err);
+  return raw.replace(/[A-Za-z][A-Za-z0-9+.-]*:\/\/[^\s"']+/g, "<redacted-url>");
+}
+
 const mockMap: Record<string, { store: Map<string, any>; key: string }> = {
   exchangeRate: { store: inMemoryStore.exchangeRates, key: "pair" },
   paymentAccount: { store: inMemoryStore.paymentAccounts, key: "id" },
@@ -300,12 +313,21 @@ const mockMap: Record<string, { store: Map<string, any>; key: string }> = {
 };
 
 let prismaClientInstance: any;
+let isRealClient = false;
 
 try {
   if (!PrismaClientConstructor) {
-    throw new Error("PrismaClient is not initialized");
+    throw new Error("Generated PrismaClient not found (run `prisma generate`)");
   }
-  const realPrisma = new PrismaClientConstructor();
+  if (isProductionEnv && !process.env.DATABASE_URL) {
+    throw new Error("DATABASE_URL is required in production");
+  }
+  // Prisma 7 requires a driver adapter and the connection string must be
+  // provided here in application code (the schema datasource has no url; the
+  // CLI reads it from prisma.config.ts, which is why `migrate deploy` works
+  // while a bare `new PrismaClient()` cannot connect). PrismaPg connects lazily.
+  const adapter = new PrismaPg({ connectionString: process.env.DATABASE_URL ?? "" });
+  const realPrisma = new PrismaClientConstructor({ adapter });
 
   // Create a proxy that wraps real Prisma calls and falls back to in-memory store if DB is unreachable
   prismaClientInstance = new Proxy(realPrisma, {
@@ -319,7 +341,11 @@ try {
               return await target.$transaction(arg);
             }
           } catch (e) {
-            logger.warn({ error: (e as Error).message }, "[AI Studio] $transaction failed on real DB, falling back to mock");
+            if (isProductionEnv) {
+              // Financial data must never silently divert to the in-memory mock
+              throw e;
+            }
+            logger.warn({ error: sanitizeDatabaseError(e) }, "[DB] $transaction failed on real DB, falling back to mock (non-production only)");
           }
           if (typeof arg === "function") {
             return await arg(prismaClientInstance);
@@ -343,7 +369,11 @@ try {
                   return await delegateTarget[method](...args);
                 }
               } catch (e) {
-                logger.warn({ error: (e as Error).message }, `[AI Studio] Database call failed on ${prop}.${method}, falling back to mock`);
+                if (isProductionEnv) {
+                  // No mock fallback in production: surface the real DB error
+                  throw e;
+                }
+                logger.warn({ error: sanitizeDatabaseError(e) }, `[DB] Database call failed on ${prop}.${method}, falling back to mock (non-production only)`);
               }
               if (mockDelegate && typeof (mockDelegate as any)[method] === "function") {
                 return await (mockDelegate as any)[method](...args);
@@ -356,8 +386,16 @@ try {
       return target[prop];
     }
   });
-} catch {
-  logger.warn("[AI Studio] PrismaClient initialization failed — using standalone in-memory mock");
+  isRealClient = true;
+} catch (initError) {
+  if (isProductionEnv) {
+    logger.error(
+      { error: sanitizeDatabaseError(initError) },
+      "[DB] FATAL: PrismaClient initialization failed in production — refusing to fall back to in-memory mock. Startup will abort."
+    );
+    throw initError;
+  }
+  logger.warn({ error: sanitizeDatabaseError(initError) }, "[DB] PrismaClient initialization failed — using standalone in-memory mock (non-production only)");
   prismaClientInstance = {
     exchangeRate: createMockCollection(inMemoryStore.exchangeRates, "pair"),
     paymentAccount: createMockCollection(inMemoryStore.paymentAccounts, "id"),
@@ -391,3 +429,13 @@ try {
 
 export const prisma = prismaClientInstance;
 export { inMemoryStore };
+
+/**
+ * True when `prisma` is backed by a real PrismaClient connected through the pg
+ * driver adapter. False when the standalone in-memory mock is in use
+ * (non-production/test only). Used by /health and the startup gate so a mock
+ * database can never be reported as a healthy PostgreSQL.
+ */
+export function isRealPrismaClient(): boolean {
+  return isRealClient;
+}
