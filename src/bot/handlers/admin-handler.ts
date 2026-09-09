@@ -126,10 +126,10 @@ async function renderSystemSettingsView(): Promise<{ text: string; keyboard: Inl
   const resolvedKey = await SystemSecretService.resolveGeminiApiKey();
   const maskedKey = EncryptionService.maskApiKey(resolvedKey.key);
 
-  const history = BackupService.getHistory();
+  const history = await BackupService.getLatestRuns();
   const lastBackup = history[0];
   const lastBackupStr = lastBackup
-    ? `${new Date(lastBackup.timestamp).toLocaleString("vi-VN")} (${lastBackup.sizeFormatted})`
+    ? `${new Date(lastBackup.createdAt).toLocaleString("vi-VN")} (${lastBackup.status === "SUCCESS" ? "✅ Thành công" : lastBackup.status})`
     : "Chưa có bản sao lưu";
 
   const text =
@@ -317,7 +317,7 @@ adminHandler.command("backup", async (ctx) => {
 
   const waitMsg = await ctx.reply("⏳ <b>ĐANG TIẾN HÀNH SAO LƯU DỮ LIỆU HỆ THỐNG TRÊN VPS...</b>\n<i>Quá trình này bao gồm Database và toàn bộ ảnh biên lai/chứng từ giao dịch.</i>", { parse_mode: "HTML" });
 
-  const result = await BackupService.runBackup(ctx.identity?.telegramId || "ADMIN");
+  const result = await BackupService.runBackupNow(ctx.identity?.telegramId || "ADMIN");
 
   if (result.success) {
     await ctx.api.editMessageText(
@@ -325,9 +325,9 @@ adminHandler.command("backup", async (ctx) => {
       waitMsg.message_id,
       `✅ <b>SAO LƯU HỆ THỐNG THÀNH CÔNG!</b>\n\n` +
         `• Trạng thái: <b>HOÀN TẤT</b>\n` +
-        `• Phương thức: <code>${result.record?.type || "SNAPSHOT"}</code>\n` +
-        `• Dung lượng: <b>${result.record?.sizeFormatted || "OK"}</b>\n` +
-        `• Chi tiết: <i>${result.record?.details || result.message}</i>\n` +
+        `• Mã snapshot: <code>${result.snapshotId || "N/A"}</code>\n` +
+        `• Thời lượng: <b>${result.durationSeconds ?? 0}s</b>\n` +
+        `• Chi tiết: <i>${result.message}</i>\n` +
         `• Thời gian: <code>${new Date().toLocaleString("vi-VN")}</code>\n\n` +
         `💾 Dữ liệu đã được bảo vệ an toàn trên ổ đĩa VPS.`,
       { parse_mode: "HTML" }
@@ -349,15 +349,15 @@ adminHandler.command("backups", async (ctx) => {
     return ctx.reply("⛔ Bạn không có quyền xem lịch sử sao lưu.");
   }
 
-  const history = BackupService.getHistory();
+  const history = await BackupService.getLatestRuns();
   if (history.length === 0) {
     return ctx.reply("Chưa có bản sao lưu nào được tạo. Gõ <code>/backup</code> để tạo bản sao lưu đầu tiên.", { parse_mode: "HTML" });
   }
 
   let msg = `💾 <b>DANH SÁCH BẢN SAO LƯU HỆ THỐNG GẦN NHẤT:</b>\n\n`;
   for (const b of history.slice(0, 10)) {
-    const timeStr = new Date(b.timestamp).toLocaleString("vi-VN");
-    msg += `• <b>${b.id}</b> [${b.type}]\n  📅 ${timeStr} | 📦 ${b.sizeFormatted} | ${b.status === "SUCCESS" ? "✅" : "❌"}\n`;
+    const timeStr = new Date(b.createdAt).toLocaleString("vi-VN");
+    msg += `• <b>${b.id}</b> [${b.backupType}]\n  📅 ${timeStr} | 📦 ${b.snapshotId || "N/A"} | ${b.status === "SUCCESS" ? "✅" : "❌"}\n`;
   }
 
   msg += `\n💡 <i>Gõ /backup để chạy sao lưu ngay bây giờ.</i>`;
@@ -1746,10 +1746,10 @@ adminHandler.callbackQuery("admin:menu:backup", async (ctx) => {
     return ctx.reply("⛔ Bạn không có quyền truy cập chức năng sao lưu.");
   }
 
-  const history = BackupService.getHistory();
+  const history = await BackupService.getLatestRuns();
   const last = history[0];
   const lastStr = last
-    ? `• Lần sao lưu gần nhất: <b>${new Date(last.timestamp).toLocaleString("vi-VN")}</b> (${last.sizeFormatted} - ${last.status})\n• Vị trí: <code>${last.targetPath}</code>\n`
+    ? `• Lần sao lưu gần nhất: <b>${new Date(last.createdAt).toLocaleString("vi-VN")}</b> (${last.status})\n• Snapshot: <code>${last.snapshotId || "N/A"}</code>\n`
     : "• Chưa có bản sao lưu nào.\n";
 
   const cfg = SystemConfigService.getConfig();
@@ -1774,16 +1774,16 @@ adminHandler.callbackQuery("admin:menu:backup", async (ctx) => {
 adminHandler.callbackQuery("admin:backup:run_now", async (ctx) => {
   await ctx.answerCallbackQuery("Đang sao lưu...");
   const waitMsg = await ctx.reply("⏳ <b>ĐANG TIẾN HÀNH SAO LƯU HỆ THỐNG...</b>\n<i>Vui lòng đợi vài giây...</i>", { parse_mode: "HTML" });
-  const result = await BackupService.runBackup(ctx.identity?.telegramId || "ADMIN");
+  const result = await BackupService.runBackupNow(ctx.identity?.telegramId || "ADMIN");
 
   if (result.success) {
     await ctx.api.editMessageText(
       ctx.chat!.id,
       waitMsg.message_id,
       `✅ <b>SAO LƯU THÀNH CÔNG!</b>\n\n` +
-        `• Mã snapshot: <code>${result.record?.id}</code>\n` +
-        `• Dung lượng: <b>${result.record?.sizeFormatted}</b>\n` +
-        `• Chi tiết: <i>${result.record?.details}</i>\n` +
+        `• Mã snapshot: <code>${result.snapshotId || "N/A"}</code>\n` +
+        `• Thời lượng: <b>${result.durationSeconds ?? 0}s</b>\n` +
+        `• Chi tiết: <i>${result.message}</i>\n` +
         `• Thời gian: <code>${new Date().toLocaleString("vi-VN")}</code>`,
       { parse_mode: "HTML" }
     );
@@ -1799,15 +1799,15 @@ adminHandler.callbackQuery("admin:backup:run_now", async (ctx) => {
 
 adminHandler.callbackQuery("admin:backup:history", async (ctx) => {
   await ctx.answerCallbackQuery();
-  const history = BackupService.getHistory();
+  const history = await BackupService.getLatestRuns();
   if (history.length === 0) {
     return ctx.reply("Chưa có bản sao lưu nào. Bấm '💾 Sao lưu ngay bây giờ' để tạo bản sao lưu đầu tiên.");
   }
 
   let msg = `📜 <b>LỊCH SỬ CÁC BẢN SAO LƯU GẦN NHẤT:</b>\n\n`;
   for (const b of history.slice(0, 8)) {
-    const t = new Date(b.timestamp).toLocaleString("vi-VN");
-    msg += `• <b>${b.id}</b> (${b.type})\n  📅 ${t} | 📦 ${b.sizeFormatted} | ${b.status === "SUCCESS" ? "✅ Thành công" : "❌ Thất bại"}\n`;
+    const t = new Date(b.createdAt).toLocaleString("vi-VN");
+    msg += `• <b>${b.id}</b> (${b.backupType})\n  📅 ${t} | 📦 ${b.snapshotId || "N/A"} | ${b.status === "SUCCESS" ? "✅ Thành công" : "❌ Thất bại"}\n`;
   }
 
   await ctx.reply(msg, {

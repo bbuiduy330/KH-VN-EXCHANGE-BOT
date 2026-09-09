@@ -116,7 +116,8 @@ dashboardHandler.callbackQuery("admin:menu:firstrun", async (ctx) => {
   const accountsCount = await prisma.paymentAccount.count();
   const hasAccounts = accountsCount > 0;
 
-  const isStorageOk = LocalStorageService.isReady();
+  const storageHealth = await LocalStorageService.checkStorageHealth();
+  const isStorageOk = storageHealth.writable;
   const isBackupEnabled = RuntimeConfigService.isBackupEnabled();
   const hasSuperAdmin = Boolean(env.SUPER_ADMIN_TELEGRAM_ID);
 

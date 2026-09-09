@@ -193,7 +193,7 @@ export class MoneyService {
     if (code === "USD") {
       const rounded = dec.toDecimalPlaces(2, Decimal.ROUND_HALF_UP);
       const fixed = rounded.toFixed(2).replace(/\.?0+$/, "");
-      const [intPart, decPart] = fixed.split(".");
+      const [intPart = fixed, decPart] = fixed.split(".");
       const grouped = this.groupThousands(intPart);
       return decPart ? `${grouped},${decPart}` : grouped;
     }
