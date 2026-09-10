@@ -191,3 +191,26 @@ export function getSupportModeKeyboard(locale: SupportedLocale | string = DEFAUL
 }
 
 export { SUPPORTED_LOCALES, LOCALE_LABELS };
+
+/**
+ * Persistent bottom ReplyKeyboardMarkup for PRIVATE customer chat.
+ * Two compact rows. Transaction-specific actions stay inline on Quote/Order.
+ */
+export function getCustomerReplyKeyboard(
+  locale: SupportedLocale | string = DEFAULT_LOCALE,
+  inHuman: boolean = false
+): { keyboard: { text: string }[][]; resize_keyboard: boolean; is_persistent: boolean; one_time_keyboard: boolean } {
+  const loc = resolveLocale(locale);
+  const primary = inHuman ? t(loc, "menu.exit_support") : t(loc, "menu.exchange");
+  const supportLabel = inHuman ? t(loc, "menu.support_active") : t(loc, "menu.support");
+  return {
+    keyboard: [
+      [{ text: primary }, { text: t(loc, "menu.orders") }],
+      [{ text: supportLabel }, { text: t(loc, "menu.language") }]
+    ],
+    resize_keyboard: true,
+    is_persistent: true,
+    one_time_keyboard: false
+  };
+}
+

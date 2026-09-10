@@ -89,6 +89,8 @@ add("menu.orders", "📦 Đơn của tôi", "📦 My orders", "📦 ការប
 add("menu.support", "💬 Hỗ trợ", "💬 Support", "💬 ជំនួយ", "💬 客服");
 add("menu.language", "🌐 Ngôn ngữ", "🌐 Language", "🌐 ភាសា", "🌐 语言");
 add("menu.exit_support", "↩️ Quay lại đổi tiền", "↩️ Back to exchange", "↩️ ត្រឡប់ទៅការផ្លាស់ប្តូរ", "↩️ 返回兑换");
+add("menu.support_active", "💬 Đang hỗ trợ", "💬 In support", "💬 កំពុងទទួលជំនួយ", "💬 人工客服中");
+
 
 // Language
 add("lang.selector_title", "🌐 <b>Chọn ngôn ngữ / Choose language</b>", "🌐 <b>Choose language / Chọn ngôn ngữ</b>", "🌐 <b>ជ្រើសរើសភាសា / Choose language</b>", "🌐 <b>选择语言 / Choose language</b>");

@@ -2,6 +2,7 @@ import { Decimal } from "decimal.js";
 import { prisma } from "../../database/client.js";
 import { RuntimeConfigService } from "../system-config/runtime-config-service.js";
 import { MoneyService } from "../money/money-service.js";
+import { AuditService } from "../audit/audit-service.js";
 
 export interface QuoteCalculation {
   sourceCurrency: string;
@@ -53,6 +54,79 @@ export class QuoteService {
         feeCurrency: feeCurrency.toUpperCase(),
         updatedBy
       }
+    });
+  }
+
+  /**
+   * Atomic rate save + PENDING-quote invalidation + strict audit.
+   * One transaction — no window where the new rate is committed but an old
+   * PENDING quote can still be confirmed. Returns the saved rate and the
+   * number of invalidated quotes.
+   */
+  static async setRateAndInvalidate(
+    pair: string,
+    baseRate: number | string,
+    buyMargin: number | string,
+    sellMargin: number | string,
+    fee: number | string,
+    feeCurrency: string,
+    updatedBy: string,
+    actorRole: string
+  ): Promise<{
+    rate: { pair: string; baseRate: Decimal; buyMargin: Decimal; sellMargin: Decimal; fee: Decimal; feeCurrency: string };
+    invalidatedCount: number;
+  }> {
+    const normalizedPair = pair.toUpperCase().trim();
+    const base = new Decimal(baseRate);
+    const buy = new Decimal(buyMargin);
+    const sell = new Decimal(sellMargin);
+    const feeDec = new Decimal(fee);
+    const feeCur = feeCurrency.toUpperCase();
+
+    MoneyService.validateMargins(buy, sell);
+
+    return prisma.$transaction(async (tx: any) => {
+      const rate = await tx.exchangeRate.upsert({
+        where: { pair: normalizedPair },
+        update: {
+          baseRate: base,
+          buyMargin: buy,
+          sellMargin: sell,
+          fee: feeDec,
+          feeCurrency: feeCur,
+          updatedBy,
+          updatedAt: new Date()
+        },
+        create: {
+          pair: normalizedPair,
+          baseRate: base,
+          buyMargin: buy,
+          sellMargin: sell,
+          fee: feeDec,
+          feeCurrency: feeCur,
+          updatedBy
+        }
+      });
+
+      const invalidation = await tx.quote.updateMany({
+        where: { status: "PENDING" },
+        data: { expiresAt: new Date() }
+      });
+
+      await AuditService.log(
+        {
+          actorId: updatedBy,
+          actorRole,
+          action: "RATE_UPDATED",
+          targetType: "EXCHANGE_RATE",
+          targetId: normalizedPair,
+          details: { baseRate, buyMargin, sellMargin, fee, feeCurrency, invalidatedQuotes: invalidation.count }
+        },
+        tx,
+        "STRICT"
+      );
+
+      return { rate, invalidatedCount: invalidation.count };
     });
   }
 
@@ -381,7 +455,8 @@ export class QuoteService {
         where: {
           id: quoteId,
           customerId,
-          status: "PENDING"
+          status: "PENDING",
+          expiresAt: { gt: new Date() }
         },
         data: {
           status: "CONFIRMED",
@@ -398,4 +473,18 @@ export class QuoteService {
       });
     });
   }
+  /**
+   * Business rule: when Admin updates rates, every still-PENDING (unaccepted)
+   * quote is invalidated immediately (expiresAt = now). Historical rate/amount/
+   * fee snapshots are preserved — only expiry changes. Confirmed orders are
+   * untouched because they no longer carry PENDING quote status.
+   */
+  static async invalidatePendingQuotes(): Promise<number> {
+    const result = await prisma.quote.updateMany({
+      where: { status: "PENDING" },
+      data: { expiresAt: new Date() }
+    });
+    return result.count;
+  }
+
 }
