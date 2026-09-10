@@ -233,6 +233,28 @@ export class MoneyService {
    * Groups integer digits with spaces as thousands separators.
    * "2635700" -> "2 635 700"
    */
+  /**
+   * Formats an effective quote rate in an intuitive customer form.
+   * Never shows VND->USD as "0.0000": both directions are presented as
+   * "1 USD = xx xxx VND" using the directional effective rate.
+   */
+  static formatEffectiveRate(sourceCurrency: string, targetCurrency: string, effectiveRate: Decimal | number | string): string {
+    const src = sourceCurrency.toUpperCase().trim();
+    const tgt = targetCurrency.toUpperCase().trim();
+    const rate = new Decimal(effectiveRate);
+
+    if (src === "USD" && tgt === "VND") {
+      return `1 USD = ${this.formatAmount(rate, "VND")} VND`;
+    }
+    if (src === "VND" && tgt === "USD") {
+      // Inverse direction: present the intuitive USD->VND customer form.
+      const usdToVnd = new Decimal(1).dividedBy(rate);
+      return `1 USD = ${this.formatAmount(usdToVnd, "VND")} VND`;
+    }
+    // Fallback (historical pairs): keep a readable 4-decimal form.
+    return `1 ${src} = ${rate.toFixed(4)} ${tgt}`;
+  }
+
   private static groupThousands(intPart: string): string {
     return intPart.replace(/\B(?=(\d{3})+(?!\d))/g, " ");
   }

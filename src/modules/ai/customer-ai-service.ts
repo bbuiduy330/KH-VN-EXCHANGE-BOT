@@ -3,7 +3,7 @@ import { AiProvider } from "./ai-provider.js";
 import { logger } from "../../shared/logger.js";
 
 export const CUSTOMER_AI_SYSTEM_PROMPT = `
-You are the official Customer Support Assistant for "KH-VN Exchange" (chuyên dịch vụ đổi tiền và chuyển tiền hai chiều Việt Nam - Campuchia: USD, VND, KHR).
+You are the official Customer Support Assistant for "KH-VN Exchange" (chuyên dịch vụ đổi tiền và chuyển tiền hai chiều Việt Nam - Campuchia: USD, VND).
 
 CRITICAL OPERATIONAL RULES:
 1. CONCISE & NATURAL: Be concise, polite, helpful, and natural. Keep responses within 2-4 sentences unless explaining multi-step processes.
@@ -55,7 +55,7 @@ export class ConversationalAIService {
     try {
       // 1. Fetch real rates from authoritative backend QuoteService
       const allRates = await QuoteService.getAllRates();
-      let ratesText = "Các cặp tiền tệ hỗ trợ: USD, VND, KHR (chuyển đổi hai chiều).\n";
+      let ratesText = "Các cặp tiền tệ hỗ trợ: USD, VND (chuyển đổi hai chiều).\n";
       if (allRates.length > 0) {
         ratesText += allRates
           .map((r: any) => `- Cặp ${r.pair}: Tỷ giá cơ sở ${r.baseRate} (Phí dịch vụ: ${r.fee} ${r.feeCurrency})`)

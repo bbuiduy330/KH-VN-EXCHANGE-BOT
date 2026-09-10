@@ -26,16 +26,14 @@ export class OrderService {
       throw new Error(`Không tìm thấy tài khoản nhận hợp lệ cho đồng ${quote.sourceCurrency}`);
     }
 
-    // 2. Snapshot customer payout bank for target currency
+    // 2. Snapshot customer payout bank for target currency.
+    // UX: the receiving bank account is NOT required to create the order.
+    // It is collected later (menu button / chat) and becomes mandatory only
+    // before payout execution (enforced by the admin payout-complete guard).
     const payoutBank = await CustomerService.getPayoutBank(
       customerId,
       quote.targetCurrency
     );
-    if (!payoutBank) {
-      throw new Error(
-        `Vui lòng thiết lập tài khoản nhận tiền ${quote.targetCurrency} trước khi tạo đơn: /bank ${quote.targetCurrency}|Tên Ngân Hàng|Tên Chủ TK|Số TK`
-      );
-    }
 
     const orderId = `ORD-${Date.now().toString(36).toUpperCase()}-${Math.random()
       .toString(36)
@@ -54,12 +52,14 @@ export class OrderService {
       qrSha256: receivingAccount.qrSha256
     };
 
-    const payoutBankSnapshot = {
-      currency: payoutBank.currency,
-      bankName: payoutBank.bankName,
-      accountName: payoutBank.accountName,
-      accountNumber: payoutBank.accountNumber
-    };
+    const payoutBankSnapshot = payoutBank
+      ? {
+          currency: payoutBank.currency,
+          bankName: payoutBank.bankName,
+          accountName: payoutBank.accountName,
+          accountNumber: payoutBank.accountNumber
+        }
+      : null;
 
     const order = await prisma.$transaction(async (tx: any) => {
       const created = await tx.order.create({

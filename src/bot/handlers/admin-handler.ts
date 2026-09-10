@@ -737,6 +737,20 @@ adminHandler.callbackQuery(/^(?:admin:payout:complete:|payout_complete:)(.+)$/, 
   if (!orderId) return;
   const adminId = String(ctx.from?.id || "");
 
+  // Pre-payout safety: the customer's receiving account is mandatory only
+  // BEFORE payout execution. Order creation no longer requires it (UX).
+  const targetOrder = await OrderService.getOrder(orderId);
+  if (targetOrder && !targetOrder.payoutBankSnapshot) {
+    const customerForBank = await prisma.customer.findUnique({ where: { id: targetOrder.customerId } });
+    await ctx.reply(
+      `⚠️ <b>CHƯA THỂ HOÀN TẤT ĐƠN HÀNG</b>\n\n` +
+        `Đơn <code>${orderId}</code> chưa có tài khoản nhận tiền của khách hàng.\n` +
+        `Vui lòng yêu cầu khách <b>${customerForBank?.fullName || customerForBank?.telegramId || targetOrder.customerId}</b> ` +
+        `gửi thông tin nhận tiền ${targetOrder.targetCurrency} qua menu <b>🏦 Tài khoản nhận tiền</b> trước khi giải ngân.`
+    );
+    return;
+  }
+
   try {
     const completed = await OrderService.completePayout(orderId, adminId);
 

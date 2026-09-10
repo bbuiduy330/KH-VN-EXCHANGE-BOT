@@ -12,11 +12,13 @@ import { FileService } from "../../modules/files/file-service.js";
 import { RuntimeConfigService } from "../../modules/system-config/runtime-config-service.js";
 import { MoneyService } from "../../modules/money/money-service.js";
 import { sendToStaff, sendToAdminNotificationChat } from "../notifications.js";
-import { getCustomerMenuKeyboard, renderCustomerStartText } from "../menus/customer-menu.js";
+import { getCustomerMenuKeyboard, renderCustomerWelcomeText, renderActiveOrderText, renderQuoteCard } from "../menus/customer-menu.js";
 
 export const customerHandler = new Composer<BotContext>();
 
-// Helper to handle customer start
+// Helper to handle customer start:
+// shows ACTIVE context first (order -> unexpired quote -> HUMAN support),
+// otherwise the rates-first welcome.
 export async function showCustomerStart(ctx: BotContext) {
   const telegramId = String(ctx.from?.id || "");
   const customer = await CustomerService.getOrCreateCustomer({
@@ -25,8 +27,49 @@ export async function showCustomerStart(ctx: BotContext) {
     fullName: [ctx.from?.first_name, ctx.from?.last_name].filter(Boolean).join(" ")
   });
 
-  const text = renderCustomerStartText(customer.fullName || "Quý khách");
   const keyboard = getCustomerMenuKeyboard();
+
+  // 1. Active order -> show/resume order status
+  const activeOrder = await OrderService.getLatestActiveOrderForCustomer(customer.id);
+  if (activeOrder) {
+    await ctx.reply(await renderActiveOrderText(activeOrder), {
+      parse_mode: "HTML",
+      reply_markup: keyboard
+    });
+    return;
+  }
+
+  // 2. Active unexpired quote -> show/resume that quote
+  const activeQuote = await QuoteService.getLatestActiveQuote(customer.id);
+  if (activeQuote) {
+    const remainingMinutes = Math.max(
+      1,
+      Math.ceil((new Date(activeQuote.expiresAt).getTime() - Date.now()) / 60000)
+    );
+    await ctx.reply(renderQuoteCard(activeQuote, remainingMinutes), {
+      parse_mode: "HTML",
+      reply_markup: new InlineKeyboard().text(
+        "✅ Xác nhận đổi tiền",
+        `customer:quote:confirm:${activeQuote.id}`
+      )
+    });
+    return;
+  }
+
+  // 3. Active HUMAN support -> do not interrupt with the generic welcome
+  const conv = await ConversationService.getOrCreateConversation(customer.id);
+  if (conv.mode === "HUMAN") {
+    await ctx.reply(
+      `💬 <b>BẠN ĐANG ĐƯỢC NHÂN VIÊN HỖ TRỢ TRỰC TIẾP</b>\n\n` +
+        `Anh/chị vui lòng tiếp tục nhắn tin tại khung chat này.\n` +
+        `Nhân viên CSKH sẽ phản hồi anh/chị ngay.`,
+      { parse_mode: "HTML", reply_markup: keyboard }
+    );
+    return;
+  }
+
+  // 4. Default: two-way USD/VND rates first
+  const text = await renderCustomerWelcomeText(customer.fullName || "Quý khách");
   await ctx.reply(text, { parse_mode: "HTML", reply_markup: keyboard });
 }
 
@@ -34,8 +77,9 @@ export async function showCustomerStart(ctx: BotContext) {
 customerHandler.command("help", async (ctx) => {
   await ctx.reply(
     `📖 <b>HƯỚNG DẪN DỊCH VỤ ĐỔI TIỀN</b>\n\n` +
-      `• Gửi tin nhắn ví dụ: <i>'đổi 1000 USD sang VND'</i> để nhận báo giá tức thời.\n` +
-      `• Cài đặt ngân hàng nhận tiền: <code>/bank VND|MB Bank|TÊN CHỦ TK|SỐ TK</code>\n` +
+      `• Nhắn tin tự nhiên, ví dụ: <i>"100 đô"</i>, <i>"10 triệu lấy đô"</i> để nhận báo giá tức thời.\n` +
+      `• Thiết lập ngân hàng nhận tiền: bấm nút <b>🏦 Tài khoản nhận tiền</b> trong menu, hoặc nhắn tin:\n` +
+      `  <i>Ví dụ:</i> <code>VND | Vietcombank | NGUYEN VAN A | 1012345678</code>\n` +
       `• Xem đơn đã tạo: <code>/orders</code>\n` +
       `• Hủy đơn đang chờ: <code>/cancel</code>\n` +
       `• Để gặp nhân viên hỗ trợ trực tiếp, vui lòng nhấn nút <b>💬 Hỗ trợ</b> trong menu.`,
@@ -184,10 +228,10 @@ customerHandler.callbackQuery(/^customer:bank:wiz:(VND|USD)$/, async (ctx) => {
   const currency = ctx.match ? ctx.match[1] : "VND";
   await ctx.reply(
     `🏦 <b>CÀI ĐẶT TÀI KHOẢN NHẬN ${currency}</b>\n\n` +
-      `Vui lòng gửi tin nhắn theo định dạng:\n` +
-      `<code>/bank ${currency}|Tên Ngân Hàng|Tên Chủ TK|Số TK</code>\n\n` +
+      `Anh/chị chỉ cần nhắn tin theo mẫu sau (các phần cách nhau bằng dấu |):\n` +
+      `<code>${currency} | Tên Ngân Hàng | Tên Chủ TK | Số TK</code>\n\n` +
       `<i>Ví dụ:</i>\n` +
-      `<code>/bank ${currency}|Vietcombank|NGUYEN VAN A|0123456789</code>`,
+      `<code>${currency} | Vietcombank | NGUYEN VAN A | 0123456789</code>`,
     { parse_mode: "HTML" }
   );
 });
@@ -335,6 +379,34 @@ export async function handleCustomerTextMessage(ctx: BotContext, text: string) {
     };
   }
 
+  // 0. Conversational receiving-account capture (no slash command required):
+  // "VND | Vietcombank | NGUYEN VAN A | 0123456789"
+  const bankCapture = text.match(/^(VND|USD)\s*\|\s*([^|]+)\s*\|\s*([^|]+)\s*\|\s*([^|]+)$/i);
+  if (bankCapture) {
+    const [, currency, bankName, accountName, accountNumber] = bankCapture as [
+      string,
+      string,
+      string,
+      string,
+      string
+    ];
+    await CustomerService.setPayoutBank({
+      customerId: customer.id,
+      currency: currency.toUpperCase(),
+      bankName: bankName.trim(),
+      accountName: accountName.trim(),
+      accountNumber: accountNumber.trim()
+    });
+    await ctx.reply(
+      `✅ <b>Đã lưu tài khoản nhận tiền ${currency.toUpperCase()}:</b>\n` +
+        `• Ngân hàng: <b>${bankName.trim()}</b>\n` +
+        `• Chủ tài khoản: <b>${accountName.trim()}</b>\n` +
+        `• Số tài khoản: <code>${accountNumber.trim()}</code>`,
+      { parse_mode: "HTML", reply_markup: getCustomerMenuKeyboard() }
+    );
+    return;
+  }
+
   // 1. Check exchange intent
   const intent = await AiProvider.parseExchangeIntent(text);
   if (intent) {
@@ -349,19 +421,8 @@ export async function handleCustomerTextMessage(ctx: BotContext, text: string) {
 
       const keyboard = new InlineKeyboard().text("✅ Xác nhận đổi tiền", `customer:quote:confirm:${quote.id}`);
       const expiryMinutes = RuntimeConfigService.getQuoteExpiryMinutes();
-      const formattedSrc = MoneyService.formatAmount(quote.sourceAmount, quote.sourceCurrency);
-      const formattedTgt = MoneyService.formatAmount(quote.targetAmount, quote.targetCurrency);
 
-      await ctx.reply(
-        `📊 <b>BÁO GIÁ ĐỔI TIỀN TỆ</b>\n\n` +
-          `• Quý khách gửi: <b>${formattedSrc} ${quote.sourceCurrency}</b>\n` +
-          `• Quý khách nhận: <b>${formattedTgt} ${quote.targetCurrency}</b>\n` +
-          `• Tỷ giá áp dụng: <b>${Number(quote.effectiveRate).toFixed(4)}</b>\n` +
-          `• Phí dịch vụ: <b>${quote.fee} ${quote.feeCurrency}</b>\n` +
-          `• Hiệu lực: <i>${expiryMinutes} phút</i>\n\n` +
-          `Bấm nút dưới đây để tạo đơn và nhận tài khoản chuyển tiền:`,
-        { parse_mode: "HTML", reply_markup: keyboard }
-      );
+      await ctx.reply(renderQuoteCard(quote, expiryMinutes), { parse_mode: "HTML", reply_markup: keyboard });
       return;
     } catch (err: any) {
       await ctx.reply(`⚠️ ${err.message}`);

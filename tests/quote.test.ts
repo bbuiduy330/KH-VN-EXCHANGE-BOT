@@ -421,3 +421,96 @@ describe("MoneyService.formatUsd", () => {
     expect(MoneyService.formatUsd(10.500)).toBe("10,5 USD");
   });
 });
+
+// --- Customer UX PASS: required natural-language matrix (local-first parsing) ---
+describe("parseLocalExchangeIntent — customer UX NL matrix", () => {
+  // "10 triệu lấy $" MUST be VND -> USD ($ on the right side is the TARGET,
+  // never the source merely because the symbol exists).
+  it('parses "10 triệu lấy $" -> 10 000 000 VND -> USD', () => {
+    const intent = AiProvider.parseLocalExchangeIntent("10 triệu lấy $");
+    expect(intent).not.toBeNull();
+    expect(intent?.amount).toBe(10000000);
+    expect(intent?.sourceCurrency).toBe("VND");
+    expect(intent?.targetCurrency).toBe("USD");
+  });
+
+  it('parses "10 triệu lấy đô" -> VND -> USD', () => {
+    const intent = AiProvider.parseLocalExchangeIntent("10 triệu lấy đô");
+    expect(intent).not.toBeNull();
+    expect(intent?.sourceCurrency).toBe("VND");
+    expect(intent?.targetCurrency).toBe("USD");
+  });
+
+  it('parses "10 tr lấy đô" -> VND -> USD', () => {
+    const intent = AiProvider.parseLocalExchangeIntent("10 tr lấy đô");
+    expect(intent).not.toBeNull();
+    expect(intent?.amount).toBe(10000000);
+    expect(intent?.sourceCurrency).toBe("VND");
+    expect(intent?.targetCurrency).toBe("USD");
+  });
+
+  it('parses "500$ lấy tiền Việt" -> USD -> VND', () => {
+    const intent = AiProvider.parseLocalExchangeIntent("500$ lấy tiền Việt");
+    expect(intent).not.toBeNull();
+    expect(intent?.amount).toBe(500);
+    expect(intent?.sourceCurrency).toBe("USD");
+    expect(intent?.targetCurrency).toBe("VND");
+  });
+
+  it('parses "100 đô" -> USD -> VND (compact amount+currency)', () => {
+    const intent = AiProvider.parseLocalExchangeIntent("100 đô");
+    expect(intent).not.toBeNull();
+    expect(intent?.amount).toBe(100);
+    expect(intent?.sourceCurrency).toBe("USD");
+    expect(intent?.targetCurrency).toBe("VND");
+  });
+
+  it('parses "20tr đổi USD" -> VND -> USD (currency after change verb = target)', () => {
+    const intent = AiProvider.parseLocalExchangeIntent("20tr đổi USD");
+    expect(intent).not.toBeNull();
+    expect(intent?.amount).toBe(20000000);
+    expect(intent?.sourceCurrency).toBe("VND");
+    expect(intent?.targetCurrency).toBe("USD");
+  });
+
+  it('parses "10m đổi usd" -> VND -> USD', () => {
+    const intent = AiProvider.parseLocalExchangeIntent("10m đổi usd");
+    expect(intent).not.toBeNull();
+    expect(intent?.amount).toBe(10000000);
+    expect(intent?.sourceCurrency).toBe("VND");
+    expect(intent?.targetCurrency).toBe("USD");
+  });
+
+  it('parses "20 triệu sang đô" -> VND -> USD', () => {
+    const intent = AiProvider.parseLocalExchangeIntent("20 triệu sang đô");
+    expect(intent).not.toBeNull();
+    expect(intent?.sourceCurrency).toBe("VND");
+    expect(intent?.targetCurrency).toBe("USD");
+  });
+
+  it('parses "tôi muốn đổi 100 đô" -> USD -> VND', () => {
+    const intent = AiProvider.parseLocalExchangeIntent("tôi muốn đổi 100 đô");
+    expect(intent).not.toBeNull();
+    expect(intent?.amount).toBe(100);
+    expect(intent?.sourceCurrency).toBe("USD");
+    expect(intent?.targetCurrency).toBe("VND");
+  });
+
+  it('parses "100 đô được bao nhiêu tiền việt" -> USD -> VND', () => {
+    const intent = AiProvider.parseLocalExchangeIntent("100 đô được bao nhiêu tiền việt");
+    expect(intent).not.toBeNull();
+    expect(intent?.amount).toBe(100);
+    expect(intent?.sourceCurrency).toBe("USD");
+    expect(intent?.targetCurrency).toBe("VND");
+  });
+
+  // Safety: genuinely uncertain direction must NOT be guessed locally
+  it('rejects "100 lấy đô" (uncertain direction, no VND-scale signal)', () => {
+    expect(AiProvider.parseLocalExchangeIntent("100 lấy đô")).toBeNull();
+  });
+
+  // USD/VND only: KHR must never parse in the customer flow
+  it('rejects "100 đô sang khr" (KHR not customer-supported)', () => {
+    expect(AiProvider.parseLocalExchangeIntent("100 đô sang khr")).toBeNull();
+  });
+});
