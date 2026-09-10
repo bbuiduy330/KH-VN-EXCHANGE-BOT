@@ -535,12 +535,9 @@ async function handleReservedCustomerControl(
     case "exchange": {
       if (inHuman) {
         await ConversationService.releaseByCustomer(customer.id);
-        await ctx.reply(t(locale, "support.exited"), { parse_mode: "HTML" });
       }
-      await ctx.reply(t(locale, "exchange.instructions"), {
-        parse_mode: "HTML",
-        reply_markup: getCustomerReplyKeyboard(locale, false)
-      });
+      const welcomeText = await renderCustomerWelcomeText(customer.fullName || "Guest", locale);
+      await ctx.reply(welcomeText, { parse_mode: "HTML", reply_markup: getCustomerReplyKeyboard(locale, false) });
       return true;
     }
     case "orders": {

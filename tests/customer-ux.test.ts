@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import { getCustomerReplyKeyboard } from "../src/bot/menus/customer-menu.js";
 import { matchReservedAction } from "../src/bot/handlers/customer-handler.js";
+import { t } from "../src/modules/i18n/locales.js";
 
 function texts(locale: string, inHuman: boolean): string[] {
   return getCustomerReplyKeyboard(locale, inHuman).keyboard.flat().map((b) => b.text);
@@ -55,3 +56,17 @@ describe("customer reserved controls (cross-locale fail-safe)", () => {
     expect(matchReservedAction("đổi 2 triệu lấy đô")).toBeNull();
   });
 });
+describe("customer welcome footer copy", () => {
+  it("vi footer no longer mentions AI assistant", () => {
+    const vi = t("vi", "welcome.footer");
+    expect(vi).not.toContain("Trợ lý AI");
+    expect(vi).toContain("Đội ngũ CSKH luôn sẵn sàng hỗ trợ");
+  });
+
+  it("en footer no longer mentions AI assistant", () => {
+    const en = t("en", "welcome.footer");
+    expect(en).not.toContain("AI assistant");
+    expect(en).toContain("Support staff");
+  });
+});
+

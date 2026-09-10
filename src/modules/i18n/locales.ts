@@ -108,7 +108,7 @@ add("welcome.example_1", "• <i>100 đô</i>", "• <i>100 dollars</i>", "• <
 add("welcome.example_2", "• <i>500$ lấy tiền Việt</i>", "• <i>500$ to VND</i>", "• <i>500$ to VND</i>", "• <i>500$ to VND</i>");
 add("welcome.example_3", "• <i>10 triệu lấy đô</i>", "• <i>10 million to USD</i>", "• <i>10 million to USD</i>", "• <i>10 million to USD</i>");
 add("welcome.example_4", "• <i>20tr đổi USD</i>", "• <i>exchange VND for 100 USD</i>", "• <i>get 100 USD</i>", "• <i>get 100 USD</i>");
-add("welcome.footer", "🤖 Trợ lý AI và đội ngũ CSKH luôn sẵn sàng hỗ trợ trực tiếp tại khung chat này!", "🤖 AI assistant and support staff are ready to help in this chat!", "🤖 ជំនួយ AI និងបុគ្គលិករួចរាល់ជួយនៅក្នុងជជែកនេះ!", "🤖 AI 助手和客服随时在此为您服务！");
+add("welcome.footer", "🤖 Đội ngũ CSKH luôn sẵn sàng hỗ trợ.", "🤖 Support staff are ready to help.", "🤖 បុគ្គលិកជំនួយរួចរាល់ក្នុងការជួយអ្នក។", "🤖 客服随时为您服务。");
 add("welcome.first_time", "🌐 Em có thể phục vụ bằng 4 ngôn ngữ. Anh/chị chọn ngôn ngữ bên dưới nhé:", "🌐 I can serve you in 4 languages. Please choose one below:", "🌐 ខ្ញុំអាចបម្រើបាន ៤ ភាសា។ សូមជ្រើសរើសខាងក្រោម:", "🌐 我支持 4 种语言，请选择：");
 
 add("exchange.instructions",
