@@ -1,6 +1,32 @@
 import { prisma } from "../../database/client.js";
+import {
+  DEFAULT_LOCALE,
+  SupportedLocale,
+  normalizeLocale,
+  resolveLocale
+} from "../i18n/locales.js";
 
 export class CustomerService {
+  /**
+   * Persist an explicit customer language choice (vi|en|km|zh).
+   * Uses the existing Customer.language column — no schema change.
+   * Only called from the explicit language-selector callback, never
+   * automatically from detected message language.
+   */
+  static async setLanguage(customerId: string, locale: string): Promise<SupportedLocale> {
+    const normalized = normalizeLocale(locale) ?? DEFAULT_LOCALE;
+    await prisma.customer.update({
+      where: { id: customerId },
+      data: { language: normalized }
+    });
+    return normalized;
+  }
+
+  /** Resolve the customer's stored language into a SupportedLocale. */
+  static getLocale(customer: { language?: string | null } | null | undefined): SupportedLocale {
+    return resolveLocale(customer?.language);
+  }
+
   static async getOrCreateCustomer(data: {
     telegramId: string;
     username?: string;
@@ -12,12 +38,14 @@ export class CustomerService {
     });
 
     if (!customer) {
+      // Telegram language_code is only an INITIAL default suggestion.
+      const initial = normalizeLocale(data.language) ?? DEFAULT_LOCALE;
       customer = await prisma.customer.create({
         data: {
           telegramId: data.telegramId,
           username: data.username,
           fullName: data.fullName,
-          language: data.language || "vi"
+          language: initial
         }
       });
 

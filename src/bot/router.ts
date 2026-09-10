@@ -1,7 +1,7 @@
 import { Composer } from "grammy";
 import { BotContext, identityMiddleware } from "./middleware/identity.js";
 import { customerHandler, showCustomerStart, handleCustomerTextMessage, handleCustomerPhoto, handleCustomerVoice } from "./handlers/customer-handler.js";
-import { cskhHandler, showCskhStart } from "./handlers/cskh-handler.js";
+import { cskhHandler, showCskhStart, handleStaffMedia } from "./handlers/cskh-handler.js";
 import { adminHandler, showAdminStart, handleAdminPhoto, handleAdminTextMessage } from "./handlers/admin-handler.js";
 import { PermissionService } from "../modules/permissions/permission-service.js";
 import { sendToAdminNotificationChat } from "./notifications.js";
@@ -93,20 +93,42 @@ mainRouter.use(customerHandler);
 mainRouter.on("message:photo", async (ctx) => {
   const userType = ctx.identity?.userType;
   const caption = ctx.message?.caption?.trim() || "";
+  const isStaff = userType === "ADMIN" || userType === "SUPER_ADMIN" || userType === "CSKH";
 
-  if ((userType === "ADMIN" || userType === "SUPER_ADMIN") && (caption.startsWith("/addqr") || caption.startsWith("/payout"))) {
+  if (isStaff && (caption.startsWith("/addqr") || caption.startsWith("/payout"))) {
     await handleAdminPhoto(ctx);
-  } else {
-    await handleCustomerPhoto(ctx);
+    return;
   }
+  // Staff media must NEVER be interpreted as customer bill evidence.
+  if (isStaff) {
+    await handleStaffMedia(ctx);
+    return;
+  }
+  await handleCustomerPhoto(ctx);
 });
 
 // 6. Global Voice router
 mainRouter.on("message:voice", async (ctx) => {
+  const userType = ctx.identity?.userType;
+  if (userType === "ADMIN" || userType === "SUPER_ADMIN" || userType === "CSKH") {
+    await handleStaffMedia(ctx);
+    return;
+  }
   await handleCustomerVoice(ctx);
 });
 
-// 7. Global Text message router (for conversational messages)
+// 7. Global Document router
+mainRouter.on("message:document", async (ctx) => {
+  const userType = ctx.identity?.userType;
+  if (userType === "ADMIN" || userType === "SUPER_ADMIN" || userType === "CSKH") {
+    await handleStaffMedia(ctx);
+    return;
+  }
+  // handleCustomerPhoto also treats documents as bill evidence.
+  await handleCustomerPhoto(ctx);
+});
+
+// 8. Global Text message router (for conversational messages)
 mainRouter.on("message:text", async (ctx) => {
   const text = ctx.message.text.trim();
   if (text.startsWith("/")) {

@@ -11,8 +11,91 @@ import { ConversationalAIService } from "../../modules/ai/customer-ai-service.js
 import { FileService } from "../../modules/files/file-service.js";
 import { RuntimeConfigService } from "../../modules/system-config/runtime-config-service.js";
 import { MoneyService } from "../../modules/money/money-service.js";
-import { sendToStaff, sendToAdminNotificationChat } from "../notifications.js";
-import { getCustomerMenuKeyboard, getBankWizardKeyboard, renderCustomerWelcomeText, renderActiveOrderText, renderQuoteCard } from "../menus/customer-menu.js";
+import { sendToStaff, sendToAdminNotificationChat, copyMessageToStaff } from "../notifications.js";
+import {
+  getCustomerMenuKeyboard,
+  getBankWizardKeyboard,
+  getLanguageSelectorKeyboard,
+  getSupportModeKeyboard,
+  renderCustomerWelcomeText,
+  renderActiveOrderText,
+  renderQuoteCard,
+  renderSupportActiveText
+} from "../menus/customer-menu.js";
+import {
+  LOCALE_LABELS,
+  SupportedLocale,
+  detectMessageLocale,
+  isSupportedLocale,
+  t
+} from "../../modules/i18n/locales.js";
+
+
+/** Resolve customer locale from persisted Customer.language. */
+function locOf(customer: { language?: string | null } | null | undefined): SupportedLocale {
+  return CustomerService.getLocale(customer);
+}
+
+/** Non-blocking UI language suggestion. Never auto-persists. */
+async function maybeSuggestLanguageSwitch(
+  ctx: BotContext,
+  customer: { id: string; language?: string | null },
+  text: string
+): Promise<void> {
+  const current = locOf(customer);
+  const detected = detectMessageLocale(text);
+  if (!detected || detected === current) return;
+  try {
+    await ctx.reply(t(current, "lang.suggest", { label: LOCALE_LABELS[detected] }), {
+      parse_mode: "HTML",
+      reply_markup: new InlineKeyboard()
+        .text(t(current, "lang.switch_to", { label: LOCALE_LABELS[detected] }), `customer:lang:${detected}`)
+        .text(t(current, "lang.keep"), "customer:lang:keep")
+    });
+  } catch {
+    // non-fatal
+  }
+}
+
+
+/**
+ * HUMAN-mode media relay to the assigned staff only.
+ * Uses Telegram-native copyMessage (no download/re-upload/OCR/STT).
+ * If no staff is claimed, acknowledges waiting — never broadcasts.
+ */
+async function relayCustomerMediaToStaff(
+  ctx: BotContext,
+  customer: { id: string; fullName?: string | null; language?: string | null },
+  kind: "photo" | "voice" | "document"
+): Promise<boolean> {
+  const conv = await ConversationService.getOrCreateConversation(customer.id);
+  if (conv.mode !== "HUMAN") return false;
+
+  const locale = locOf(customer);
+  const messageId = ctx.message?.message_id;
+  const fromChatId = ctx.chat?.id;
+
+  if (conv.claimedById && messageId && fromChatId) {
+    // Notify staff with a short text header, then native-copy the media.
+    await sendToStaff(
+      conv.claimedById,
+      `📎 <b>Media (${kind}) từ khách [${customer.fullName || customer.id}]:</b>\n` +
+        `Dùng caption <code>/msg ${customer.id}</code> trên media để trả lời.`,
+      { parse_mode: "HTML" }
+    );
+    const copied = await copyMessageToStaff(conv.claimedById, fromChatId, messageId);
+    if (copied) {
+      await ctx.reply(t(locale, "support.media_relayed"), { parse_mode: "HTML" });
+    } else {
+      await ctx.reply(t(locale, "error.generic"), { parse_mode: "HTML" });
+    }
+    return true;
+  }
+
+  // Unassigned HUMAN ticket — do not broadcast.
+  await ctx.reply(t(locale, "support.media_waiting"), { parse_mode: "HTML" });
+  return true;
+}
 
 export const customerHandler = new Composer<BotContext>();
 
@@ -24,26 +107,24 @@ export async function showCustomerStart(ctx: BotContext) {
   const customer = await CustomerService.getOrCreateCustomer({
     telegramId,
     username: ctx.from?.username,
-    fullName: [ctx.from?.first_name, ctx.from?.last_name].filter(Boolean).join(" ")
+    fullName: [ctx.from?.first_name, ctx.from?.last_name].filter(Boolean).join(" "),
+    // Telegram language_code is ONLY an initial default for brand-new customers.
+    language: (ctx.from as { language_code?: string } | undefined)?.language_code
   });
-
-  const keyboard = getCustomerMenuKeyboard();
+  const locale = locOf(customer);
+  const keyboard = getCustomerMenuKeyboard(locale);
 
   // 1. Active order -> show/resume order status.
-  // If the customer has not set a payout account yet, offer the bank wizard
-  // contextually (it belongs to the Order flow, not the main menu).
   const activeOrder = await OrderService.getLatestActiveOrderForCustomer(customer.id);
   if (activeOrder) {
-    const orderKb = getCustomerMenuKeyboard();
+    const orderKb = getCustomerMenuKeyboard(locale);
     if (!activeOrder.payoutBankSnapshot) {
-      orderKb
-        .row()
-        .text(
-          `🏦 Nhập tài khoản nhận ${activeOrder.targetCurrency}`,
-          `customer:bank:wiz:${activeOrder.targetCurrency}`
-        );
+      orderKb.row().text(
+        t(locale, "order.bank_btn", { currency: activeOrder.targetCurrency }),
+        `customer:bank:wiz:${activeOrder.targetCurrency}`
+      );
     }
-    await ctx.reply(await renderActiveOrderText(activeOrder), {
+    await ctx.reply(await renderActiveOrderText(activeOrder, locale), {
       parse_mode: "HTML",
       reply_markup: orderKb
     });
@@ -57,52 +138,41 @@ export async function showCustomerStart(ctx: BotContext) {
       1,
       Math.ceil((new Date(activeQuote.expiresAt).getTime() - Date.now()) / 60000)
     );
-    await ctx.reply(renderQuoteCard(activeQuote, remainingMinutes), {
+    await ctx.reply(renderQuoteCard(activeQuote, remainingMinutes, locale), {
       parse_mode: "HTML",
       reply_markup: new InlineKeyboard().text(
-        "✅ Xác nhận đổi tiền",
+        t(locale, "quote.confirm_btn"),
         `customer:quote:confirm:${activeQuote.id}`
       )
     });
     return;
   }
 
-  // 3. Active HUMAN support -> do not interrupt with the generic welcome,
-  //    but ALWAYS offer an explicit exit back to automatic exchange
+  // 3. Active HUMAN support -> do not interrupt; always offer exit
   const conv = await ConversationService.getOrCreateConversation(customer.id);
   if (conv.mode === "HUMAN") {
-    const supportModeKb = new InlineKeyboard()
-      .text("↩️ Quay lại đổi tiền", "customer:support:exit")
-      .row()
-      .text("💱 Đổi tiền", "customer:menu:quote")
-      .text("📦 Đơn của tôi", "customer:menu:orders")
-      .row()
-      .text("💬 Hỗ trợ", "customer:menu:support");
-    await ctx.reply(
-      `💬 <b>BẠN ĐANG ĐƯỢC NHÂN VIÊN HỖ TRỢ TRỰC TIẾP</b>\n\n` +
-        `Anh/chị vui lòng tiếp tục nhắn tin tại khung chat này.\n` +
-        `Nhân viên CSKH sẽ phản hồi anh/chị ngay.\n\n` +
-        `Muốn tự đổi tiền theo tỷ giá tự động? Bấm <b>↩️ Quay lại đổi tiền</b>.`,
-      { parse_mode: "HTML", reply_markup: supportModeKb }
-    );
+    await ctx.reply(renderSupportActiveText(locale), {
+      parse_mode: "HTML",
+      reply_markup: getSupportModeKeyboard(locale)
+    });
     return;
   }
 
-  // 4. Default: two-way USD/VND rates first
-  const text = await renderCustomerWelcomeText(customer.fullName || "Quý khách");
+  // 4. Default: two-way USD/VND rates first (localized labels)
+  const text = await renderCustomerWelcomeText(customer.fullName || "Guest", locale);
   await ctx.reply(text, { parse_mode: "HTML", reply_markup: keyboard });
 }
 
 // /help command
 customerHandler.command("help", async (ctx) => {
   await ctx.reply(
-    `📖 <b>HƯỚNG DẪN DỊCH VỤ ĐỔI TIỀN</b>\n\n` +
-      `• Nhắn tin tự nhiên, ví dụ: <i>"100 đô"</i>, <i>"10 triệu lấy đô"</i>, <i>"đổi VND lấy 100 đô"</i> để nhận báo giá tức thời.\n` +
-      `• Tài khoản nhận tiền nhập ngay trong luồng đơn hàng (sau khi gửi biên lai), hoặc nhắn tin theo mẫu:\n` +
-      `  <i>Ví dụ:</i> <code>VND | Vietcombank | NGUYEN VAN A | 1012345678</code>\n` +
-      `• Xem đơn đã tạo: <code>/orders</code>\n` +
-      `• Hủy đơn đang chờ: <code>/cancel</code>\n` +
-      `• Để gặp nhân viên hỗ trợ trực tiếp, vui lòng nhấn nút <b>💬 Hỗ trợ</b> trong menu.`,
+    `đŸ“– <b>HÆ¯á»NG DáºªN Dá»CH Vá»¤ Äá»”I TIá»€N</b>\n\n` +
+      `â€¢ Nháº¯n tin tá»± nhiĂªn, vĂ­ dá»¥: <i>"100 Ä‘Ă´"</i>, <i>"10 triá»‡u láº¥y Ä‘Ă´"</i>, <i>"Ä‘á»•i VND láº¥y 100 Ä‘Ă´"</i> Ä‘á»ƒ nháº­n bĂ¡o giĂ¡ tá»©c thá»i.\n` +
+      `â€¢ TĂ i khoáº£n nháº­n tiá»n nháº­p ngay trong luá»“ng Ä‘Æ¡n hĂ ng (sau khi gá»­i biĂªn lai), hoáº·c nháº¯n tin theo máº«u:\n` +
+      `  <i>VĂ­ dá»¥:</i> <code>VND | Vietcombank | NGUYEN VAN A | 1012345678</code>\n` +
+      `â€¢ Xem Ä‘Æ¡n Ä‘Ă£ táº¡o: <code>/orders</code>\n` +
+      `â€¢ Há»§y Ä‘Æ¡n Ä‘ang chá»: <code>/cancel</code>\n` +
+      `â€¢ Äá»ƒ gáº·p nhĂ¢n viĂªn há»— trá»£ trá»±c tiáº¿p, vui lĂ²ng nháº¥n nĂºt <b>đŸ’¬ Há»— trá»£</b> trong menu.`,
     { parse_mode: "HTML", reply_markup: getCustomerMenuKeyboard() }
   );
 });
@@ -114,20 +184,20 @@ customerHandler.command("orders", async (ctx) => {
   const myOrders = await OrderService.getOrdersForCustomer(customer.id, 10);
 
   if (myOrders.length === 0) {
-    return ctx.reply("📦 Bạn chưa có đơn hàng nào trong hệ thống.", {
+    return ctx.reply("đŸ“¦ Báº¡n chÆ°a cĂ³ Ä‘Æ¡n hĂ ng nĂ o trong há»‡ thá»‘ng.", {
       reply_markup: getCustomerMenuKeyboard()
     });
   }
 
-  let msg = `📦 <b>DANH SÁCH ĐƠN HÀNG CỦA BẠN:</b>\n\n`;
+  let msg = `đŸ“¦ <b>DANH SĂCH ÄÆ N HĂ€NG Cá»¦A Báº N:</b>\n\n`;
   for (const o of myOrders.slice(0, 5)) {
     const srcAmt = MoneyService.formatAmount(o.sourceAmount, o.sourceCurrency);
     const tgtAmt = MoneyService.formatAmount(o.targetAmount, o.targetCurrency);
     msg +=
-      `• Đơn <b>${o.id}</b>\n` +
-      `  Đổi: <b>${srcAmt} ${o.sourceCurrency}</b> ➔ <b>${tgtAmt} ${o.targetCurrency}</b>\n` +
-      `  Trạng thái: <code>${o.status}</code>\n` +
-      `  Ngày: ${new Date(o.createdAt).toLocaleString("vi-VN")}\n\n`;
+      `â€¢ ÄÆ¡n <b>${o.id}</b>\n` +
+      `  Äá»•i: <b>${srcAmt} ${o.sourceCurrency}</b> â” <b>${tgtAmt} ${o.targetCurrency}</b>\n` +
+      `  Tráº¡ng thĂ¡i: <code>${o.status}</code>\n` +
+      `  NgĂ y: ${new Date(o.createdAt).toLocaleString("vi-VN")}\n\n`;
   }
 
   await ctx.reply(msg, { parse_mode: "HTML", reply_markup: getCustomerMenuKeyboard() });
@@ -139,13 +209,13 @@ customerHandler.command("cancel", async (ctx) => {
   const customer = await CustomerService.getOrCreateCustomer({ telegramId });
   const activeOrder = await OrderService.getLatestActiveOrderForCustomer(customer.id);
   if (!activeOrder) {
-    return ctx.reply("Bạn không có đơn hàng nào đang chờ để hủy.");
+    return ctx.reply("Báº¡n khĂ´ng cĂ³ Ä‘Æ¡n hĂ ng nĂ o Ä‘ang chá» Ä‘á»ƒ há»§y.");
   }
   try {
-    await OrderService.cancelOrder(activeOrder.id, customer.id, "CUSTOMER", "Khách hàng tự hủy qua bot");
-    await ctx.reply(`✅ Đã hủy đơn hàng <code>${activeOrder.id}</code> thành công.`, { parse_mode: "HTML" });
+    await OrderService.cancelOrder(activeOrder.id, customer.id, "CUSTOMER", "KhĂ¡ch hĂ ng tá»± há»§y qua bot");
+    await ctx.reply(`âœ… ÄĂ£ há»§y Ä‘Æ¡n hĂ ng <code>${activeOrder.id}</code> thĂ nh cĂ´ng.`, { parse_mode: "HTML" });
   } catch (err: any) {
-    await ctx.reply(`❌ Không thể hủy đơn: ${err.message}`);
+    await ctx.reply(`âŒ KhĂ´ng thá»ƒ há»§y Ä‘Æ¡n: ${err.message}`);
   }
 });
 
@@ -154,21 +224,21 @@ customerHandler.command("bank", async (ctx) => {
   const text = ctx.match?.trim();
   if (!text) {
     const kb = new InlineKeyboard()
-      .text("🇻🇳 VND", "customer:bank:wiz:VND")
-      .text("🇺🇸 USD", "customer:bank:wiz:USD");
+      .text("đŸ‡»đŸ‡³ VND", "customer:bank:wiz:VND")
+      .text("đŸ‡ºđŸ‡¸ USD", "customer:bank:wiz:USD");
 
     return ctx.reply(
-      `🏦 <b>CÀI ĐẶT TÀI KHOẢN NHẬN TIỀN</b>\n\n` +
-        `Chọn loại tiền tệ bạn muốn nhận, hoặc nhập nhanh bằng cú pháp:\n` +
-        `<code>/bank TIỀN_TỆ|Tên Ngân Hàng|Tên Chủ TK|Số TK</code>\n\n` +
-        `<i>Ví dụ:</i> <code>/bank VND|Vietcombank|NGUYEN VAN A|1012345678</code>`,
+      `đŸ¦ <b>CĂ€I Äáº¶T TĂ€I KHOáº¢N NHáº¬N TIá»€N</b>\n\n` +
+        `Chá»n loáº¡i tiá»n tá»‡ báº¡n muá»‘n nháº­n, hoáº·c nháº­p nhanh báº±ng cĂº phĂ¡p:\n` +
+        `<code>/bank TIá»€N_Tá»†|TĂªn NgĂ¢n HĂ ng|TĂªn Chá»§ TK|Sá»‘ TK</code>\n\n` +
+        `<i>VĂ­ dá»¥:</i> <code>/bank VND|Vietcombank|NGUYEN VAN A|1012345678</code>`,
       { parse_mode: "HTML", reply_markup: kb }
     );
   }
 
   const parts = text.split("|").map((p) => p.trim());
   if (parts.length < 4) {
-    return ctx.reply("Thiếu thông tin. Định dạng yêu cầu: <code>TIỀN_TỆ|Tên Ngân Hàng|Tên Chủ TK|Số TK</code>", {
+    return ctx.reply("Thiáº¿u thĂ´ng tin. Äá»‹nh dáº¡ng yĂªu cáº§u: <code>TIá»€N_Tá»†|TĂªn NgĂ¢n HĂ ng|TĂªn Chá»§ TK|Sá»‘ TK</code>", {
       parse_mode: "HTML"
     });
   }
@@ -186,29 +256,61 @@ customerHandler.command("bank", async (ctx) => {
   });
 
   await ctx.reply(
-    `✅ <b>Đã lưu tài khoản nhận tiền ${currency.toUpperCase()}:</b>\n` +
-      `• Ngân hàng: <b>${bankName}</b>\n` +
-      `• Chủ tài khoản: <b>${accountName}</b>\n` +
-      `• Số tài khoản: <code>${accountNumber}</code>`,
+    `âœ… <b>ÄĂ£ lÆ°u tĂ i khoáº£n nháº­n tiá»n ${currency.toUpperCase()}:</b>\n` +
+      `â€¢ NgĂ¢n hĂ ng: <b>${bankName}</b>\n` +
+      `â€¢ Chá»§ tĂ i khoáº£n: <b>${accountName}</b>\n` +
+      `â€¢ Sá»‘ tĂ i khoáº£n: <code>${accountNumber}</code>`,
     { parse_mode: "HTML", reply_markup: getCustomerMenuKeyboard() }
   );
 });
 
 // Menu callbacks
-// Customer exits HUMAN support themselves ("↩️ Quay lại đổi tiền").
+// Customer exits HUMAN support themselves ("â†©ï¸ Quay láº¡i Ä‘á»•i tiá»n").
 // Acknowledge the callback FIRST, then do the DB work.
+
+// 🌐 Language menu
+customerHandler.callbackQuery("customer:menu:language", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const telegramId = String(ctx.from?.id || "");
+  const customer = await CustomerService.getOrCreateCustomer({ telegramId });
+  const locale = locOf(customer);
+  await ctx.reply(t(locale, "lang.selector_title"), {
+    parse_mode: "HTML",
+    reply_markup: getLanguageSelectorKeyboard()
+  });
+});
+
+// Explicit language selection — answer FIRST, then persist, then re-render start.
+customerHandler.callbackQuery(/^customer:lang:(vi|en|km|zh)$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const chosen = ctx.match?.[1];
+  if (!chosen || !isSupportedLocale(chosen)) return;
+
+  const telegramId = String(ctx.from?.id || "");
+  const customer = await CustomerService.getOrCreateCustomer({ telegramId });
+  await CustomerService.setLanguage(customer.id, chosen);
+
+  // Re-fetch so subsequent renders see the new language.
+  const updated = await CustomerService.getOrCreateCustomer({ telegramId });
+  const locale = locOf(updated);
+  await ctx.reply(t(locale, "lang.changed", { label: LOCALE_LABELS[locale] }), {
+    parse_mode: "HTML"
+  });
+  // Immediately render normal customer start flow in the selected language.
+  await showCustomerStart(ctx);
+});
+
+// Optional "keep current language" on detection suggestion.
+customerHandler.callbackQuery("customer:lang:keep", async (ctx) => {
+  await ctx.answerCallbackQuery();
+});
 customerHandler.callbackQuery("customer:support:exit", async (ctx) => {
   await ctx.answerCallbackQuery();
   const telegramId = String(ctx.from?.id || "");
   const customer = await CustomerService.getOrCreateCustomer({ telegramId });
 
   await ConversationService.releaseByCustomer(customer.id);
-  await ctx.reply(
-    `✅ <b>Đã kết thúc phiên hỗ trợ trực tiếp.</b>\n\n` +
-      `Bạn đã quay lại chế độ đổi tiền tự động.\n` +
-      `Anh/chị chỉ cần nhắn tin số tiền muốn đổi, ví dụ: <i>"100 đô"</i>.`,
-    { parse_mode: "HTML" }
-  );
+  await ctx.reply(t(locOf(customer), "support.exited"), { parse_mode: "HTML" });
 
   // Re-render the normal start screen: active order -> active quote -> rates welcome
   await showCustomerStart(ctx);
@@ -225,18 +327,15 @@ customerHandler.callbackQuery("customer:menu:quote", async (ctx) => {
   const conv = await ConversationService.getOrCreateConversation(customer.id);
   if (conv.mode === "HUMAN") {
     await ConversationService.releaseByCustomer(customer.id);
-    await ctx.reply(`✅ Đã kết thúc phiên hỗ trợ trực tiếp. Bạn quay lại chế độ đổi tiền tự động.`);
+    await ctx.reply(t(locOf(customer), "support.exited"), { parse_mode: "HTML" });
   }
 
-  await ctx.reply(
-    `💱 <b>ĐỔI TIỀN TỰ ĐỘNG</b>\n\n` +
-      `Vui lòng nhắn tin số tiền bạn muốn đổi ngay tại đây.\n\n` +
-      `<i>Ví dụ:</i>\n` +
-      `• "đổi 500 USD sang VND"\n` +
-      `• "100 đô"\n` +
-      `• Hoặc gửi tin nhắn thoại nói rõ nhu cầu của bạn.`,
-    { parse_mode: "HTML" }
-  );
+  const localeQuote = locOf(customer);
+  await ctx.reply(t(localeQuote, "exchange.instructions"), {
+    parse_mode: "HTML",
+    reply_markup: getCustomerMenuKeyboard(localeQuote)
+  });
+});
 });
 
 customerHandler.callbackQuery("customer:menu:orders", async (ctx) => {
@@ -246,17 +345,17 @@ customerHandler.callbackQuery("customer:menu:orders", async (ctx) => {
   const myOrders = await OrderService.getOrdersForCustomer(customer.id, 10);
 
   if (myOrders.length === 0) {
-    return ctx.reply("📦 Bạn chưa có đơn hàng nào trong hệ thống.");
+    return ctx.reply(t(locOf(customer), "order.list_empty"), { reply_markup: getCustomerMenuKeyboard(locOf(customer)) });
   }
 
-  let msg = `📦 <b>DANH SÁCH ĐƠN HÀNG GẦN ĐÂY:</b>\n\n`;
+  let msg = `đŸ“¦ <b>DANH SĂCH ÄÆ N HĂ€NG Gáº¦N ÄĂ‚Y:</b>\n\n`;
   for (const o of myOrders.slice(0, 5)) {
     const srcAmt = MoneyService.formatAmount(o.sourceAmount, o.sourceCurrency);
     const tgtAmt = MoneyService.formatAmount(o.targetAmount, o.targetCurrency);
     msg +=
-      `• Đơn <b>${o.id}</b>\n` +
-      `  ${srcAmt} ${o.sourceCurrency} ➔ ${tgtAmt} ${o.targetCurrency}\n` +
-      `  Trạng thái: <code>${o.status}</code>\n\n`;
+      `â€¢ ÄÆ¡n <b>${o.id}</b>\n` +
+      `  ${srcAmt} ${o.sourceCurrency} â” ${tgtAmt} ${o.targetCurrency}\n` +
+      `  Tráº¡ng thĂ¡i: <code>${o.status}</code>\n\n`;
   }
   await ctx.reply(msg, { parse_mode: "HTML" });
 });
@@ -264,12 +363,12 @@ customerHandler.callbackQuery("customer:menu:orders", async (ctx) => {
 customerHandler.callbackQuery("customer:menu:bank", async (ctx) => {
   await ctx.answerCallbackQuery();
   const kb = new InlineKeyboard()
-    .text("🇻🇳 VND", "customer:bank:wiz:VND")
-    .text("🇺🇸 USD", "customer:bank:wiz:USD");
+    .text("đŸ‡»đŸ‡³ VND", "customer:bank:wiz:VND")
+    .text("đŸ‡ºđŸ‡¸ USD", "customer:bank:wiz:USD");
 
   await ctx.reply(
-    `🏦 <b>THIẾT LẬP TÀI KHOẢN NGÂN HÀNG NHẬN TIỀN</b>\n\n` +
-      `Vui lòng chọn loại tiền tệ bạn muốn nhận:`,
+    `đŸ¦ <b>THIáº¾T Láº¬P TĂ€I KHOáº¢N NGĂ‚N HĂ€NG NHáº¬N TIá»€N</b>\n\n` +
+      `Vui lĂ²ng chá»n loáº¡i tiá»n tá»‡ báº¡n muá»‘n nháº­n:`,
     { parse_mode: "HTML", reply_markup: kb }
   );
 });
@@ -278,10 +377,10 @@ customerHandler.callbackQuery(/^customer:bank:wiz:(VND|USD)$/, async (ctx) => {
   await ctx.answerCallbackQuery();
   const currency = ctx.match ? ctx.match[1] : "VND";
   await ctx.reply(
-    `🏦 <b>CÀI ĐẶT TÀI KHOẢN NHẬN ${currency}</b>\n\n` +
-      `Anh/chị chỉ cần nhắn tin theo mẫu sau (các phần cách nhau bằng dấu |):\n` +
-      `<code>${currency} | Tên Ngân Hàng | Tên Chủ TK | Số TK</code>\n\n` +
-      `<i>Ví dụ:</i>\n` +
+    `đŸ¦ <b>CĂ€I Äáº¶T TĂ€I KHOáº¢N NHáº¬N ${currency}</b>\n\n` +
+      `Anh/chá»‹ chá»‰ cáº§n nháº¯n tin theo máº«u sau (cĂ¡c pháº§n cĂ¡ch nhau báº±ng dáº¥u |):\n` +
+      `<code>${currency} | TĂªn NgĂ¢n HĂ ng | TĂªn Chá»§ TK | Sá»‘ TK</code>\n\n` +
+      `<i>VĂ­ dá»¥:</i>\n` +
       `<code>${currency} | Vietcombank | NGUYEN VAN A | 0123456789</code>`,
     { parse_mode: "HTML" }
   );
@@ -296,24 +395,20 @@ customerHandler.callbackQuery("customer:menu:support", async (ctx) => {
   await ConversationService.addMessage({
     customerId: customer.id,
     senderType: "CUSTOMER",
-    content: "[YÊU CẦU GẶP CSKH TRỰC TIẾP]"
+    content: "[YĂU Cáº¦U Gáº¶P CSKH TRá»°C TIáº¾P]"
   });
 
-  await ctx.reply(
-    `💬 <b>YÊU CẦU HỖ TRỢ ĐÃ ĐƯỢC GỬI!</b>\n\n` +
-      `Hệ thống đã kết nối bạn tới bộ phận Chăm Sóc Khách Hàng.\n` +
-      `Nhân viên CSKH sẽ phản hồi bạn trực tiếp ngay tại khung chat này trong giây lát.`,
-    { parse_mode: "HTML" }
-  );
+  const locale = locOf(customer);
+  await ctx.reply(t(locale, "support.requested"), { parse_mode: "HTML", reply_markup: getCustomerMenuKeyboard(locale) });
 
   await sendToAdminNotificationChat(
-    `🛎 <b>YÊU CẦU HỖ TRỢ TỪ KHÁCH HÀNG:</b>\n` +
-      `• Khách: <b>${customer.fullName || customer.username || customer.telegramId}</b> (ID: <code>${customer.id}</code>)\n` +
-      `• Telegram ID: <code>${customer.telegramId}</code>\n` +
-      `CSKH vui lòng bấm nút bên dưới để tiếp nhận.`,
+    `đŸ› <b>YĂU Cáº¦U Há»– TRá»¢ Tá»ª KHĂCH HĂ€NG:</b>\n` +
+      `â€¢ KhĂ¡ch: <b>${customer.fullName || customer.username || customer.telegramId}</b> (ID: <code>${customer.id}</code>)\n` +
+      `â€¢ Telegram ID: <code>${customer.telegramId}</code>\n` +
+      `CSKH vui lĂ²ng báº¥m nĂºt bĂªn dÆ°á»›i Ä‘á»ƒ tiáº¿p nháº­n.`,
     {
       parse_mode: "HTML",
-      reply_markup: new InlineKeyboard().text("🙋 Tiếp nhận hỗ trợ", `cskh:ticket:claim:${customer.id}`)
+      reply_markup: new InlineKeyboard().text("đŸ™‹ Tiáº¿p nháº­n há»— trá»£", `cskh:ticket:claim:${customer.id}`)
     }
   );
 });
@@ -337,20 +432,20 @@ customerHandler.callbackQuery(/^(?:customer:quote:confirm:|confirm_quote:)(.+)$/
     const formattedSrc = MoneyService.formatAmount(confirmedQuote.sourceAmount, confirmedQuote.sourceCurrency);
 
     let msg =
-      `🎉 <b>ĐƠN HÀNG ĐÃ ĐƯỢC TẠO THÀNH CÔNG!</b>\n` +
-      `Mã đơn: <code>${order.id}</code>\n\n` +
-      `💵 Quý khách vui lòng chuyển đúng số tiền: <b>${formattedSrc} ${confirmedQuote.sourceCurrency}</b>\n` +
-      `🏦 Đến tài khoản chỉ định:\n` +
-      `• Ngân hàng: <b>${receivingSnapshot?.bankName}</b>\n` +
-      `• Số tài khoản: <code>${receivingSnapshot?.accountNumber}</code>\n` +
-      `• Tên tài khoản: <b>${receivingSnapshot?.accountName}</b>\n` +
-      `• Nội dung chuyển tiền: <code>${order.id}</code>\n\n` +
-      `📸 <i>Sau khi chuyển tiền, quý khách chỉ cần chụp và gửi ảnh biên lai (bill) vào đây.</i>`;
+      `đŸ‰ <b>ÄÆ N HĂ€NG ÄĂƒ ÄÆ¯á»¢C Táº O THĂ€NH CĂ”NG!</b>\n` +
+      `MĂ£ Ä‘Æ¡n: <code>${order.id}</code>\n\n` +
+      `đŸ’µ QuĂ½ khĂ¡ch vui lĂ²ng chuyá»ƒn Ä‘Ăºng sá»‘ tiá»n: <b>${formattedSrc} ${confirmedQuote.sourceCurrency}</b>\n` +
+      `đŸ¦ Äáº¿n tĂ i khoáº£n chá»‰ Ä‘á»‹nh:\n` +
+      `â€¢ NgĂ¢n hĂ ng: <b>${receivingSnapshot?.bankName}</b>\n` +
+      `â€¢ Sá»‘ tĂ i khoáº£n: <code>${receivingSnapshot?.accountNumber}</code>\n` +
+      `â€¢ TĂªn tĂ i khoáº£n: <b>${receivingSnapshot?.accountName}</b>\n` +
+      `â€¢ Ná»™i dung chuyá»ƒn tiá»n: <code>${order.id}</code>\n\n` +
+      `đŸ“¸ <i>Sau khi chuyá»ƒn tiá»n, quĂ½ khĂ¡ch chá»‰ cáº§n chá»¥p vĂ  gá»­i áº£nh biĂªn lai (bill) vĂ o Ä‘Ă¢y.</i>`;
 
     if (!payoutSnapshot) {
       msg +=
-        `\n\n💸 <i>Đơn hàng chưa có tài khoản nhận <b>${order.targetCurrency}</b>. ` +
-        `Anh/chị có thể nhập ngay bằng nút bên dưới, hoặc để sau khi gửi biên lai.</i>`;
+        `\n\nđŸ’¸ <i>ÄÆ¡n hĂ ng chÆ°a cĂ³ tĂ i khoáº£n nháº­n <b>${order.targetCurrency}</b>. ` +
+        `Anh/chá»‹ cĂ³ thá»ƒ nháº­p ngay báº±ng nĂºt bĂªn dÆ°á»›i, hoáº·c Ä‘á»ƒ sau khi gá»­i biĂªn lai.</i>`;
     }
 
     await ctx.reply(msg, {
@@ -362,32 +457,32 @@ customerHandler.callbackQuery(/^(?:customer:quote:confirm:|confirm_quote:)(.+)$/
       const qrBuffer = await FileService.getFile(receivingSnapshot.qrFilePath);
       if (qrBuffer) {
         await ctx.replyWithPhoto(new InputFile(qrBuffer), {
-          caption: `Mã QR thanh toán cho đơn ${order.id}`
+          caption: `MĂ£ QR thanh toĂ¡n cho Ä‘Æ¡n ${order.id}`
         });
       }
     }
 
     // Notify admins
     await sendToAdminNotificationChat(
-      `🆕 <b>ĐƠN HÀNG MỚI ĐƯỢC TẠO:</b> <code>${order.id}</code>\n` +
-        `• Khách: <code>${customer.id}</code>\n` +
-        `• Đổi: <b>${order.sourceAmount} ${order.sourceCurrency}</b> ➔ <b>${order.targetAmount} ${order.targetCurrency}</b>\n` +
-        `• Trạng thái: <code>WAITING_PAYMENT</code>`,
+      `đŸ†• <b>ÄÆ N HĂ€NG Má»I ÄÆ¯á»¢C Táº O:</b> <code>${order.id}</code>\n` +
+        `â€¢ KhĂ¡ch: <code>${customer.id}</code>\n` +
+        `â€¢ Äá»•i: <b>${order.sourceAmount} ${order.sourceCurrency}</b> â” <b>${order.targetAmount} ${order.targetCurrency}</b>\n` +
+        `â€¢ Tráº¡ng thĂ¡i: <code>WAITING_PAYMENT</code>`,
       { parse_mode: "HTML" }
     );
   } catch (err: any) {
     // Friendly error when the DESK receiving account is missing (system
     // payment account is operator-side config, not a customer problem).
     const errText = String(err?.message || "");
-    if (errText.includes("Không tìm thấy tài khoản nhận")) {
+    if (errText.includes("KhĂ´ng tĂ¬m tháº¥y tĂ i khoáº£n nháº­n")) {
       await ctx.reply(
-        `⚠️ <b>Hệ thống đang cập nhật tài khoản thanh toán của quầy.</b>\n` +
-          `Vui lòng thử lại sau ít phút, hoặc bấm <b>💬 Hỗ trợ</b> để nhân viên hỗ trợ trực tiếp.`,
+        `â ï¸ <b>Há»‡ thá»‘ng Ä‘ang cáº­p nháº­t tĂ i khoáº£n thanh toĂ¡n cá»§a quáº§y.</b>\n` +
+          `Vui lĂ²ng thá»­ láº¡i sau Ă­t phĂºt, hoáº·c báº¥m <b>đŸ’¬ Há»— trá»£</b> Ä‘á»ƒ nhĂ¢n viĂªn há»— trá»£ trá»±c tiáº¿p.`,
         { parse_mode: "HTML", reply_markup: getCustomerMenuKeyboard() }
       );
       return;
     }
-    await ctx.reply(`❌ Lỗi tạo đơn: ${err.message}`);
+    await ctx.reply(`âŒ Lá»—i táº¡o Ä‘Æ¡n: ${err.message}`);
   }
 });
 
@@ -426,9 +521,9 @@ export async function handleCustomerTextMessage(ctx: BotContext, text: string) {
     if (conv.claimedById) {
       await sendToStaff(
         conv.claimedById,
-        `💬 <b>Tin nhắn mới từ khách [${customer.fullName || customer.id}]:</b>\n\n` +
+        `đŸ’¬ <b>Tin nháº¯n má»›i tá»« khĂ¡ch [${customer.fullName || customer.id}]:</b>\n\n` +
           `"${text}"\n\n` +
-          `Dùng <code>/msg ${customer.id} &lt;nội dung&gt;</code> để trả lời.`,
+          `DĂ¹ng <code>/msg ${customer.id} &lt;ná»™i dung&gt;</code> Ä‘á»ƒ tráº£ lá»i.`,
         { parse_mode: "HTML" }
       );
     }
@@ -470,10 +565,10 @@ export async function handleCustomerTextMessage(ctx: BotContext, text: string) {
       accountNumber: accountNumber.trim()
     });
     await ctx.reply(
-      `✅ <b>Đã lưu tài khoản nhận tiền ${currency.toUpperCase()}:</b>\n` +
-        `• Ngân hàng: <b>${bankName.trim()}</b>\n` +
-        `• Chủ tài khoản: <b>${accountName.trim()}</b>\n` +
-        `• Số tài khoản: <code>${accountNumber.trim()}</code>`,
+      `âœ… <b>ÄĂ£ lÆ°u tĂ i khoáº£n nháº­n tiá»n ${currency.toUpperCase()}:</b>\n` +
+        `â€¢ NgĂ¢n hĂ ng: <b>${bankName.trim()}</b>\n` +
+        `â€¢ Chá»§ tĂ i khoáº£n: <b>${accountName.trim()}</b>\n` +
+        `â€¢ Sá»‘ tĂ i khoáº£n: <code>${accountNumber.trim()}</code>`,
       { parse_mode: "HTML", reply_markup: getCustomerMenuKeyboard() }
     );
     return;
@@ -500,13 +595,14 @@ export async function handleCustomerTextMessage(ctx: BotContext, text: string) {
               intent.amount
             );
 
-      const keyboard = new InlineKeyboard().text("✅ Xác nhận đổi tiền", `customer:quote:confirm:${quote.id}`);
+      const keyboard = new InlineKeyboard().text("âœ… XĂ¡c nháº­n Ä‘á»•i tiá»n", `customer:quote:confirm:${quote.id}`);
       const expiryMinutes = RuntimeConfigService.getQuoteExpiryMinutes();
 
-      await ctx.reply(renderQuoteCard(quote, expiryMinutes), { parse_mode: "HTML", reply_markup: keyboard });
+      await ctx.reply(renderQuoteCard(quote, expiryMinutes, locOf(customer)), { parse_mode: "HTML", reply_markup: keyboard });
+      await maybeSuggestLanguageSwitch(ctx, customer, text);
       return;
     } catch (err: any) {
-      await ctx.reply(`⚠️ ${err.message}`);
+      await ctx.reply(`â ï¸ ${err.message}`);
       return;
     }
   }
@@ -518,7 +614,7 @@ export async function handleCustomerTextMessage(ctx: BotContext, text: string) {
     try {
       aiReply = await ConversationalAIService.generateReply({
         customerMessage: text,
-        customerName: customer.fullName || customer.username || "Quý khách",
+        customerName: customer.fullName || customer.username || "QuĂ½ khĂ¡ch",
         customerId: customer.id,
         activeOrderContext
       });
@@ -541,7 +637,7 @@ export async function handleCustomerTextMessage(ctx: BotContext, text: string) {
   }
 
   await ctx.reply(
-    `Xin chào! Quý khách có thể nhắn tin yêu cầu đổi tiền, ví dụ: <i>'đổi 500 USD sang VND'</i> hoặc nhấn <b>💬 Hỗ trợ</b> để gặp nhân viên tư vấn.`,
+    `Xin chĂ o! QuĂ½ khĂ¡ch cĂ³ thá»ƒ nháº¯n tin yĂªu cáº§u Ä‘á»•i tiá»n, vĂ­ dá»¥: <i>'Ä‘á»•i 500 USD sang VND'</i> hoáº·c nháº¥n <b>đŸ’¬ Há»— trá»£</b> Ä‘á»ƒ gáº·p nhĂ¢n viĂªn tÆ° váº¥n.`,
     { parse_mode: "HTML", reply_markup: getCustomerMenuKeyboard() }
   );
 }
@@ -554,7 +650,7 @@ async function processBillUpload(ctx: BotContext, orderId: string, fileId: strin
   const file = await ctx.api.getFile(fileId);
 
   if (file.file_size && file.file_size > maxBytes) {
-    return ctx.reply(`❌ Kích thước tệp vượt quá giới hạn cho phép (${env.MAX_UPLOAD_MB}MB). Vui lòng gửi ảnh nhẹ hơn.`);
+    return ctx.reply(`âŒ KĂ­ch thÆ°á»›c tá»‡p vÆ°á»£t quĂ¡ giá»›i háº¡n cho phĂ©p (${env.MAX_UPLOAD_MB}MB). Vui lĂ²ng gá»­i áº£nh nháº¹ hÆ¡n.`);
   }
 
   const botToken = env.TELEGRAM_BOT_TOKEN;
@@ -562,17 +658,17 @@ async function processBillUpload(ctx: BotContext, orderId: string, fileId: strin
   const res = await fetch(url);
 
   if (!res.ok) {
-    throw new Error(`Tải tệp từ Telegram thất bại (HTTP ${res.status})`);
+    throw new Error(`Táº£i tá»‡p tá»« Telegram tháº¥t báº¡i (HTTP ${res.status})`);
   }
 
   const mimeType = res.headers.get("content-type") || "image/jpeg";
   if (!allowedMimes.includes(mimeType) && !mimeType.startsWith("image/")) {
-    return ctx.reply("❌ Định dạng tệp không được hỗ trợ. Vui lòng gửi ảnh chụp rõ nét (JPG, PNG, WebP) hoặc PDF.");
+    return ctx.reply("âŒ Äá»‹nh dáº¡ng tá»‡p khĂ´ng Ä‘Æ°á»£c há»— trá»£. Vui lĂ²ng gá»­i áº£nh chá»¥p rĂµ nĂ©t (JPG, PNG, WebP) hoáº·c PDF.");
   }
 
   const buffer = Buffer.from(await res.arrayBuffer());
   if (buffer.length > maxBytes) {
-    return ctx.reply(`❌ Kích thước tệp thực tế vượt quá giới hạn ${env.MAX_UPLOAD_MB}MB.`);
+    return ctx.reply(`âŒ KĂ­ch thÆ°á»›c tá»‡p thá»±c táº¿ vÆ°á»£t quĂ¡ giá»›i háº¡n ${env.MAX_UPLOAD_MB}MB.`);
   }
 
   const safeExt = mimeType === "application/pdf" ? "pdf" : mimeType === "image/png" ? "png" : "jpg";
@@ -588,32 +684,32 @@ async function processBillUpload(ctx: BotContext, orderId: string, fileId: strin
 
   if (result.status === "SUSPICIOUS") {
     await ctx.reply(
-      `⚠️ <b>Hệ thống phát hiện biên lai có dấu hiệu cần kiểm tra thêm.</b>\n` +
-        `Đơn hàng <code>${orderId}</code> đã được chuyển sang chế độ bảo mật để quản trị viên kiểm tra trực tiếp.`,
+      `â ï¸ <b>Há»‡ thá»‘ng phĂ¡t hiá»‡n biĂªn lai cĂ³ dáº¥u hiá»‡u cáº§n kiá»ƒm tra thĂªm.</b>\n` +
+        `ÄÆ¡n hĂ ng <code>${orderId}</code> Ä‘Ă£ Ä‘Æ°á»£c chuyá»ƒn sang cháº¿ Ä‘á»™ báº£o máº­t Ä‘á»ƒ quáº£n trá»‹ viĂªn kiá»ƒm tra trá»±c tiáº¿p.`,
       { parse_mode: "HTML" }
     );
 
     await sendToAdminNotificationChat(
-      `🚨 <b>CẢNH BÁO BẢO MẬT: BIÊN LAI TRÙNG LẶP / BẤT THƯỜNG</b>\n` +
-        `• Mã đơn: <code>${orderId}</code>\n` +
-        `• Telegram: <code>${telegramId}</code>\n` +
-        `• Cảnh báo: <b>${result.flagReason}</b>\n` +
-        `Admin vui lòng kiểm tra đối soát thủ công!`,
+      `đŸ¨ <b>Cáº¢NH BĂO Báº¢O Máº¬T: BIĂN LAI TRĂ™NG Láº¶P / Báº¤T THÆ¯á»œNG</b>\n` +
+        `â€¢ MĂ£ Ä‘Æ¡n: <code>${orderId}</code>\n` +
+        `â€¢ Telegram: <code>${telegramId}</code>\n` +
+        `â€¢ Cáº£nh bĂ¡o: <b>${result.flagReason}</b>\n` +
+        `Admin vui lĂ²ng kiá»ƒm tra Ä‘á»‘i soĂ¡t thá»§ cĂ´ng!`,
       {
         parse_mode: "HTML",
-        reply_markup: new InlineKeyboard().text("🔍 Kiểm tra đơn", `admin:order:detail:${orderId}`)
+        reply_markup: new InlineKeyboard().text("đŸ” Kiá»ƒm tra Ä‘Æ¡n", `admin:order:detail:${orderId}`)
       }
     );
   } else if (result.status === "MANUAL_REVIEW") {
     await ctx.reply(
-      `ℹ️ <b>Đã nhận biên lai bổ sung cho đơn ${orderId}.</b>\n` +
-        `Đơn hàng đã được ghi nhận đầy đủ bằng chứng và chuyển Admin kiểm duyệt thủ công.`,
+      `â„¹ï¸ <b>ÄĂ£ nháº­n biĂªn lai bá»• sung cho Ä‘Æ¡n ${orderId}.</b>\n` +
+        `ÄÆ¡n hĂ ng Ä‘Ă£ Ä‘Æ°á»£c ghi nháº­n Ä‘áº§y Ä‘á»§ báº±ng chá»©ng vĂ  chuyá»ƒn Admin kiá»ƒm duyá»‡t thá»§ cĂ´ng.`,
       { parse_mode: "HTML" }
     );
   } else {
     await ctx.reply(
-      `✅ <b>Đã nhận được biên lai thanh toán cho đơn ${orderId}.</b>\n\n` +
-        `🔒 Theo quy định tài chính an toàn, Admin sẽ trực tiếp kiểm tra biến động tài khoản thực tế và xác nhận trong giây lát. Xin cảm ơn quý khách!`,
+      `âœ… <b>ÄĂ£ nháº­n Ä‘Æ°á»£c biĂªn lai thanh toĂ¡n cho Ä‘Æ¡n ${orderId}.</b>\n\n` +
+        `đŸ”’ Theo quy Ä‘á»‹nh tĂ i chĂ­nh an toĂ n, Admin sáº½ trá»±c tiáº¿p kiá»ƒm tra biáº¿n Ä‘á»™ng tĂ i khoáº£n thá»±c táº¿ vĂ  xĂ¡c nháº­n trong giĂ¢y lĂ¡t. Xin cáº£m Æ¡n quĂ½ khĂ¡ch!`,
       { parse_mode: "HTML" }
     );
 
@@ -623,9 +719,9 @@ async function processBillUpload(ctx: BotContext, orderId: string, fileId: strin
       const billedOrder = await OrderService.getOrder(orderId);
       if (billedOrder && !billedOrder.payoutBankSnapshot) {
         await ctx.reply(
-          `💸 <b>BƯỚC TIẾP THEO — TÀI KHOẢN NHẬN TIỀN</b>\n\n` +
-            `Đơn <code>${orderId}</code> sẽ chi ra <b>${MoneyService.formatAmount(billedOrder.targetAmount, billedOrder.targetCurrency)} ${billedOrder.targetCurrency}</b>.\n` +
-            `Anh/chị nhập tài khoản nhận tiền ngay để khi Admin giải ngân, tiền về tức thì:`,
+          `đŸ’¸ <b>BÆ¯á»C TIáº¾P THEO â€” TĂ€I KHOáº¢N NHáº¬N TIá»€N</b>\n\n` +
+            `ÄÆ¡n <code>${orderId}</code> sáº½ chi ra <b>${MoneyService.formatAmount(billedOrder.targetAmount, billedOrder.targetCurrency)} ${billedOrder.targetCurrency}</b>.\n` +
+            `Anh/chá»‹ nháº­p tĂ i khoáº£n nháº­n tiá»n ngay Ä‘á»ƒ khi Admin giáº£i ngĂ¢n, tiá»n vá» tá»©c thĂ¬:`,
           { parse_mode: "HTML", reply_markup: getBankWizardKeyboard(billedOrder.targetCurrency) }
         );
       }
@@ -634,11 +730,11 @@ async function processBillUpload(ctx: BotContext, orderId: string, fileId: strin
     }
 
     await sendToAdminNotificationChat(
-      `📸 <b>BIÊN LAI MỚI CHO ĐƠN ${orderId}</b>\n` +
-        `Admin hãy kiểm tra tài khoản ngân hàng thực tế và xác nhận đơn.`,
+      `đŸ“¸ <b>BIĂN LAI Má»I CHO ÄÆ N ${orderId}</b>\n` +
+        `Admin hĂ£y kiá»ƒm tra tĂ i khoáº£n ngĂ¢n hĂ ng thá»±c táº¿ vĂ  xĂ¡c nháº­n Ä‘Æ¡n.`,
       {
         parse_mode: "HTML",
-        reply_markup: new InlineKeyboard().text("🔍 Duyệt tiền nạp", `admin:pay:step1:${orderId}`)
+        reply_markup: new InlineKeyboard().text("đŸ” Duyá»‡t tiá»n náº¡p", `admin:pay:step1:${orderId}`)
       }
     );
   }
@@ -649,13 +745,18 @@ export async function handleCustomerPhoto(ctx: BotContext) {
   const telegramId = String(ctx.from?.id || "");
   const customer = await CustomerService.getOrCreateCustomer({ telegramId });
 
+  // HUMAN mode: relay photo/document to assigned staff only (no bill attach).
+  if (await relayCustomerMediaToStaff(ctx, customer, ctx.message?.document ? "document" : "photo")) {
+    return;
+  }
+
+  const locale = locOf(customer);
+
   // Safe Bill Target Selection: Query orders waiting for bill
   const awaitingOrders = await OrderService.getOrdersAwaitingBill(customer.id);
 
   if (awaitingOrders.length === 0) {
-    return ctx.reply(
-      "Không tìm thấy đơn hàng nào của bạn đang chờ thanh toán (WAITING_PAYMENT). Vui lòng tạo đơn trước khi gửi biên lai."
-    );
+    return ctx.reply(t(locale, "bill.none"));
   }
 
   let fileId: string | undefined;
@@ -675,7 +776,7 @@ export async function handleCustomerPhoto(ctx: BotContext) {
       await processBillUpload(ctx, targetOrder.id, fileId, telegramId);
     } catch (err: any) {
       logger.error({ err }, "Error processing single customer bill");
-      await ctx.reply(`❌ Có lỗi khi xử lý biên lai: ${err.message}`);
+      await ctx.reply(t(locale, "bill.error", { error: String(err?.message || err) }));
     }
     return;
   }
@@ -685,15 +786,16 @@ export async function handleCustomerPhoto(ctx: BotContext) {
   for (const order of awaitingOrders.slice(0, 5)) {
     const srcAmt = MoneyService.formatAmount(order.sourceAmount, order.sourceCurrency);
     keyboard.text(
-      `📋 Đơn ${order.id.slice(-6)} (${srcAmt} ${order.sourceCurrency})`,
+      `đŸ“‹ ÄÆ¡n ${order.id.slice(-6)} (${srcAmt} ${order.sourceCurrency})`,
       `customer:bill:attach:${order.id}:${fileId}`
     ).row();
   }
 
   await ctx.reply(
-    `📸 <b>BẠN CÓ ${awaitingOrders.length} ĐƠN HÀNG ĐANG CHỜ THANH TOÁN</b>\n\n` +
-      `Vui lòng chọn chính xác đơn hàng áp dụng biên lai này:`,
+    `${t(locale, "bill.multi_title", { count: awaitingOrders.length })}\n\n` +
+      t(locale, "bill.multi_hint"),
     { parse_mode: "HTML", reply_markup: keyboard }
+  );
   );
 }
 
@@ -701,6 +803,13 @@ export async function handleCustomerPhoto(ctx: BotContext) {
 export async function handleCustomerVoice(ctx: BotContext) {
   const telegramId = String(ctx.from?.id || "");
   const customer = await CustomerService.getOrCreateCustomer({ telegramId });
+
+  // HUMAN mode: relay voice to assigned staff only (no STT).
+  if (await relayCustomerMediaToStaff(ctx, customer, "voice")) {
+    return;
+  }
+
+  const locale = locOf(customer);
 
   try {
     const voice = ctx.message?.voice;
@@ -723,7 +832,7 @@ export async function handleCustomerVoice(ctx: BotContext) {
     const transcribeResult = await AiProvider.transcribeAudio(buffer, "audio/ogg");
     if (transcribeResult && transcribeResult.transcript) {
       const langTag = transcribeResult.detectedLanguage?.toUpperCase() || "VI";
-      await ctx.reply(`🎙 [${langTag}] <i>"${transcribeResult.transcript}"</i>`, { parse_mode: "HTML" });
+      await ctx.reply(t(locale, "voice.transcript", { lang: (transcribeResult.detectedLanguage || "VI").toUpperCase(), text: transcribeResult.transcript }), { parse_mode: "HTML" });
       logger.info(
         {
           customerId: customer.id,
@@ -734,12 +843,18 @@ export async function handleCustomerVoice(ctx: BotContext) {
       );
       await handleCustomerTextMessage(ctx, transcribeResult.transcript);
     } else {
-      await ctx.reply(
-        "🎙 Đã lưu file ghi âm nhưng hiện tại chưa thể chuyển thành văn bản. Xin vui lòng nhắn tin trực tiếp."
-      );
+      await ctx.reply(t(locale, "voice.failed"));
     }
   } catch (err: any) {
     logger.error({ err }, "Voice processing error");
-    await ctx.reply("❌ Lỗi xử lý tin nhắn thoại");
+    await ctx.reply("âŒ Lá»—i xá»­ lĂ½ tin nháº¯n thoáº¡i");
   }
 }
+
+
+
+
+
+
+
+
