@@ -350,7 +350,7 @@ cskhHandler.callbackQuery("cskh:menu:tickets", async (ctx) => {
 
   const tickets = await ConversationService.getActiveTickets();
   if (tickets.length === 0) {
-    return ctx.reply("dY"< Hiện không có ticket nào đang ở chế độ HUMAN.");
+    return ctx.reply("📋 Hiện không có ticket nào đang ở chế độ HUMAN.");
   }
 
   let msg = `📋 <b>DANH SÁCH KHÁCH CHỜ HỖ TRỢ (${tickets.length}):</b>\n\n`;
@@ -358,7 +358,7 @@ cskhHandler.callbackQuery("cskh:menu:tickets", async (ctx) => {
   for (const t of tickets) {
     msg += `• Khách: <code>${t.customerId}</code> | Người nhận: ${t.claimedById || "Chưa nhận"}\n`;
     if (!t.claimedById) {
-      keyboard.text(`dYT< Nhận ${t.customerId}`, `cskh:ticket:claim:${t.customerId}`).row();
+      keyboard.text(`🙋 Nhận ${t.customerId}`, `cskh:ticket:claim:${t.customerId}`).row();
     }
   }
   await ctx.reply(msg, { parse_mode: "HTML", reply_markup: keyboard });
