@@ -1,4 +1,5 @@
 import { Composer, InlineKeyboard } from "grammy";
+import type { Customer } from "@prisma/client";
 import { BotContext } from "../middleware/identity.js";
 import { requirePermission } from "../middleware/permissions.js";
 import { ConversationService } from "../../modules/conversation/conversation-service.js";
@@ -316,15 +317,15 @@ cskhHandler.callbackQuery("cskh:reply_switch", async (ctx) => {
   clearSelectedCustomer(String(ctx.from?.id || ""));
 
   const staffTelegramId = String(ctx.from?.id || "");
-  const allTickets = await ConversationService.getActiveTickets();
-  const myTickets = allTickets.filter((t: any) => t.claimedById === staffTelegramId);
+  const allTickets: { customerId: string; claimedById: string | null }[] = await ConversationService.getActiveTickets();
+  const myTickets = allTickets.filter((t) => t.claimedById === staffTelegramId);
   if (myTickets.length === 0) {
     await ctx.reply("💬 Bạn hiện không phụ trách cuộc hỗ trợ nào.");
     return;
   }
 
-  const customerIds = myTickets.map((t: any) => t.customerId);
-  const customers = await prisma.customer.findMany({ where: { id: { in: customerIds } } });
+  const customerIds: string[] = myTickets.map((t) => t.customerId);
+  const customers: Customer[] = await prisma.customer.findMany({ where: { id: { in: customerIds } } });
   const byId = new Map(customers.map((c) => [c.id, c]));
 
   const kb = new InlineKeyboard();
