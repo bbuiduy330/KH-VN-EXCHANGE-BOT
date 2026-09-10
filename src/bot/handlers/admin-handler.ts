@@ -1934,3 +1934,28 @@ export async function handleAdminPhoto(ctx: BotContext) {
     parse_mode: "HTML"
   });
 }
+// ❓ Admin help / advanced commands (secondary UX — concise, grouped).
+adminHandler.callbackQuery("admin:menu:help", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const allowed = await requirePermission(ctx, "order.view");
+  if (!allowed) return;
+
+  const text =
+    `❓ <b>HƯỚNG DẪN QUẢN TRỊ</b>\n\n` +
+    `Dùng các nút trong menu để xem và xử lý đơn hàng, tỷ giá, tài khoản nhận, khách hàng, nhân sự.\n\n` +
+    `<b>⌨️ Lệnh nâng cao</b> (dùng khi cần thao tác nhanh):\n` +
+    `• 💱 <code>/rates</code> · <code>/setrate</code> — xem / cập nhật tỷ giá\n` +
+    `• 🏦 <code>/accounts</code> · <code>/addqr</code> — tài khoản nhận & QR\n` +
+    `• 👨‍💼 <code>/staff</code> · <code>/invite</code> — quản lý nhân sự\n` +
+    `• 🤖 <code>/setmodel</code> · <code>/setkey</code> · <code>/testai</code> — AI\n` +
+    `• ⚙️ <code>/settings</code> · <code>/sethere</code> — cấu hình & kênh thông báo\n` +
+    `• 💾 <code>/backup</code> · <code>/backups</code> — sao lưu hệ thống`;
+
+  const kb = new InlineKeyboard().text("⬅️ Về menu chính", "admin:menu:back_start");
+  try {
+    await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: kb });
+  } catch {
+    await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb });
+  }
+});
+

@@ -9,12 +9,14 @@ import { prisma } from "../../database/client.js";
 import { sendToCustomer, copyMessageToCustomer } from "../notifications.js";
 import { resolveLocale, t } from "../../modules/i18n/locales.js";
 import { getCskhMenuKeyboard, renderCskhStartText } from "../menus/cskh-menu.js";
+import { clearSelectedCustomer, getSelectedCustomer, setSelectedCustomer } from "../state/staff-chat-session.js";
 import {
   ConversationWithCustomer,
   activeRowText,
   getCskhHomeKeyboard,
   getCustomerDetailKeyboard,
   getHistoryKeyboard,
+  getReplyModeKeyboard,
   orderContextText,
   paginate,
   paginationKeyboard,
@@ -22,6 +24,7 @@ import {
   renderCskhHomeText,
   renderCustomerDetailText,
   renderHistoryText,
+  renderReplyModeText,
   shortCustomerLabel,
   staffDisplayName,
   waitingRowText
@@ -30,6 +33,7 @@ import {
 export const cskhHandler = new Composer<BotContext>();
 
 export async function showCskhStart(ctx: BotContext) {
+  clearSelectedCustomer(String(ctx.from?.id || ""));
   const staff = ctx.identity?.staff;
   const staffName = staff?.name || "Nhân viên CSKH";
   const text = renderCskhHomeText(staffName);
@@ -191,6 +195,148 @@ cskhHandler.command("msg", async (ctx) => {
     await ctx.reply(`❌ Không tìm thấy thông tin khách hàng <code>${customerId}</code>.`, { parse_mode: "HTML" });
   }
 });
+
+
+/**
+ * C3 — single delivery path for staff text -> selected/claimed customer.
+ * Mirrors the /msg flow using the SAME ConversationService primitives so
+ * history/persistence stay consistent.
+ */
+async function deliverStaffText(ctx: BotContext, customerId: string, content: string): Promise<void> {
+  const staffTelegramId = String(ctx.from?.id || "");
+
+  const canSend = await ConversationService.canStaffMessage(
+    customerId,
+    staffTelegramId,
+    ctx.identity?.userType || "CSKH",
+    ctx.identity?.staff?.permissions || []
+  );
+  if (!canSend) {
+    await ctx.reply("⛔ Bạn chỉ có thể gửi tin nhắn cho khách hàng mà bạn đã tiếp nhận (Claim).");
+    return;
+  }
+
+  const customer = await prisma.customer.findUnique({ where: { id: customerId } });
+  if (!customer) {
+    await ctx.reply(`❌ Không tìm thấy thông tin khách hàng <code>${customerId}</code>.`, { parse_mode: "HTML" });
+    return;
+  }
+
+  const msgRecord = await ConversationService.createOutboundMessage({
+    customerId,
+    senderId: staffTelegramId,
+    content,
+    senderType: ctx.identity?.userType === "ADMIN" || ctx.identity?.userType === "SUPER_ADMIN" ? "ADMIN" : "CSKH"
+  });
+
+  try {
+    const sent = await sendToCustomer(customer.telegramId, `💬 <b>Bộ phận CSKH:</b>\n${content}`);
+    if (sent) {
+      await ConversationService.markMessageSent(msgRecord.id, Date.now());
+      await ctx.reply(`✅ Đã gửi đến <b>${shortCustomerLabel(customer)}</b>.`, { parse_mode: "HTML" });
+    } else {
+      await ConversationService.markMessageFailed(msgRecord.id, "Telegram send returned false");
+      await ctx.reply(`⚠️ Không gửi được tới khách (Telegram).`, { parse_mode: "HTML" });
+    }
+  } catch (sendErr: any) {
+    await ConversationService.markMessageFailed(msgRecord.id, sendErr?.message || "send failed");
+    await ctx.reply(`❌ Lỗi gửi tin nhắn: ${sendErr?.message || "unknown"}`, { parse_mode: "HTML" });
+  }
+}
+
+/**
+ * C3 — bare staff text. Delivers ONLY to the per-staff selected customer.
+ * Never guesses a recipient when no session is active.
+ */
+export async function handleStaffTextMessage(ctx: BotContext, text: string): Promise<void> {
+  const staffTelegramId = String(ctx.from?.id || "");
+  const customerId = getSelectedCustomer(staffTelegramId);
+
+  if (!customerId) {
+    await ctx.reply(
+      `⚠️ <b>Bạn chưa chọn khách để trả lời.</b>\n` +
+        `Hãy vào <b>💬 Đang hỗ trợ</b> → chọn khách → <b>💬 Trả lời khách</b>.`,
+      { parse_mode: "HTML" }
+    );
+    return;
+  }
+
+  const conv = await prisma.conversation.findUnique({ where: { customerId } });
+  if (!conv || conv.mode !== "HUMAN" || conv.claimedById !== staffTelegramId) {
+    clearSelectedCustomer(staffTelegramId);
+    await ctx.reply("⚠️ Khách đã được trả về AI hoặc nhân viên khác. Bạn đã thoát trả lời.");
+    return;
+  }
+
+  await deliverStaffText(ctx, customerId, text);
+}
+
+/** 💬 Enter reply mode for a claimed-by-me customer. */
+cskhHandler.callbackQuery(/^cskh:reply:([a-zA-Z0-9_-]+)$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const allowed = await requirePermission(ctx, "customer.message");
+  if (!allowed) return;
+
+  const customerId = ctx.match?.[1];
+  if (!customerId) return;
+
+  const staffTelegramId = String(ctx.from?.id || "");
+  const conv = (await prisma.conversation.findUnique({
+    where: { customerId },
+    include: { customer: true }
+  })) as unknown as ConversationWithCustomer | null;
+
+  if (!conv || conv.mode !== "HUMAN" || conv.claimedById !== staffTelegramId) {
+    await ctx.reply("⚠️ Bạn chưa tiếp nhận khách này (Claim).");
+    return;
+  }
+
+  setSelectedCustomer(staffTelegramId, customerId);
+  const contextMap = await loadCustomerContext([conv]);
+  const context = contextMap.get(customerId) || {};
+  const text = renderReplyModeText(conv, context);
+  try {
+    await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: getReplyModeKeyboard(customerId) });
+  } catch {
+    await ctx.reply(text, { parse_mode: "HTML", reply_markup: getReplyModeKeyboard(customerId) });
+  }
+});
+
+/** ↩️ Exit reply mode (clear selected session). */
+cskhHandler.callbackQuery("cskh:exit_reply", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  clearSelectedCustomer(String(ctx.from?.id || ""));
+  await ctx.reply("✅ Đã thoát trả lời. Tin nhắn tiếp theo sẽ không gửi đến khách.", { parse_mode: "HTML" });
+  await showCskhStart(ctx);
+});
+
+/** 🔄 Switch: clear session, return to own active customers. */
+cskhHandler.callbackQuery("cskh:reply_switch", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  clearSelectedCustomer(String(ctx.from?.id || ""));
+
+  const staffTelegramId = String(ctx.from?.id || "");
+  const allTickets = await ConversationService.getActiveTickets();
+  const myTickets = allTickets.filter((t: any) => t.claimedById === staffTelegramId);
+  if (myTickets.length === 0) {
+    await ctx.reply("💬 Bạn hiện không phụ trách cuộc hỗ trợ nào.");
+    return;
+  }
+
+  const customerIds = myTickets.map((t: any) => t.customerId);
+  const customers = await prisma.customer.findMany({ where: { id: { in: customerIds } } });
+  const byId = new Map(customers.map((c) => [c.id, c]));
+
+  const kb = new InlineKeyboard();
+  for (const t of myTickets) {
+    const cust = byId.get(t.customerId);
+    const label = cust ? shortCustomerLabel(cust) : `#${t.customerId.slice(-6)}`;
+    kb.text(label, `cskh:preview:${t.customerId}`).row();
+  }
+  kb.text("🏠 Menu CSKH", "cskh:home");
+  await ctx.reply(`💬 <b>Chọn khách để trả lời (${myTickets.length}):</b>`, { parse_mode: "HTML", reply_markup: kb });
+});
+
 
 // /note <customerId> <content> (INTERNAL ONLY)
 cskhHandler.command("note", async (ctx) => {
@@ -446,6 +592,7 @@ async function loadCustomerContext(
 
 cskhHandler.callbackQuery("cskh:home", async (ctx) => {
   await ctx.answerCallbackQuery();
+  clearSelectedCustomer(String(ctx.from?.id || ""));
   const allowed = await requirePermission(ctx, "conversation.view");
   if (!allowed) return;
 
@@ -817,28 +964,23 @@ export async function handleStaffMedia(ctx: BotContext): Promise<void> {
   const caption = (ctx.message?.caption || "").trim();
   const staffTelegramId = String(ctx.from?.id || "");
 
-  // Explicit-customer form: caption starts with /msg <customerId> [optional note]
+  // Resolve target: explicit /msg <id> caption, else per-staff selected chat (C3).
   const match = caption.match(/^\/msg\s+(\S+)(?:\s+(.*))?$/i);
-  if (!match) {
-    await ctx.reply(
-      `📎 <b>GỬI MEDIA CHO KHÁCH</b>\n\n` +
-        `Để gửi ảnh/voice/file cho khách, hãy ghi caption:\n` +
-        `<code>/msg &lt;ID_Khách&gt; [ghi chú tùy chọn]</code>\n\n` +
-        `<i>Phase B: bắt buộc nêu rõ ID khách. Chọn khách nhanh thuộc Phase C.</i>`,
-      { parse_mode: "HTML" }
-    );
-    return;
+  let customerId: string | undefined;
+  let note = "";
+  if (match) {
+    customerId = match[1];
+    note = (match[2] || "").trim();
+  } else {
+    customerId = getSelectedCustomer(staffTelegramId);
+    note = caption;
   }
 
-  const customerId = match[1];
-  const note = (match[2] || "").trim();
-  // Regex capture groups are string | undefined under noUncheckedIndexedAccess.
-  // Require a real customer id before any auth or send path.
   if (!customerId) {
     await ctx.reply(
       `📎 <b>GỬI MEDIA CHO KHÁCH</b>\n\n` +
-        `Thiếu ID khách. Caption phải có dạng:\n` +
-        `<code>/msg &lt;ID_Khách&gt; [ghi chú tùy chọn]</code>`,
+        `• Đang trả lời một khách? Bấm <b>💬 Trả lời khách</b> trước, rồi gửi ảnh/voice/file trực tiếp.\n` +
+        `• Hoặc ghi caption: <code>/msg &lt;ID_Khách&gt; [ghi chú tùy chọn]</code>`,
       { parse_mode: "HTML" }
     );
     return;

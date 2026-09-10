@@ -1,7 +1,7 @@
 import { Composer } from "grammy";
 import { BotContext, identityMiddleware } from "./middleware/identity.js";
 import { customerHandler, showCustomerStart, handleCustomerTextMessage, handleCustomerPhoto, handleCustomerVoice } from "./handlers/customer-handler.js";
-import { cskhHandler, showCskhStart, handleStaffMedia } from "./handlers/cskh-handler.js";
+import { cskhHandler, showCskhStart, handleStaffMedia, handleStaffTextMessage } from "./handlers/cskh-handler.js";
 import { adminHandler, showAdminStart, handleAdminPhoto, handleAdminTextMessage } from "./handlers/admin-handler.js";
 import { PermissionService } from "../modules/permissions/permission-service.js";
 import { sendToAdminNotificationChat } from "./notifications.js";
@@ -144,11 +144,8 @@ mainRouter.on("message:text", async (ctx) => {
 
   if (userType === "CUSTOMER") {
     await handleCustomerTextMessage(ctx, text);
-  } else if (userType === "CSKH") {
-    await ctx.reply(
-      `💡 <i>Gợi ý CSKH: Để gửi tin nhắn cho khách hàng, hãy dùng lệnh:</i>\n` +
-        `<code>/msg &lt;ID_Khách&gt; &lt;Nội dung&gt;</code>`,
-      { parse_mode: "HTML" }
-    );
+  } else if (userType === "CSKH" || userType === "ADMIN" || userType === "SUPER_ADMIN") {
+    // C3: bare staff text goes to the per-staff selected customer (if any).
+    await handleStaffTextMessage(ctx, text);
   }
 });

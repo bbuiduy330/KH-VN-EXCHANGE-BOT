@@ -2,6 +2,9 @@ import { Bot } from "grammy";
 import { env } from "../config/env.js";
 import { logger } from "../shared/logger.js";
 import { SystemConfigService } from "../modules/system-config/system-config-service.js";
+import { prisma } from "../database/client.js";
+import { PermissionService } from "../modules/permissions/permission-service.js";
+
 
 let botInstance: Bot<any> | null = null;
 
@@ -118,3 +121,40 @@ export async function copyMessageToCustomer(
 ): Promise<boolean> {
   return copyMessageToChat(fromChatId, messageId, customerTelegramId);
 }
+
+/**
+ * C3 — direct DM to eligible active staff (conversation.claim permission).
+ * Used for HUMAN support requests. Forbidden/403 (staff never started the bot)
+ * is caught silently so it never breaks the customer's support request.
+ * Never exposes token/error internals.
+ */
+export async function notifyEligibleStaff(
+  text: string,
+  options: { parse_mode?: "HTML" | "MarkdownV2"; reply_markup?: any } = { parse_mode: "HTML" }
+): Promise<void> {
+  if (!botInstance) return;
+
+  let staff: any[] = [];
+  try {
+    staff = await prisma.staffUser.findMany({ where: { status: "ACTIVE" } });
+  } catch (err: any) {
+    logger.warn({ err: err?.message }, "notifyEligibleStaff: failed to list staff");
+    return;
+  }
+
+  for (const s of staff) {
+    try {
+      const eligible = await PermissionService.hasPermission(s.telegramId, "conversation.claim");
+      if (!eligible) continue;
+      await botInstance.api.sendMessage(s.telegramId, text, options);
+    } catch (err: any) {
+      const msg = String(err?.message || "");
+      if (msg.includes("403") || msg.includes("Forbidden")) {
+        logger.info({ staffTelegramId: s.telegramId }, "notifyEligibleStaff: skip (403/forbidden)");
+      } else {
+        logger.warn({ err: msg, staffTelegramId: s.telegramId }, "notifyEligibleStaff: send failed");
+      }
+    }
+  }
+}
+
