@@ -125,3 +125,112 @@ export function getCustomerPreviewKeyboard(conv: Pick<Conversation, "mode" | "cl
   kb.row().text("⬅️ Quay lại danh sách", "cskh:waiting:1").text("🏠 Menu CSKH", "cskh:home");
   return kb;
 }
+/**
+ * C2 — customer detail, history, search and action helpers.
+ * All read-only UX; financial actions remain untouched.
+ */
+
+const SENDER_LABEL: Record<string, string> = {
+  CUSTOMER: "👤 Khách",
+  AI: "🤖 Bot",
+  BOT: "🤖 Bot",
+  CSKH: "👨‍💼 CSKH",
+  ADMIN: "👨‍💼 CSKH",
+  SYSTEM: "🛎 Hệ thống"
+};
+
+export function senderLabel(senderType: string): string {
+  return SENDER_LABEL[senderType] || "🛎 Hệ thống";
+}
+
+/** Minimal HTML-escape so user/recorded text never breaks Telegram HTML. */
+export function escapeHtml(input: string): string {
+  return input
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+/** Short time like "09:41" (vi locale, no timezone surprises). */
+export function shortTime(iso: string | Date): string {
+  const d = typeof iso === "string" ? new Date(iso) : iso;
+  if (Number.isNaN(d.getTime())) return "";
+  return d.toLocaleTimeString("vi-VN", { hour: "2-digit", minute: "2-digit" });
+}
+
+/** Resolve a staff owner display label: "Name (ROLE)" with graceful fallback. */
+export function staffDisplayName(staff: { name?: string | null; role?: string | null } | null | undefined, fallbackId?: string | null): string {
+  if (!staff) return fallbackId ? `#${fallbackId.slice(-6)}` : "Chưa phân công";
+  const name = (staff.name || "").trim() || (fallbackId ? `#${fallbackId.slice(-6)}` : "Chưa rõ");
+  return staff.role ? `${name} (${staff.role})` : name;
+}
+
+/** One history line: sender + time + truncated content. */
+export function messageLine(m: { senderType: string; content: string; createdAt: string | Date }): string {
+  const content = escapeHtml((m.content || "").trim()).slice(0, 180);
+  const time = shortTime(m.createdAt);
+  return `${senderLabel(m.senderType)}: <i>${content}</i>${time ? ` <code>${time}</code>` : ""}`;
+}
+
+/** Operational customer detail card (C2 supersedes the C1 preview). */
+export function renderCustomerDetailText(
+  conv: ConversationWithCustomer,
+  opts: { owner?: string; need?: string; order?: string; lastSeen?: string } = {}
+): string {
+  const c = conv.customer;
+  const lines: string[] = [
+    `👤 <b>Khách</b>: ${escapeHtml(shortCustomerLabel(c))}`
+  ];
+  if (c.username) lines.push(`🔗 @${escapeHtml(c.username)}`);
+  lines.push(`🆔 ID ngắn: <code>${c.id.slice(-6)}</code>`);
+  lines.push(`💬 Trạng thái hỗ trợ: ${conv.mode === "HUMAN" ? (conv.claimedById ? "Đang được nhân viên hỗ trợ" : "Đang chờ nhân viên") : "AI tự động"}`);
+  lines.push(`👨‍💼 Người phụ trách: ${opts.owner || "Chưa phân công"}`);
+  if (opts.need) lines.push(`💱 Nhu cầu / báo giá: ${opts.need}`);
+  if (opts.order) lines.push(`📦 Đơn hàng: ${opts.order}`);
+  if (opts.lastSeen) lines.push(`🕒 Cập nhật gần nhất: ${opts.lastSeen}`);
+  return lines.join("\n");
+}
+
+/** Detail action keyboard — only actions valid for the current state. */
+export function getCustomerDetailKeyboard(
+  conv: Pick<Conversation, "mode" | "claimedById" | "customerId">,
+  opts: { isMine?: boolean } = {}
+): InlineKeyboard {
+  const kb = new InlineKeyboard();
+  const claimable = conv.mode !== "HUMAN" || !conv.claimedById;
+  if (claimable) {
+    kb.text("✅ Nhận khách", `cskh:ticket:claim:${conv.customerId}`);
+  } else if (opts.isMine) {
+    kb.text("↩️ Trả khách (kết thúc hỗ trợ)", `cskh:ticket:release:${conv.customerId}`);
+  }
+  kb.row()
+    .text("📦 Xem đơn", `cskh:order:${conv.customerId}`)
+    .text("📊 Xem báo giá", `cskh:quote:${conv.customerId}`);
+  kb.row()
+    .text("🕘 Lịch sử", `cskh:history:${conv.customerId}:1`)
+    .text("⬅️ Danh sách", "cskh:waiting:1");
+  kb.row().text("🏠 Menu CSKH", "cskh:home");
+  return kb;
+}
+
+/** History screen text (paginated, newest-first). */
+export function renderHistoryText(
+  customerLabel: string,
+  messages: { senderType: string; content: string; createdAt: string | Date }[],
+  page: number,
+  totalPages: number
+): string {
+  const header = `🕘 <b>Lịch sử ${escapeHtml(customerLabel)}</b> — trang ${page}/${totalPages}`;
+  if (messages.length === 0) return `${header}\n\n<i>Không có tin nhắn nào.</i>`;
+  return `${header}\n\n${messages.map(messageLine).join("\n")}`;
+}
+
+/** History navigation keyboard: back to detail + home (+ page arrows). */
+export function getHistoryKeyboard(customerId: string, page: number, totalPages: number): InlineKeyboard {
+  const kb = new InlineKeyboard();
+  if (page > 1) kb.text("⬅️", `cskh:history:${customerId}:${page - 1}`);
+  if (page < totalPages) kb.text("➡️", `cskh:history:${customerId}:${page + 1}`);
+  kb.row().text("⬅️ Quay lại", `cskh:preview:${customerId}`).text("🏠 Menu CSKH", "cskh:home");
+  return kb;
+}
+
