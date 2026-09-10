@@ -1,5 +1,5 @@
 import { InlineKeyboard } from "grammy";
-import { Quote, Order } from "@prisma/client";
+import { Quote, Order, ExchangeRate } from "@prisma/client";
 import { QuoteService } from "../../modules/quotes/quote-service.js";
 import { MoneyService } from "../../modules/money/money-service.js";
 
@@ -33,7 +33,7 @@ export function getCustomerMenuKeyboard(): InlineKeyboard {
 export async function renderCustomerWelcomeText(name: string): Promise<string> {
   let ratesBlock = "";
   try {
-    const allRates = await QuoteService.getAllRates();
+    const allRates: ExchangeRate[] = await QuoteService.getAllRates();
     const usdVnd = allRates.find((r) => r.pair === "USD/VND");
     if (usdVnd) {
       const { effectiveBuy, effectiveSell } = MoneyService.calculateEffectiveRates(
