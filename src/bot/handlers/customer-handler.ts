@@ -11,7 +11,7 @@ import { ConversationalAIService } from "../../modules/ai/customer-ai-service.js
 import { FileService } from "../../modules/files/file-service.js";
 import { RuntimeConfigService } from "../../modules/system-config/runtime-config-service.js";
 import { MoneyService } from "../../modules/money/money-service.js";
-import { sendToStaff, sendToAdminNotificationChat, copyMessageToStaff } from "../notifications.js";
+import { sendToStaff, sendToAdminNotificationChat, copyMessageToStaff, notifyEligibleStaff } from "../notifications.js";
 import {
   getCustomerMenuKeyboard,
   getBankWizardKeyboard,
@@ -400,16 +400,17 @@ customerHandler.callbackQuery("customer:menu:support", async (ctx) => {
   const locale = locOf(customer);
   await ctx.reply(t(locale, "support.requested"), { parse_mode: "HTML", reply_markup: getCustomerMenuKeyboard(locale) });
 
-  await sendToAdminNotificationChat(
+  const notifyText =
     `🛎 <b>YÊU CẦU HỖ TRỢ TỪ KHÁCH HÀNG:</b>\n` +
-      `• Khách: <b>${customer.fullName || customer.username || customer.telegramId}</b> (ID: <code>${customer.id}</code>)\n` +
-      `• Telegram ID: <code>${customer.telegramId}</code>\n` +
-      `CSKH vui lòng bấm nút bên dưới để tiếp nhận.`,
-    {
-      parse_mode: "HTML",
-      reply_markup: new InlineKeyboard().text("🙋 Tiếp nhận hỗ trợ", `cskh:ticket:claim:${customer.id}`)
-    }
-  );
+    `• Khách: <b>${customer.fullName || customer.username || customer.telegramId}</b> (ID: <code>${customer.id}</code>)\n` +
+    `• Telegram ID: <code>${customer.telegramId}</code>`;
+  const notifyKb = new InlineKeyboard()
+    .text("👀 Xem khách", `cskh:preview:${customer.id}`)
+    .text("🙋 Nhận khách", `cskh:ticket:claim:${customer.id}`);
+
+  // Support-group broadcast (kept) + direct DM to eligible active staff (C3).
+  await sendToAdminNotificationChat(notifyText, { parse_mode: "HTML", reply_markup: notifyKb });
+  await notifyEligibleStaff(notifyText, { parse_mode: "HTML", reply_markup: notifyKb });
 });
 
 // Quote confirmation callback (persisted Quote in DB)

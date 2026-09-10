@@ -201,7 +201,8 @@ export function getCustomerDetailKeyboard(
   if (claimable) {
     kb.text("✅ Nhận khách", `cskh:ticket:claim:${conv.customerId}`);
   } else if (opts.isMine) {
-    kb.text("↩️ Trả khách (kết thúc hỗ trợ)", `cskh:ticket:release:${conv.customerId}`);
+    kb.text("💬 Trả lời khách", `cskh:reply:${conv.customerId}`)
+      .text("↩️ Trả khách (kết thúc hỗ trợ)", `cskh:ticket:release:${conv.customerId}`);
   }
   kb.row()
     .text("📦 Xem đơn", `cskh:order:${conv.customerId}`)
@@ -232,5 +233,35 @@ export function getHistoryKeyboard(customerId: string, page: number, totalPages:
   if (page < totalPages) kb.text("➡️", `cskh:history:${customerId}:${page + 1}`);
   kb.row().text("⬅️ Quay lại", `cskh:preview:${customerId}`).text("🏠 Menu CSKH", "cskh:home");
   return kb;
+}
+
+/** C3 — reply-mode (selected-chat) screen. */
+export function renderReplyModeText(
+  conv: ConversationWithCustomer,
+  context: { need?: string; order?: string } = {}
+): string {
+  const c = conv.customer;
+  const name = `${shortCustomerLabel(c)}${c.username ? ` (@${escapeHtml(c.username)})` : ""}`;
+  const lines = [
+    "🎧 <b>ĐANG TRẢ LỜI KHÁCH</b>\n",
+    `👤 <b>${escapeHtml(name)}</b>`,
+    `🆔 #${c.id.slice(-6)}`
+  ];
+  if (context.need) lines.push(`💱 ${escapeHtml(context.need)}`);
+  if (context.order) lines.push(`📦 ${escapeHtml(context.order)}`);
+  lines.push(
+    "\n✍️ Anh/chị có thể gửi trực tiếp:\n• Tin nhắn\n• Ảnh\n• Voice\n• File\n\n" +
+      "<i>Tin nhắn/media gửi tiếp theo sẽ đến đúng khách này.</i>"
+  );
+  return lines.join("\n");
+}
+
+export function getReplyModeKeyboard(customerId: string): InlineKeyboard {
+  return new InlineKeyboard()
+    .text("🕘 Lịch sử", `cskh:history:${customerId}:1`)
+    .text("🔄 Chọn khách khác", "cskh:reply_switch")
+    .row()
+    .text("↩️ Thoát trả lời", "cskh:exit_reply")
+    .text("🏠 Menu CSKH", "cskh:home");
 }
 
