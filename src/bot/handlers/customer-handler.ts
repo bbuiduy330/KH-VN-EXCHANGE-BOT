@@ -65,7 +65,7 @@ async function maybeSuggestLanguageSwitch(
  */
 async function relayCustomerMediaToStaff(
   ctx: BotContext,
-  customer: { id: string; fullName?: string | null; language?: string | null },
+  customer: { id: string; fullName?: string | null; username?: string | null; language?: string | null },
   kind: "photo" | "voice" | "document"
 ): Promise<boolean> {
   const conv = await ConversationService.getOrCreateConversation(customer.id);
