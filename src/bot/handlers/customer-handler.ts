@@ -12,7 +12,7 @@ import { FileService } from "../../modules/files/file-service.js";
 import { RuntimeConfigService } from "../../modules/system-config/runtime-config-service.js";
 import { MoneyService } from "../../modules/money/money-service.js";
 import { sendToStaff, sendToAdminNotificationChat } from "../notifications.js";
-import { getCustomerMenuKeyboard, renderCustomerWelcomeText, renderActiveOrderText, renderQuoteCard } from "../menus/customer-menu.js";
+import { getCustomerMenuKeyboard, getBankWizardKeyboard, renderCustomerWelcomeText, renderActiveOrderText, renderQuoteCard } from "../menus/customer-menu.js";
 
 export const customerHandler = new Composer<BotContext>();
 
@@ -29,12 +29,23 @@ export async function showCustomerStart(ctx: BotContext) {
 
   const keyboard = getCustomerMenuKeyboard();
 
-  // 1. Active order -> show/resume order status
+  // 1. Active order -> show/resume order status.
+  // If the customer has not set a payout account yet, offer the bank wizard
+  // contextually (it belongs to the Order flow, not the main menu).
   const activeOrder = await OrderService.getLatestActiveOrderForCustomer(customer.id);
   if (activeOrder) {
+    const orderKb = getCustomerMenuKeyboard();
+    if (!activeOrder.payoutBankSnapshot) {
+      orderKb
+        .row()
+        .text(
+          `🏦 Nhập tài khoản nhận ${activeOrder.targetCurrency}`,
+          `customer:bank:wiz:${activeOrder.targetCurrency}`
+        );
+    }
     await ctx.reply(await renderActiveOrderText(activeOrder), {
       parse_mode: "HTML",
-      reply_markup: keyboard
+      reply_markup: orderKb
     });
     return;
   }
@@ -66,8 +77,7 @@ export async function showCustomerStart(ctx: BotContext) {
       .text("💱 Đổi tiền", "customer:menu:quote")
       .text("📦 Đơn của tôi", "customer:menu:orders")
       .row()
-      .text("💬 Hỗ trợ", "customer:menu:support")
-      .text("🏦 Tài khoản nhận tiền", "customer:menu:bank");
+      .text("💬 Hỗ trợ", "customer:menu:support");
     await ctx.reply(
       `💬 <b>BẠN ĐANG ĐƯỢC NHÂN VIÊN HỖ TRỢ TRỰC TIẾP</b>\n\n` +
         `Anh/chị vui lòng tiếp tục nhắn tin tại khung chat này.\n` +
@@ -87,8 +97,8 @@ export async function showCustomerStart(ctx: BotContext) {
 customerHandler.command("help", async (ctx) => {
   await ctx.reply(
     `📖 <b>HƯỚNG DẪN DỊCH VỤ ĐỔI TIỀN</b>\n\n` +
-      `• Nhắn tin tự nhiên, ví dụ: <i>"100 đô"</i>, <i>"10 triệu lấy đô"</i> để nhận báo giá tức thời.\n` +
-      `• Thiết lập ngân hàng nhận tiền: bấm nút <b>🏦 Tài khoản nhận tiền</b> trong menu, hoặc nhắn tin:\n` +
+      `• Nhắn tin tự nhiên, ví dụ: <i>"100 đô"</i>, <i>"10 triệu lấy đô"</i>, <i>"đổi VND lấy 100 đô"</i> để nhận báo giá tức thời.\n` +
+      `• Tài khoản nhận tiền nhập ngay trong luồng đơn hàng (sau khi gửi biên lai), hoặc nhắn tin theo mẫu:\n` +
       `  <i>Ví dụ:</i> <code>VND | Vietcombank | NGUYEN VAN A | 1012345678</code>\n` +
       `• Xem đơn đã tạo: <code>/orders</code>\n` +
       `• Hủy đơn đang chờ: <code>/cancel</code>\n` +
@@ -323,6 +333,7 @@ customerHandler.callbackQuery(/^(?:customer:quote:confirm:|confirm_quote:)(.+)$/
     const order = await OrderService.createOrderFromQuote(customer.id, confirmedQuote);
 
     const receivingSnapshot = order.receivingAccountSnapshot as any;
+    const payoutSnapshot = order.payoutBankSnapshot as any;
     const formattedSrc = MoneyService.formatAmount(confirmedQuote.sourceAmount, confirmedQuote.sourceCurrency);
 
     let msg =
@@ -336,7 +347,16 @@ customerHandler.callbackQuery(/^(?:customer:quote:confirm:|confirm_quote:)(.+)$/
       `• Nội dung chuyển tiền: <code>${order.id}</code>\n\n` +
       `📸 <i>Sau khi chuyển tiền, quý khách chỉ cần chụp và gửi ảnh biên lai (bill) vào đây.</i>`;
 
-    await ctx.reply(msg, { parse_mode: "HTML" });
+    if (!payoutSnapshot) {
+      msg +=
+        `\n\n💸 <i>Đơn hàng chưa có tài khoản nhận <b>${order.targetCurrency}</b>. ` +
+        `Anh/chị có thể nhập ngay bằng nút bên dưới, hoặc để sau khi gửi biên lai.</i>`;
+    }
+
+    await ctx.reply(msg, {
+      parse_mode: "HTML",
+      ...(payoutSnapshot ? {} : { reply_markup: getBankWizardKeyboard(order.targetCurrency) })
+    });
 
     if (receivingSnapshot?.qrFilePath) {
       const qrBuffer = await FileService.getFile(receivingSnapshot.qrFilePath);
@@ -356,6 +376,17 @@ customerHandler.callbackQuery(/^(?:customer:quote:confirm:|confirm_quote:)(.+)$/
       { parse_mode: "HTML" }
     );
   } catch (err: any) {
+    // Friendly error when the DESK receiving account is missing (system
+    // payment account is operator-side config, not a customer problem).
+    const errText = String(err?.message || "");
+    if (errText.includes("Không tìm thấy tài khoản nhận")) {
+      await ctx.reply(
+        `⚠️ <b>Hệ thống đang cập nhật tài khoản thanh toán của quầy.</b>\n` +
+          `Vui lòng thử lại sau ít phút, hoặc bấm <b>💬 Hỗ trợ</b> để nhân viên hỗ trợ trực tiếp.`,
+        { parse_mode: "HTML", reply_markup: getCustomerMenuKeyboard() }
+      );
+      return;
+    }
     await ctx.reply(`❌ Lỗi tạo đơn: ${err.message}`);
   }
 });
@@ -452,13 +483,22 @@ export async function handleCustomerTextMessage(ctx: BotContext, text: string) {
   const intent = await AiProvider.parseExchangeIntent(text);
   if (intent) {
     try {
-      // Persist Quote in DB
-      const quote = await QuoteService.createQuote(
-        customer.id,
-        intent.sourceCurrency,
-        intent.targetCurrency,
-        intent.amount
-      );
+      // Persist Quote in DB. Target-amount intents ("doi VND lay 100 USD",
+      // "y anh la nhan 100 do") compute the required source amount instead.
+      const quote =
+        intent.amountSide === "target"
+          ? await QuoteService.createQuoteFromTarget(
+              customer.id,
+              intent.sourceCurrency,
+              intent.targetCurrency,
+              intent.amount
+            )
+          : await QuoteService.createQuote(
+              customer.id,
+              intent.sourceCurrency,
+              intent.targetCurrency,
+              intent.amount
+            );
 
       const keyboard = new InlineKeyboard().text("✅ Xác nhận đổi tiền", `customer:quote:confirm:${quote.id}`);
       const expiryMinutes = RuntimeConfigService.getQuoteExpiryMinutes();
@@ -576,6 +616,22 @@ async function processBillUpload(ctx: BotContext, orderId: string, fileId: strin
         `🔒 Theo quy định tài chính an toàn, Admin sẽ trực tiếp kiểm tra biến động tài khoản thực tế và xác nhận trong giây lát. Xin cảm ơn quý khách!`,
       { parse_mode: "HTML" }
     );
+
+    // Phase A: after the bill is accepted, proactively collect the payout
+    // account using the target currency already known from the Order.
+    try {
+      const billedOrder = await OrderService.getOrder(orderId);
+      if (billedOrder && !billedOrder.payoutBankSnapshot) {
+        await ctx.reply(
+          `💸 <b>BƯỚC TIẾP THEO — TÀI KHOẢN NHẬN TIỀN</b>\n\n` +
+            `Đơn <code>${orderId}</code> sẽ chi ra <b>${MoneyService.formatAmount(billedOrder.targetAmount, billedOrder.targetCurrency)} ${billedOrder.targetCurrency}</b>.\n` +
+            `Anh/chị nhập tài khoản nhận tiền ngay để khi Admin giải ngân, tiền về tức thì:`,
+          { parse_mode: "HTML", reply_markup: getBankWizardKeyboard(billedOrder.targetCurrency) }
+        );
+      }
+    } catch (promptErr) {
+      logger.warn({ err: promptErr, orderId }, "Failed to send payout-details prompt after bill");
+    }
 
     await sendToAdminNotificationChat(
       `📸 <b>BIÊN LAI MỚI CHO ĐƠN ${orderId}</b>\n` +

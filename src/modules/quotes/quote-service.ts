@@ -182,6 +182,145 @@ export class QuoteService {
 
     return quote;
   }
+  /**
+   * Target-amount quoting ("doi VND lay 100 USD"): computes the SOURCE amount
+   * the customer must send in order to RECEIVE the requested target amount.
+   * Reuses the exact same rate/margin/fee rules as calculateQuote (inverted);
+   * no new rounding or business rules are introduced.
+   */
+  static async calculateQuoteFromTarget(
+    sourceCurrency: string,
+    targetCurrency: string,
+    targetAmountInput: number | string
+  ): Promise<QuoteCalculation> {
+    const src = sourceCurrency.toUpperCase().trim();
+    const tgt = targetCurrency.toUpperCase().trim();
+    const pairDirect = `${src}/${tgt}`;
+    const pairInverse = `${tgt}/${src}`;
+
+    const rateDirect = await prisma.exchangeRate.findUnique({ where: { pair: pairDirect } });
+    const rateInverse = await prisma.exchangeRate.findUnique({ where: { pair: pairInverse } });
+
+    const desiredTarget = new Decimal(targetAmountInput);
+    if (desiredTarget.lessThanOrEqualTo(0)) {
+      throw new Error("Số tiền phải lớn hơn 0");
+    }
+
+    let effectiveRate: Decimal;
+    let baseRate: Decimal;
+    let fee: Decimal;
+    let feeCurrency: string;
+
+    if (rateDirect) {
+      baseRate = new Decimal(rateDirect.baseRate);
+      // Same side as calculateQuote: customer sells source, buyMargin applies.
+      const { effectiveBuy } = MoneyService.calculateEffectiveRates(
+        baseRate,
+        rateDirect.buyMargin,
+        rateDirect.sellMargin
+      );
+      effectiveRate = effectiveBuy;
+      fee = new Decimal(rateDirect.fee);
+      feeCurrency = rateDirect.feeCurrency;
+    } else if (rateInverse) {
+      baseRate = new Decimal(rateInverse.baseRate);
+      // Same side as calculateQuote: denominator pair, sellMargin applies.
+      const { effectiveSell } = MoneyService.calculateEffectiveRates(
+        baseRate,
+        rateInverse.buyMargin,
+        rateInverse.sellMargin
+      );
+      effectiveRate = effectiveSell;
+      fee = new Decimal(rateInverse.fee);
+      feeCurrency = rateInverse.feeCurrency;
+    } else {
+      throw new Error(`Chưa thiết lập tỷ giá cho cặp tiền tệ ${src}/${tgt}`);
+    }
+
+    // Forward formula mirrored EXACTLY from calculateQuote:
+    // fee subtracted as-is when feeCurrency === tgt, converted at the effective
+    // rate when feeCurrency === src, and not applied for any other currency
+    // (same conditional structure as calculateQuote).
+    const forwardTarget = (source: Decimal): Decimal => {
+      const raw = rateDirect ? source.times(effectiveRate) : source.div(effectiveRate);
+      if (feeCurrency === tgt) return raw.minus(fee);
+      if (feeCurrency === src) return raw.minus(fee.times(effectiveRate));
+      return raw;
+    };
+
+    // Closed-form inversion of the forward formula (same three cases).
+    let sourceAmount = rateDirect
+      ? feeCurrency === tgt
+        ? desiredTarget.plus(fee).div(effectiveRate)
+        : feeCurrency === src
+          ? desiredTarget.div(effectiveRate).plus(fee)
+          : desiredTarget.div(effectiveRate)
+      : feeCurrency === tgt
+        ? desiredTarget.plus(fee).times(effectiveRate)
+        : feeCurrency === src
+          ? desiredTarget.plus(fee.times(effectiveRate)).times(effectiveRate)
+          : desiredTarget.times(effectiveRate);
+
+    // Round the source UP onto the currency grid, then bump by one grid step
+    // until the forward result covers the requested target (rounding-safe).
+    sourceAmount = MoneyService.roundSourceAmount(sourceAmount, src);
+    const step = new Decimal(src === "USD" ? "0.01" : "1");
+    let guard = 0;
+    while (forwardTarget(sourceAmount).lessThan(desiredTarget) && guard < 10000) {
+      sourceAmount = sourceAmount.plus(step);
+      guard++;
+    }
+    if (forwardTarget(sourceAmount).lessThan(desiredTarget)) {
+      throw new Error("Không thể tính số tiền cần chuyển với tỷ giá hiện tại. Vui lòng thử lại sau.");
+    }
+
+    const expiryMinutes = RuntimeConfigService.getQuoteExpiryMinutes();
+    const expiresAt = new Date(Date.now() + expiryMinutes * 60 * 1000);
+
+    return {
+      sourceCurrency: src,
+      targetCurrency: tgt,
+      sourceAmount,
+      targetAmount: MoneyService.roundTargetAmount(forwardTarget(sourceAmount), tgt),
+      effectiveRate,
+      baseRate,
+      fee,
+      feeCurrency,
+      expiresAt
+    };
+  }
+
+  /**
+   * Creates a persisted Quote from a TARGET amount ("nhan 100 USD").
+   * Survives server restart, same as createQuote.
+   */
+  static async createQuoteFromTarget(
+    customerId: string,
+    sourceCurrency: string,
+    targetCurrency: string,
+    targetAmountInput: number | string
+  ) {
+    const calc = await this.calculateQuoteFromTarget(sourceCurrency, targetCurrency, targetAmountInput);
+
+    const quote = await prisma.quote.create({
+      data: {
+        customerId,
+        sourceCurrency: calc.sourceCurrency,
+        targetCurrency: calc.targetCurrency,
+        sourceAmount: calc.sourceAmount,
+        targetAmount: calc.targetAmount,
+        effectiveRate: calc.effectiveRate,
+        baseRate: calc.baseRate,
+        fee: calc.fee,
+        feeCurrency: calc.feeCurrency,
+        status: "PENDING",
+        expiresAt: calc.expiresAt
+      }
+    });
+
+    return quote;
+  }
+
   static async getQuoteById(quoteId: string) {
     return prisma.quote.findUnique({
       where: { id: quoteId },

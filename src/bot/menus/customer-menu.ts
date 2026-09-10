@@ -22,8 +22,20 @@ export function getCustomerMenuKeyboard(): InlineKeyboard {
     .text("💱 Đổi tiền", "customer:menu:quote")
     .text("📦 Đơn của tôi", "customer:menu:orders")
     .row()
-    .text("💬 Hỗ trợ", "customer:menu:support")
-    .text("🏦 Tài khoản nhận tiền", "customer:menu:bank");
+    .text("💬 Hỗ trợ", "customer:menu:support");
+}
+
+/**
+ * Contextual button used INSIDE the order flow (after bill upload / on order
+ * card) to collect the customer's payout account for a known target currency.
+ * Kept out of the main menu by design: receiving/payout details belong to the
+ * order flow only.
+ */
+export function getBankWizardKeyboard(currency: string): InlineKeyboard {
+  return new InlineKeyboard().text(
+    `🏦 Nhập tài khoản nhận ${currency}`,
+    `customer:bank:wiz:${currency}`
+  );
 }
 
 /**
