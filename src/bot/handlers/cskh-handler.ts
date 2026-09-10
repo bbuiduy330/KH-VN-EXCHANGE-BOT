@@ -457,6 +457,17 @@ export async function handleStaffMedia(ctx: BotContext): Promise<void> {
 
   const customerId = match[1];
   const note = (match[2] || "").trim();
+  // Regex capture groups are string | undefined under noUncheckedIndexedAccess.
+  // Require a real customer id before any auth or send path.
+  if (!customerId) {
+    await ctx.reply(
+      `📎 <b>GỬI MEDIA CHO KHÁCH</b>\n\n` +
+        `Thiếu ID khách. Caption phải có dạng:\n` +
+        `<code>/msg &lt;ID_Khách&gt; [ghi chú tùy chọn]</code>`,
+      { parse_mode: "HTML" }
+    );
+    return;
+  }
 
   const canSend = await ConversationService.canStaffMessage(
     customerId,
