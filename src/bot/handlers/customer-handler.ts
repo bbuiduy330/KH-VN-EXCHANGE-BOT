@@ -404,10 +404,10 @@ customerHandler.callbackQuery("customer:menu:support", async (ctx) => {
     `🛎 <b>YÊU CẦU HỖ TRỢ TỪ KHÁCH HÀNG:</b>\n` +
       `• Khách: <b>${customer.fullName || customer.username || customer.telegramId}</b> (ID: <code>${customer.id}</code>)\n` +
       `• Telegram ID: <code>${customer.telegramId}</code>\n` +
-      `CSKH vui lòng bấm nút bên dưới dể tiếp nhận.`,
+      `CSKH vui lòng bấm nút bên dưới để tiếp nhận.`,
     {
       parse_mode: "HTML",
-      reply_markup: new InlineKeyboard().text("dYT< Tiếp nhận hỗ trợ", `cskh:ticket:claim:${customer.id}`)
+      reply_markup: new InlineKeyboard().text("🙋 Tiếp nhận hỗ trợ", `cskh:ticket:claim:${customer.id}`)
     }
   );
 });

@@ -6,14 +6,34 @@ import { OrderService } from "../../modules/orders/order-service.js";
 import { prisma } from "../../database/client.js";
 import { sendToCustomer, copyMessageToCustomer } from "../notifications.js";
 import { getCskhMenuKeyboard, renderCskhStartText } from "../menus/cskh-menu.js";
+import {
+  CSKH_PAGE_SIZE,
+  ConversationWithCustomer,
+  activeRowText,
+  getCskhHomeKeyboard,
+  getCustomerPreviewKeyboard,
+  orderContextText,
+  paginate,
+  paginationKeyboard,
+  quoteNeedText,
+  renderCskhHomeText,
+  renderCustomerPreviewText,
+  shortCustomerLabel,
+  waitingRowText
+} from "../menus/cskh-panel.js";
 
 export const cskhHandler = new Composer<BotContext>();
 
 export async function showCskhStart(ctx: BotContext) {
   const staff = ctx.identity?.staff;
   const staffName = staff?.name || "Nhân viên CSKH";
-  const text = renderCskhStartText(staffName);
-  const keyboard = getCskhMenuKeyboard();
+  const text = renderCskhHomeText(staffName);
+  // Cheap counts for the home badges (single indexed query each).
+  const [waiting, active] = await Promise.all([
+    prisma.conversation.count({ where: { mode: "HUMAN", claimedById: null } }),
+    prisma.conversation.count({ where: { mode: "HUMAN", claimedById: { not: null } } })
+  ]);
+  const keyboard = getCskhHomeKeyboard({ waiting, active });
   await ctx.reply(text, { parse_mode: "HTML", reply_markup: keyboard });
 }
 
@@ -362,6 +382,193 @@ cskhHandler.callbackQuery("cskh:menu:tickets", async (ctx) => {
     }
   }
   await ctx.reply(msg, { parse_mode: "HTML", reply_markup: keyboard });
+});
+
+// ===== C1: CSKH control panel callbacks =====
+
+/** Attach cheap per-customer context (latest pending quote, active order). */
+async function loadCustomerContext(
+  convs: { customerId: string }[]
+): Promise<Map<string, { need?: string; order?: string }>> {
+  const map = new Map<string, { need?: string; order?: string }>();
+  await Promise.all(
+    convs.map(async (conv) => {
+      try {
+        const [quote, order] = await Promise.all([
+          prisma.quote.findFirst({
+            where: { customerId: conv.customerId, status: "PENDING", expiresAt: { gt: new Date() } },
+            orderBy: { createdAt: "desc" }
+          }),
+          prisma.order.findFirst({
+            where: {
+              customerId: conv.customerId,
+              status: { in: ["WAITING_PAYMENT", "CUSTOMER_SENT_BILL", "WAITING_ADMIN_VERIFY", "PAYMENT_CONFIRMED", "WAITING_PAYOUT", "MANUAL_REVIEW", "SUSPICIOUS"] }
+            },
+            orderBy: { createdAt: "desc" }
+          })
+        ]);
+        map.set(conv.customerId, {
+          need: quote ? quoteNeedText(quote) : undefined,
+          order: order ? orderContextText(order) : undefined
+        });
+      } catch {
+        map.set(conv.customerId, {});
+      }
+    })
+  );
+  return map;
+}
+
+cskhHandler.callbackQuery("cskh:home", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const allowed = await requirePermission(ctx, "conversation.view");
+  if (!allowed) return;
+
+  const staffName = ctx.identity?.staff?.name || "Nhân viên CSKH";
+  const [waiting, active] = await Promise.all([
+    prisma.conversation.count({ where: { mode: "HUMAN", claimedById: null } }),
+    prisma.conversation.count({ where: { mode: "HUMAN", claimedById: { not: null } } })
+  ]);
+  const text = renderCskhHomeText(staffName);
+  const keyboard = getCskhHomeKeyboard({ waiting, active });
+  try {
+    await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: keyboard });
+  } catch {
+    await ctx.reply(text, { parse_mode: "HTML", reply_markup: keyboard });
+  }
+});
+
+/** 🔔 Waiting list: HUMAN + unclaimed, paginated (oldest wait first). */
+cskhHandler.callbackQuery(/^cskh:waiting:(?::?page:)?(\d+)$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const allowed = await requirePermission(ctx, "conversation.view");
+  if (!allowed) return;
+
+  const page = Number(ctx.match?.[1] || "1");
+  const convs = (await prisma.conversation.findMany({
+    where: { mode: "HUMAN", claimedById: null },
+    include: { customer: true },
+    orderBy: { updatedAt: "asc" }
+  })) as unknown as ConversationWithCustomer[];
+
+  const { pageItems, totalPages } = paginate(convs, page);
+  const contextMap = await loadCustomerContext(pageItems);
+
+  const kb = new InlineKeyboard();
+  if (convs.length === 0) {
+    kb.text("🏠 Menu CSKH", "cskh:home");
+    await ctx.reply(`🔔 Hiện không có khách nào đang chờ hỗ trợ.`, { reply_markup: kb });
+    return;
+  }
+
+  for (const conv of pageItems) {
+    const waitedMinutes = Math.floor((Date.now() - new Date(conv.updatedAt).getTime()) / 60000);
+    kb.text(waitingRowText(conv, contextMap.get(conv.customerId)?.need, waitedMinutes), `cskh:preview:${conv.customerId}`).row();
+  }
+  const footer = paginationKeyboard("cskh:waiting", page, totalPages);
+  for (const row of footer.inline_keyboard) {
+    kb.row();
+    const last = kb.inline_keyboard[kb.inline_keyboard.length - 1];
+    for (const btn of row) last?.push(btn);
+  }
+
+  const text = `🔔 <b>Khách đang chờ (${convs.length})</b> — trang ${page}/${totalPages}`;
+  try {
+    await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: kb });
+  } catch {
+    await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb });
+  }
+});
+
+/** 💬 Active list: HUMAN + claimed, paginated (newest first). */
+cskhHandler.callbackQuery(/^cskh:active:(?::?page:)?(\d+)$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const allowed = await requirePermission(ctx, "conversation.view");
+  if (!allowed) return;
+
+  const page = Number(ctx.match?.[1] || "1");
+  const me = String(ctx.from?.id || "");
+  const convs = (await prisma.conversation.findMany({
+    where: { mode: "HUMAN", claimedById: { not: null } },
+    include: { customer: true },
+    orderBy: { updatedAt: "desc" }
+  })) as unknown as ConversationWithCustomer[];
+
+  const { pageItems, totalPages } = paginate(convs, page);
+  const contextMap = await loadCustomerContext(pageItems);
+
+  const kb = new InlineKeyboard();
+  if (convs.length === 0) {
+    kb.text("🏠 Menu CSKH", "cskh:home");
+    await ctx.reply(`💬 Hiện không có cuộc hỗ trợ nào đang hoạt động.`, { reply_markup: kb });
+    return;
+  }
+
+  const lines: string[] = [];
+  for (const conv of pageItems) {
+    lines.push(activeRowText(conv, { isMine: conv.claimedById === me, need: contextMap.get(conv.customerId)?.need }));
+    kb.text(shortCustomerLabel(conv.customer), `cskh:preview:${conv.customerId}`).row();
+  }
+  const footer = paginationKeyboard("cskh:active", page, totalPages);
+  kb.row();
+  const last = kb.inline_keyboard[kb.inline_keyboard.length - 1];
+  for (const btn of footer.inline_keyboard[0] || []) last?.push(btn);
+
+  const text = `💬 <b>Đang hỗ trợ (${convs.length})</b> — trang ${page}/${totalPages}\n\n${lines.join("\n")}`;
+  try {
+    await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: kb });
+  } catch {
+    await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb });
+  }
+});
+
+/** 👤 Customer preview (basic; reply-mode belongs to C2/C3). */
+cskhHandler.callbackQuery(/^cskh:preview:([a-zA-Z0-9_-]+)$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const allowed = await requirePermission(ctx, "conversation.view");
+  if (!allowed) return;
+
+  const customerId = ctx.match?.[1];
+  if (!customerId) return;
+
+  const conv = (await prisma.conversation.findUnique({
+    where: { customerId },
+    include: { customer: true }
+  })) as unknown as ConversationWithCustomer | null;
+  if (!conv) {
+    await ctx.reply("❌ Không tìm thấy khách này.");
+    return;
+  }
+
+  const contextMap = await loadCustomerContext([conv]);
+  const text = renderCustomerPreviewText(conv, contextMap.get(customerId));
+  try {
+    await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: getCustomerPreviewKeyboard(conv) });
+  } catch {
+    await ctx.reply(text, { parse_mode: "HTML", reply_markup: getCustomerPreviewKeyboard(conv) });
+  }
+});
+
+/** ❓ Contextual CSKH help (short; no giant command manual). */
+cskhHandler.callbackQuery("cskh:menu:help", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const allowed = await requirePermission(ctx, "conversation.view");
+  if (!allowed) return;
+
+  const text =
+    `❓ <b>HƯỚNG DẪN CSKH</b>\n\n` +
+    `• 🔔 <b>Khách đang chờ</b>: khách cần hỗ trợ trực tiếp, chưa ai nhận.\n` +
+    `• 💬 <b>Đang hỗ trợ</b>: các cuộc hỗ trợ đang chạy và người phụ trách.\n` +
+    `• Bấm vào một khách để xem thông tin và ✅ <b>Nhận khách</b>.\n` +
+    `• Sau khi nhận: <code>/msg &lt;ID_Khách&gt; &lt;nội dung&gt;</code> để trả lời (media ghi caption tương tự).\n` +
+    `• Hoàn tất: <code>/release &lt;ID_Khách&gt;</code> trả khách về AI tự động.\n\n` +
+    `<i>Nút bấm chỉ là giao diện — mọi hành động đều được kiểm tra quyền phía server.</i>`;
+  const kb = new InlineKeyboard().text("🏠 Menu CSKH", "cskh:home");
+  try {
+    await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: kb });
+  } catch {
+    await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb });
+  }
 });
 
 cskhHandler.callbackQuery("cskh:menu:mytickets", async (ctx) => {
