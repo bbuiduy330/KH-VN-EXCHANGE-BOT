@@ -2,38 +2,57 @@ import { InlineKeyboard } from "grammy";
 import { Quote, Order, ExchangeRate } from "@prisma/client";
 import { QuoteService } from "../../modules/quotes/quote-service.js";
 import { MoneyService } from "../../modules/money/money-service.js";
+import {
+  DEFAULT_LOCALE,
+  LOCALE_LABELS,
+  SUPPORTED_LOCALES,
+  SupportedLocale,
+  resolveLocale,
+  t
+} from "../../modules/i18n/locales.js";
 
 /**
- * Customer-facing Vietnamese labels for active order statuses.
+ * Main customer menu. Receiving-account entry is NOT here — those details
+ * belong to the order flow only. Includes 🌐 Language.
  */
-const ORDER_STATUS_LABELS: Record<string, string> = {
-  WAITING_PAYMENT: "⏳ Chờ bạn chuyển khoản",
-  CUSTOMER_SENT_BILL: "📸 Đã nhận biên lai — chờ đối soát",
-  WAITING_ADMIN_VERIFY: "🔍 Nhân viên đang đối soát biên lai",
-  PAYMENT_CONFIRMED: "✅ Đã xác nhận thanh toán — chờ giải ngân",
-  WAITING_PAYOUT: "💸 Đang chờ chuyển tiền ra",
-  PAYOUT_SENT: "💰 Đã chuyển tiền — chờ bạn xác nhận",
-  MANUAL_REVIEW: "🛠 Đơn đang được xử lý thủ công",
-  SUSPICIOUS: "⚠️ Đơn cần kiểm tra thêm"
-};
-
-export function getCustomerMenuKeyboard(): InlineKeyboard {
+export function getCustomerMenuKeyboard(locale: SupportedLocale | string = DEFAULT_LOCALE): InlineKeyboard {
+  const loc = resolveLocale(locale);
   return new InlineKeyboard()
-    .text("💱 Đổi tiền", "customer:menu:quote")
-    .text("📦 Đơn của tôi", "customer:menu:orders")
+    .text(t(loc, "menu.exchange"), "customer:menu:quote")
+    .text(t(loc, "menu.orders"), "customer:menu:orders")
     .row()
-    .text("💬 Hỗ trợ", "customer:menu:support");
+    .text(t(loc, "menu.support"), "customer:menu:support")
+    .text(t(loc, "menu.language"), "customer:menu:language");
+}
+
+/** Language selector keyboard (vi/en/km/zh). */
+export function getLanguageSelectorKeyboard(): InlineKeyboard {
+  const kb = new InlineKeyboard();
+  // Two rows of two
+  kb.text(LOCALE_LABELS.vi, "customer:lang:vi")
+    .text(LOCALE_LABELS.en, "customer:lang:en")
+    .row()
+    .text(LOCALE_LABELS.km, "customer:lang:km")
+    .text(LOCALE_LABELS.zh, "customer:lang:zh");
+  return kb;
+}
+
+/** Optional first-time language chooser (same buttons). */
+export function getFirstTimeLanguageKeyboard(): InlineKeyboard {
+  return getLanguageSelectorKeyboard();
 }
 
 /**
- * Contextual button used INSIDE the order flow (after bill upload / on order
- * card) to collect the customer's payout account for a known target currency.
- * Kept out of the main menu by design: receiving/payout details belong to the
- * order flow only.
+ * Contextual bank-account wizard button used inside Order flow.
+ * Receiving/payout details belong to the order flow only.
  */
-export function getBankWizardKeyboard(currency: string): InlineKeyboard {
+export function getBankWizardKeyboard(
+  currency: string,
+  locale: SupportedLocale | string = DEFAULT_LOCALE
+): InlineKeyboard {
+  const loc = resolveLocale(locale);
   return new InlineKeyboard().text(
-    `🏦 Nhập tài khoản nhận ${currency}`,
+    t(loc, "order.bank_btn", { currency }),
     `customer:bank:wiz:${currency}`
   );
 }
@@ -41,8 +60,13 @@ export function getBankWizardKeyboard(currency: string): InlineKeyboard {
 /**
  * Rates-first welcome for customers without any active transaction.
  * Two-way USD/VND only, customer-facing (no buy/sell terminology).
+ * Labels localized; numeric values from MoneyService unchanged.
  */
-export async function renderCustomerWelcomeText(name: string): Promise<string> {
+export async function renderCustomerWelcomeText(
+  name: string,
+  locale: SupportedLocale | string = DEFAULT_LOCALE
+): Promise<string> {
+  const loc = resolveLocale(locale);
   let ratesBlock = "";
   try {
     const allRates: ExchangeRate[] = await QuoteService.getAllRates();
@@ -60,35 +84,40 @@ export async function renderCustomerWelcomeText(name: string): Promise<string> {
         `1 USD = ${MoneyService.formatAmount(effectiveSell, "VND")} VND\n`;
     }
   } catch {
-    ratesBlock = `Tỷ giá được cập nhật liên tục theo thị trường.\n`;
+    ratesBlock = `${t(loc, "welcome.rates_missing")}\n`;
   }
 
   return (
-    `👋 <b>Xin chào ${name || "Quý khách"}!</b>\n\n` +
-    `💱 <b>TỶ GIÁ HÔM NAY</b>\n\n` +
+    `${t(loc, "welcome.hello", { name: name || "" })}\n\n` +
+    `${t(loc, "welcome.rates_title")}\n\n` +
     ratesBlock +
-    `\nAnh/chị chỉ cần nhắn tự nhiên:\n` +
-    `• <i>100 đô</i>\n` +
-    `• <i>500$ lấy tiền Việt</i>\n` +
-    `• <i>10 triệu lấy đô</i>\n` +
-    `• <i>20tr đổi USD</i>\n\n` +
-    `🤖 Trợ lý AI và đội ngũ CSKH luôn sẵn sàng hỗ trợ trực tiếp tại khung chat này!`
+    `\n${t(loc, "welcome.examples_intro")}\n` +
+    `${t(loc, "welcome.example_1")}\n` +
+    `${t(loc, "welcome.example_2")}\n` +
+    `${t(loc, "welcome.example_3")}\n` +
+    `${t(loc, "welcome.example_4")}\n\n` +
+    t(loc, "welcome.footer")
   );
 }
 
 /**
  * Active order status view shown instead of the generic welcome.
  */
-export async function renderActiveOrderText(order: Order): Promise<string> {
-  const statusLabel = ORDER_STATUS_LABELS[order.status] || order.status;
+export async function renderActiveOrderText(
+  order: Order,
+  locale: SupportedLocale | string = DEFAULT_LOCALE
+): Promise<string> {
+  const loc = resolveLocale(locale);
+  const statusKey = `status.${order.status}`;
+  const statusLabel = t(loc, statusKey);
   const srcAmt = MoneyService.formatAmount(order.sourceAmount, order.sourceCurrency);
   const tgtAmt = MoneyService.formatAmount(order.targetAmount, order.targetCurrency);
 
   let msg =
-    `📦 <b>ĐƠN HÀNG CỦA BẠN ĐANG XỬ LÝ</b>\n\n` +
-    `• Mã đơn: <code>${order.id}</code>\n` +
-    `• Đổi: <b>${srcAmt} ${order.sourceCurrency}</b> ➔ <b>${tgtAmt} ${order.targetCurrency}</b>\n` +
-    `• Trạng thái: <b>${statusLabel}</b>\n`;
+    `${t(loc, "order.active_title")}\n\n` +
+    `${t(loc, "order.id", { id: order.id })}\n` +
+    `${t(loc, "order.exchange", { src: `${srcAmt} ${order.sourceCurrency}`, tgt: `${tgtAmt} ${order.targetCurrency}` })}\n` +
+    `${t(loc, "order.status", { status: statusLabel === statusKey ? order.status : statusLabel })}\n`;
 
   if (order.status === "WAITING_PAYMENT") {
     const recv = order.receivingAccountSnapshot as {
@@ -99,14 +128,14 @@ export async function renderActiveOrderText(order: Order): Promise<string> {
 
     if (recv?.accountNumber) {
       msg +=
-        `\n💳 <b>THÔNG TIN CHUYỂN KHOẢN:</b>\n` +
-        `• Ngân hàng: <b>${recv.bankName || "N/A"}</b>\n` +
-        `• Chủ tài khoản: <b>${recv.accountName || "N/A"}</b>\n` +
-        `• Số tài khoản: <code>${recv.accountNumber}</code>\n` +
-        `• Số tiền: <b>${srcAmt} ${order.sourceCurrency}</b>\n\n` +
-        `Sau khi chuyển khoản, anh/chị chỉ cần <b>gửi ảnh biên lai</b> vào khung chat này.`;
+        `\n${t(loc, "order.pay_title")}\n` +
+        `${t(loc, "order.pay_bank", { bank: recv.bankName || "N/A" })}\n` +
+        `${t(loc, "order.pay_name", { name: recv.accountName || "N/A" })}\n` +
+        `${t(loc, "order.pay_number", { number: recv.accountNumber })}\n` +
+        `${t(loc, "order.pay_amount", { amount: `${srcAmt} ${order.sourceCurrency}` })}\n\n` +
+        t(loc, "order.pay_bill_hint");
     } else {
-      msg += `\nVui lòng chờ nhân viên gửi thông tin chuyển khoản chính thức.`;
+      msg += `\n${t(loc, "order.pay_wait")}`;
     }
   }
 
@@ -115,8 +144,14 @@ export async function renderActiveOrderText(order: Order): Promise<string> {
 
 /**
  * Shared customer quote card (used by chat flow and /start resume).
+ * Labels localized; numeric values from MoneyService unchanged.
  */
-export function renderQuoteCard(quote: Quote, expiryMinutes: number): string {
+export function renderQuoteCard(
+  quote: Quote,
+  expiryMinutes: number,
+  locale: SupportedLocale | string = DEFAULT_LOCALE
+): string {
+  const loc = resolveLocale(locale);
   const rateDisplay = MoneyService.formatEffectiveRate(
     quote.sourceCurrency,
     quote.targetCurrency,
@@ -126,12 +161,33 @@ export function renderQuoteCard(quote: Quote, expiryMinutes: number): string {
   const formattedTgt = MoneyService.formatAmount(quote.targetAmount, quote.targetCurrency);
 
   return (
-    `📊 <b>BÁO GIÁ ĐỔI TIỀN TỆ</b>\n\n` +
-    `• Quý khách gửi: <b>${formattedSrc} ${quote.sourceCurrency}</b>\n` +
-    `• Quý khách nhận: <b>${formattedTgt} ${quote.targetCurrency}</b>\n` +
-    `• Tỷ giá áp dụng: <b>${rateDisplay}</b>\n` +
-    `• Phí dịch vụ: <b>${quote.fee} ${quote.feeCurrency}</b>\n` +
-    `• Hiệu lực: <i>${expiryMinutes} phút</i>\n\n` +
-    `Bấm nút dưới đây để tạo đơn và nhận tài khoản chuyển tiền:`
+    `${t(loc, "quote.title")}\n\n` +
+    `${t(loc, "quote.send", { src: `${formattedSrc} ${quote.sourceCurrency}` })}\n` +
+    `${t(loc, "quote.receive", { tgt: `${formattedTgt} ${quote.targetCurrency}` })}\n` +
+    `${t(loc, "quote.rate", { rate: rateDisplay })}\n` +
+    `${t(loc, "quote.fee", { fee: `${quote.fee} ${quote.feeCurrency}` })}\n` +
+    `${t(loc, "quote.expiry", { minutes: expiryMinutes })}\n\n` +
+    t(loc, "quote.confirm_hint")
   );
 }
+
+/** Support-mode banner text. */
+export function renderSupportActiveText(locale: SupportedLocale | string = DEFAULT_LOCALE): string {
+  const loc = resolveLocale(locale);
+  return `${t(loc, "support.active_title")}\n\n${t(loc, "support.active_body")}`;
+}
+
+/** Keyboard shown while customer is in HUMAN support. */
+export function getSupportModeKeyboard(locale: SupportedLocale | string = DEFAULT_LOCALE): InlineKeyboard {
+  const loc = resolveLocale(locale);
+  return new InlineKeyboard()
+    .text(t(loc, "menu.exit_support"), "customer:support:exit")
+    .row()
+    .text(t(loc, "menu.exchange"), "customer:menu:quote")
+    .text(t(loc, "menu.orders"), "customer:menu:orders")
+    .row()
+    .text(t(loc, "menu.support"), "customer:menu:support")
+    .text(t(loc, "menu.language"), "customer:menu:language");
+}
+
+export { SUPPORTED_LOCALES, LOCALE_LABELS };

@@ -72,3 +72,49 @@ export async function sendToAdminNotificationChat(
     return false;
   }
 }
+
+/**
+ * Telegram-native media copy (no download/re-upload).
+ * Used for HUMAN support media relay in both directions.
+ * Preserves captions when the original message had one.
+ */
+export async function copyMessageToChat(
+  fromChatId: string | number,
+  messageId: number,
+  toChatId: string | number
+): Promise<boolean> {
+  if (!botInstance) {
+    logger.warn({ fromChatId, toChatId, messageId }, "copyMessageToChat: bot instance not initialized");
+    return false;
+  }
+  const from = String(fromChatId).trim();
+  const to = String(toChatId).trim();
+  if (!from || !to || !messageId) return false;
+
+  try {
+    await botInstance.api.copyMessage(to, from, messageId);
+    return true;
+  } catch (err: any) {
+    logger.warn(
+      { err: err?.message, fromChatId: from, toChatId: to, messageId },
+      "copyMessageToChat failed"
+    );
+    return false;
+  }
+}
+
+export async function copyMessageToStaff(
+  staffTelegramId: string,
+  fromChatId: string | number,
+  messageId: number
+): Promise<boolean> {
+  return copyMessageToChat(fromChatId, messageId, staffTelegramId);
+}
+
+export async function copyMessageToCustomer(
+  customerTelegramId: string,
+  fromChatId: string | number,
+  messageId: number
+): Promise<boolean> {
+  return copyMessageToChat(fromChatId, messageId, customerTelegramId);
+}

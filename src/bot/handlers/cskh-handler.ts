@@ -4,14 +4,14 @@ import { requirePermission } from "../middleware/permissions.js";
 import { ConversationService } from "../../modules/conversation/conversation-service.js";
 import { OrderService } from "../../modules/orders/order-service.js";
 import { prisma } from "../../database/client.js";
-import { sendToCustomer } from "../notifications.js";
+import { sendToCustomer, copyMessageToCustomer } from "../notifications.js";
 import { getCskhMenuKeyboard, renderCskhStartText } from "../menus/cskh-menu.js";
 
 export const cskhHandler = new Composer<BotContext>();
 
 export async function showCskhStart(ctx: BotContext) {
   const staff = ctx.identity?.staff;
-  const staffName = staff?.name || "Nhân viên CSKH";
+  const staffName = staff?.name || "NhĂ¢n viĂªn CSKH";
   const text = renderCskhStartText(staffName);
   const keyboard = getCskhMenuKeyboard();
   await ctx.reply(text, { parse_mode: "HTML", reply_markup: keyboard });
@@ -24,23 +24,23 @@ cskhHandler.command("tickets", async (ctx) => {
 
   const tickets = await ConversationService.getActiveTickets();
   if (tickets.length === 0) {
-    return ctx.reply("📋 Hiện không có ticket nào đang ở chế độ HUMAN.", {
+    return ctx.reply("đŸ“‹ Hiá»‡n khĂ´ng cĂ³ ticket nĂ o Ä‘ang á»Ÿ cháº¿ Ä‘á»™ HUMAN.", {
       reply_markup: getCskhMenuKeyboard()
     });
   }
 
-  let msg = `📋 <b>DANH SÁCH TICKETS ĐANG HỖ TRỢ (${tickets.length}):</b>\n\n`;
+  let msg = `đŸ“‹ <b>DANH SĂCH TICKETS ÄANG Há»– TRá»¢ (${tickets.length}):</b>\n\n`;
   const keyboard = new InlineKeyboard();
 
   for (const t of tickets) {
     const isClaimedByMe = t.claimedById === String(ctx.from?.id);
-    const status = isClaimedByMe ? "👉 Bạn đang nhận" : t.claimedById ? `Đã gán: ${t.claimedById}` : "Chưa gán";
-    msg += `• Khách: <code>${t.customerId}</code> | ${status}\n`;
+    const status = isClaimedByMe ? "đŸ‘‰ Báº¡n Ä‘ang nháº­n" : t.claimedById ? `ÄĂ£ gĂ¡n: ${t.claimedById}` : "ChÆ°a gĂ¡n";
+    msg += `â€¢ KhĂ¡ch: <code>${t.customerId}</code> | ${status}\n`;
 
     if (!t.claimedById) {
-      keyboard.text(`🙋 Nhận: ${t.customerId}`, `cskh:ticket:claim:${t.customerId}`).row();
+      keyboard.text(`đŸ™‹ Nháº­n: ${t.customerId}`, `cskh:ticket:claim:${t.customerId}`).row();
     } else if (isClaimedByMe) {
-      keyboard.text(`🤖 Trả về AI: ${t.customerId}`, `cskh:ticket:release:${t.customerId}`).row();
+      keyboard.text(`đŸ¤– Tráº£ vá» AI: ${t.customerId}`, `cskh:ticket:release:${t.customerId}`).row();
     }
   }
 
@@ -53,13 +53,13 @@ cskhHandler.command("claim", async (ctx) => {
   if (!allowed) return;
 
   const customerId = ctx.match?.trim();
-  if (!customerId) return ctx.reply("Cú pháp: <code>/claim &lt;ID_Khách&gt;</code>", { parse_mode: "HTML" });
+  if (!customerId) return ctx.reply("CĂº phĂ¡p: <code>/claim &lt;ID_KhĂ¡ch&gt;</code>", { parse_mode: "HTML" });
 
   const staffTelegramId = String(ctx.from?.id || "");
   try {
     await ConversationService.claim(customerId, staffTelegramId, ctx.identity?.userType || "CSKH");
   } catch (err: any) {
-    return ctx.reply(`⚠️ ${err.message}`);
+    return ctx.reply(`â ï¸ ${err.message}`);
   }
 
   // Notify customer without revealing staff's personal info
@@ -67,14 +67,14 @@ cskhHandler.command("claim", async (ctx) => {
   if (customer) {
     await sendToCustomer(
       customer.telegramId,
-      `💬 <b>Bộ phận CSKH:</b>\nEm xin chào anh/chị, em đã tiếp nhận hỗ trợ ạ. Anh/chị cần hỗ trợ thông tin gì ạ?`
+      `đŸ’¬ <b>Bá»™ pháº­n CSKH:</b>\nEm xin chĂ o anh/chá»‹, em Ä‘Ă£ tiáº¿p nháº­n há»— trá»£ áº¡. Anh/chá»‹ cáº§n há»— trá»£ thĂ´ng tin gĂ¬ áº¡?`
     );
   }
 
   await ctx.reply(
-    `✅ Đã nhận hỗ trợ khách <code>${customerId}</code>.\n` +
-      `• Chế độ chuyển sang: <b>HUMAN</b> (AI tạm dừng trả lời tự động).\n` +
-      `• Dùng lệnh <code>/msg ${customerId} &lt;nội dung&gt;</code> để nhắn tin trực tiếp cho khách.`,
+    `âœ… ÄĂ£ nháº­n há»— trá»£ khĂ¡ch <code>${customerId}</code>.\n` +
+      `â€¢ Cháº¿ Ä‘á»™ chuyá»ƒn sang: <b>HUMAN</b> (AI táº¡m dá»«ng tráº£ lá»i tá»± Ä‘á»™ng).\n` +
+      `â€¢ DĂ¹ng lá»‡nh <code>/msg ${customerId} &lt;ná»™i dung&gt;</code> Ä‘á»ƒ nháº¯n tin trá»±c tiáº¿p cho khĂ¡ch.`,
     { parse_mode: "HTML" }
   );
 });
@@ -85,7 +85,7 @@ cskhHandler.command("release", async (ctx) => {
   if (!allowed) return;
 
   const customerId = ctx.match?.trim();
-  if (!customerId) return ctx.reply("Cú pháp: <code>/release &lt;ID_Khách&gt;</code>", { parse_mode: "HTML" });
+  if (!customerId) return ctx.reply("CĂº phĂ¡p: <code>/release &lt;ID_KhĂ¡ch&gt;</code>", { parse_mode: "HTML" });
 
   const staffTelegramId = String(ctx.from?.id || "");
   try {
@@ -96,7 +96,7 @@ cskhHandler.command("release", async (ctx) => {
       ctx.identity?.staff?.permissions || []
     );
   } catch (err: any) {
-    return ctx.reply(`❌ ${err.message}`);
+    return ctx.reply(`âŒ ${err.message}`);
   }
 
   // Notify customer
@@ -104,13 +104,13 @@ cskhHandler.command("release", async (ctx) => {
   if (customer) {
     await sendToCustomer(
       customer.telegramId,
-      `🤖 <b>Hệ thống:</b> Cuộc trò chuyện đã được chuyển về trợ lý AI tự động. Chúc quý khách một ngày tốt lành!`
+      `đŸ¤– <b>Há»‡ thá»‘ng:</b> Cuá»™c trĂ² chuyá»‡n Ä‘Ă£ Ä‘Æ°á»£c chuyá»ƒn vá» trá»£ lĂ½ AI tá»± Ä‘á»™ng. ChĂºc quĂ½ khĂ¡ch má»™t ngĂ y tá»‘t lĂ nh!`
     );
   }
 
   await ctx.reply(
-    `✅ Đã giải phóng khách <code>${customerId}</code>.\n` +
-      `• Chế độ trò chuyện chuyển về: <b>AUTO</b> (AI tự động tiếp quản).`,
+    `âœ… ÄĂ£ giáº£i phĂ³ng khĂ¡ch <code>${customerId}</code>.\n` +
+      `â€¢ Cháº¿ Ä‘á»™ trĂ² chuyá»‡n chuyá»ƒn vá»: <b>AUTO</b> (AI tá»± Ä‘á»™ng tiáº¿p quáº£n).`,
     { parse_mode: "HTML" }
   );
 });
@@ -121,10 +121,10 @@ cskhHandler.command("msg", async (ctx) => {
   if (!allowed) return;
 
   const text = ctx.match?.trim();
-  if (!text) return ctx.reply("Cú pháp: <code>/msg &lt;ID_Khách&gt; &lt;Nội dung gửi khách&gt;</code>", { parse_mode: "HTML" });
+  if (!text) return ctx.reply("CĂº phĂ¡p: <code>/msg &lt;ID_KhĂ¡ch&gt; &lt;Ná»™i dung gá»­i khĂ¡ch&gt;</code>", { parse_mode: "HTML" });
 
   const firstSpace = text.indexOf(" ");
-  if (firstSpace === -1) return ctx.reply("Vui lòng nhập nội dung sau ID khách.");
+  if (firstSpace === -1) return ctx.reply("Vui lĂ²ng nháº­p ná»™i dung sau ID khĂ¡ch.");
 
   const customerId = text.substring(0, firstSpace).trim();
   const content = text.substring(firstSpace + 1).trim();
@@ -139,7 +139,7 @@ cskhHandler.command("msg", async (ctx) => {
   );
 
   if (!canSend) {
-    return ctx.reply("⛔ Bạn chỉ có thể gửi tin nhắn cho khách hàng mà bạn đã tiếp nhận (Claim). Dùng /claim trước nếu cần tiếp nhận.");
+    return ctx.reply("â›” Báº¡n chá»‰ cĂ³ thá»ƒ gá»­i tin nháº¯n cho khĂ¡ch hĂ ng mĂ  báº¡n Ä‘Ă£ tiáº¿p nháº­n (Claim). DĂ¹ng /claim trÆ°á»›c náº¿u cáº§n tiáº¿p nháº­n.");
   }
 
   // Record outbound message in database as PENDING delivery
@@ -154,23 +154,23 @@ cskhHandler.command("msg", async (ctx) => {
   const customer = await prisma.customer.findUnique({ where: { id: customerId } });
   if (customer) {
     try {
-      const sent = await sendToCustomer(customer.telegramId, `💬 <b>Bộ phận CSKH:</b>\n${content}`);
+      const sent = await sendToCustomer(customer.telegramId, `đŸ’¬ <b>Bá»™ pháº­n CSKH:</b>\n${content}`);
       if (sent) {
         await ConversationService.markMessageSent(msgRecord.id, Date.now());
-        await ctx.reply(`✅ Đã gửi tin nhắn đến khách <code>${customerId}</code>.`, { parse_mode: "HTML" });
+        await ctx.reply(`âœ… ÄĂ£ gá»­i tin nháº¯n Ä‘áº¿n khĂ¡ch <code>${customerId}</code>.`, { parse_mode: "HTML" });
       } else {
         await ConversationService.markMessageFailed(msgRecord.id, "Telegram send returned false");
-        await ctx.reply(`⚠️ Không thể chuyển tin nhắn tới Telegram khách (ID: <code>${customer.telegramId}</code>).`, {
+        await ctx.reply(`â ï¸ KhĂ´ng thá»ƒ chuyá»ƒn tin nháº¯n tá»›i Telegram khĂ¡ch (ID: <code>${customer.telegramId}</code>).`, {
           parse_mode: "HTML"
         });
       }
     } catch (sendErr: any) {
       await ConversationService.markMessageFailed(msgRecord.id, sendErr.message);
-      await ctx.reply(`❌ Lỗi gửi tin nhắn Telegram: ${sendErr.message}`, { parse_mode: "HTML" });
+      await ctx.reply(`âŒ Lá»—i gá»­i tin nháº¯n Telegram: ${sendErr.message}`, { parse_mode: "HTML" });
     }
   } else {
     await ConversationService.markMessageFailed(msgRecord.id, "Customer not found");
-    await ctx.reply(`❌ Không tìm thấy thông tin khách hàng <code>${customerId}</code>.`, { parse_mode: "HTML" });
+    await ctx.reply(`âŒ KhĂ´ng tĂ¬m tháº¥y thĂ´ng tin khĂ¡ch hĂ ng <code>${customerId}</code>.`, { parse_mode: "HTML" });
   }
 });
 
@@ -180,10 +180,10 @@ cskhHandler.command("note", async (ctx) => {
   if (!allowed) return;
 
   const text = ctx.match?.trim();
-  if (!text) return ctx.reply("Cú pháp: <code>/note &lt;ID_Khách&gt; &lt;Nội dung ghi chú&gt;</code>", { parse_mode: "HTML" });
+  if (!text) return ctx.reply("CĂº phĂ¡p: <code>/note &lt;ID_KhĂ¡ch&gt; &lt;Ná»™i dung ghi chĂº&gt;</code>", { parse_mode: "HTML" });
 
   const firstSpace = text.indexOf(" ");
-  if (firstSpace === -1) return ctx.reply("Vui lòng nhập nội dung ghi chú sau ID khách.");
+  if (firstSpace === -1) return ctx.reply("Vui lĂ²ng nháº­p ná»™i dung ghi chĂº sau ID khĂ¡ch.");
 
   const customerId = text.substring(0, firstSpace).trim();
   const noteContent = text.substring(firstSpace + 1).trim();
@@ -191,7 +191,7 @@ cskhHandler.command("note", async (ctx) => {
 
   // Save internal note. IMPORTANT: NEVER send to customer!
   await ConversationService.addInternalNote(customerId, staffTelegramId, noteContent);
-  await ctx.reply(`📝 <b>Đã thêm ghi chú nội bộ cho khách <code>${customerId}</code>.</b>\n<i>(Ghi chú chỉ hiển thị trong nội bộ nhân viên).</i>`, {
+  await ctx.reply(`đŸ“ <b>ÄĂ£ thĂªm ghi chĂº ná»™i bá»™ cho khĂ¡ch <code>${customerId}</code>.</b>\n<i>(Ghi chĂº chá»‰ hiá»ƒn thá»‹ trong ná»™i bá»™ nhĂ¢n viĂªn).</i>`, {
     parse_mode: "HTML"
   });
 });
@@ -202,22 +202,22 @@ cskhHandler.command("history", async (ctx) => {
   if (!allowed) return;
 
   const customerId = ctx.match?.trim();
-  if (!customerId) return ctx.reply("Cú pháp: <code>/history &lt;ID_Khách&gt;</code>", { parse_mode: "HTML" });
+  if (!customerId) return ctx.reply("CĂº phĂ¡p: <code>/history &lt;ID_KhĂ¡ch&gt;</code>", { parse_mode: "HTML" });
 
   const history = await ConversationService.getHistory(customerId);
-  let msg = `📜 <b>LỊCH SỬ TRAO ĐỔI VỚI KHÁCH: ${customerId}</b>\n` +
-    `• Chế độ: <b>${history.mode}</b>\n` +
-    `• Nhân viên nhận: <b>${history.claimedById || "Chưa gán"}</b>\n\n`;
+  let msg = `đŸ“œ <b>Lá»CH Sá»¬ TRAO Äá»”I Vá»I KHĂCH: ${customerId}</b>\n` +
+    `â€¢ Cháº¿ Ä‘á»™: <b>${history.mode}</b>\n` +
+    `â€¢ NhĂ¢n viĂªn nháº­n: <b>${history.claimedById || "ChÆ°a gĂ¡n"}</b>\n\n`;
 
-  msg += `<b>Tin nhắn gần đây:</b>\n`;
+  msg += `<b>Tin nháº¯n gáº§n Ä‘Ă¢y:</b>\n`;
   for (const m of history.messages.slice(-10)) {
     msg += `[${m.senderType}]: ${m.content}\n`;
   }
 
   if (history.notes.length > 0) {
-    msg += `\n<b>Ghi chú nội bộ:</b>\n`;
+    msg += `\n<b>Ghi chĂº ná»™i bá»™:</b>\n`;
     for (const n of history.notes.slice(-5)) {
-      msg += `• (${n.authorId}): ${n.content}\n`;
+      msg += `â€¢ (${n.authorId}): ${n.content}\n`;
     }
   }
 
@@ -227,20 +227,20 @@ cskhHandler.command("history", async (ctx) => {
 // /translate
 cskhHandler.command("translate", async (ctx) => {
   const text = ctx.match?.trim();
-  if (!text) return ctx.reply("Cú pháp: <code>/translate &lt;tiếng_anh|tiếng_khmer|tiếng_trung&gt; &lt;nội dung&gt;</code>", { parse_mode: "HTML" });
+  if (!text) return ctx.reply("CĂº phĂ¡p: <code>/translate &lt;tiáº¿ng_anh|tiáº¿ng_khmer|tiáº¿ng_trung&gt; &lt;ná»™i dung&gt;</code>", { parse_mode: "HTML" });
 
   const firstSpace = text.indexOf(" ");
-  if (firstSpace === -1) return ctx.reply("Vui lòng nhập ngôn ngữ và nội dung cần dịch.");
+  if (firstSpace === -1) return ctx.reply("Vui lĂ²ng nháº­p ngĂ´n ngá»¯ vĂ  ná»™i dung cáº§n dá»‹ch.");
 
   const targetLang = text.substring(0, firstSpace).trim();
   const sourceText = text.substring(firstSpace + 1).trim();
 
   const translated = await ConversationService.previewTranslation(sourceText, targetLang);
   await ctx.reply(
-    `🌐 <b>XEM TRƯỚC BẢN DỊCH (${targetLang}):</b>\n\n` +
-      `<i>Gốc:</i> ${sourceText}\n` +
-      `<i>Dịch:</i> <b>${translated}</b>\n\n` +
-      `Bạn có thể copy bản dịch trên để dùng trong /msg.`,
+    `đŸŒ <b>XEM TRÆ¯á»C Báº¢N Dá»CH (${targetLang}):</b>\n\n` +
+      `<i>Gá»‘c:</i> ${sourceText}\n` +
+      `<i>Dá»‹ch:</i> <b>${translated}</b>\n\n` +
+      `Báº¡n cĂ³ thá»ƒ copy báº£n dá»‹ch trĂªn Ä‘á»ƒ dĂ¹ng trong /msg.`,
     { parse_mode: "HTML" }
   );
 });
@@ -264,14 +264,14 @@ cskhHandler.callbackQuery(/^cskh:ticket:claim:(.+)$/, async (ctx) => {
     // disable the stale claim button when the original message is editable.
     try {
       await ctx.editMessageReplyMarkup({
-        reply_markup: new InlineKeyboard().text("✔️ Đã có nhân viên tiếp nhận", "cskh:noop")
+        reply_markup: new InlineKeyboard().text("âœ”ï¸ ÄĂ£ cĂ³ nhĂ¢n viĂªn tiáº¿p nháº­n", "cskh:noop")
       });
     } catch {
-      // Stale/too-old message cannot be edited — safe to ignore.
+      // Stale/too-old message cannot be edited â€” safe to ignore.
     }
     await ctx.reply(
-      `⚠️ Ticket này đã được nhân viên khác tiếp nhận trước đó.\n` +
-        `Vui lòng chọn khách hàng khác trong menu Hỗ trợ.`,
+      `â ï¸ Ticket nĂ y Ä‘Ă£ Ä‘Æ°á»£c nhĂ¢n viĂªn khĂ¡c tiáº¿p nháº­n trÆ°á»›c Ä‘Ă³.\n` +
+        `Vui lĂ²ng chá»n khĂ¡ch hĂ ng khĂ¡c trong menu Há»— trá»£.`,
       { parse_mode: "HTML" }
     );
     return;
@@ -279,23 +279,23 @@ cskhHandler.callbackQuery(/^cskh:ticket:claim:(.+)$/, async (ctx) => {
 
   try {
     await ctx.editMessageReplyMarkup({
-      reply_markup: new InlineKeyboard().text("✔️ Bạn đang hỗ trợ khách này", "cskh:noop")
+      reply_markup: new InlineKeyboard().text("âœ”ï¸ Báº¡n Ä‘ang há»— trá»£ khĂ¡ch nĂ y", "cskh:noop")
     });
   } catch {
-    // Stale/too-old message cannot be edited — safe to ignore.
+    // Stale/too-old message cannot be edited â€” safe to ignore.
   }
 
   const customer = await prisma.customer.findUnique({ where: { id: customerId } });
   if (customer) {
     await sendToCustomer(
       customer.telegramId,
-      `💬 <b>Bộ phận CSKH:</b>\nEm xin chào anh/chị, em đã tiếp nhận hỗ trợ ạ. Anh/chị cần hỗ trợ thông tin gì ạ?`
+      `đŸ’¬ <b>Bá»™ pháº­n CSKH:</b>\nEm xin chĂ o anh/chá»‹, em Ä‘Ă£ tiáº¿p nháº­n há»— trá»£ áº¡. Anh/chá»‹ cáº§n há»— trá»£ thĂ´ng tin gĂ¬ áº¡?`
     );
   }
 
   await ctx.reply(
-    `✅ Đã tiếp nhận khách <code>${customerId}</code> (Chế độ HUMAN).\n` +
-      `Dùng <code>/msg ${customerId} &lt;nội dung&gt;</code> để nhắn tin.`,
+    `âœ… ÄĂ£ tiáº¿p nháº­n khĂ¡ch <code>${customerId}</code> (Cháº¿ Ä‘á»™ HUMAN).\n` +
+      `DĂ¹ng <code>/msg ${customerId} &lt;ná»™i dung&gt;</code> Ä‘á»ƒ nháº¯n tin.`,
     { parse_mode: "HTML" }
   );
 });
@@ -316,12 +316,12 @@ cskhHandler.callbackQuery(/^cskh:ticket:release:(.+)$/, async (ctx) => {
     // Not owner / already released: friendly status instead of unhandled error.
     try {
       await ctx.editMessageReplyMarkup({
-        reply_markup: new InlineKeyboard().text("🔄 Trả về AI không thành công", "cskh:noop")
+        reply_markup: new InlineKeyboard().text("đŸ”„ Tráº£ vá» AI khĂ´ng thĂ nh cĂ´ng", "cskh:noop")
       });
     } catch {
-      // Stale/too-old message cannot be edited — safe to ignore.
+      // Stale/too-old message cannot be edited â€” safe to ignore.
     }
-    await ctx.reply(`⚠️ ${err.message}`);
+    await ctx.reply(`â ï¸ ${err.message}`);
     return;
   }
 
@@ -329,11 +329,11 @@ cskhHandler.callbackQuery(/^cskh:ticket:release:(.+)$/, async (ctx) => {
   if (customer) {
     await sendToCustomer(
       customer.telegramId,
-      `🤖 <b>Hệ thống:</b> Cuộc trò chuyện đã được chuyển về trợ lý AI tự động.`
+      `đŸ¤– <b>Há»‡ thá»‘ng:</b> Cuá»™c trĂ² chuyá»‡n Ä‘Ă£ Ä‘Æ°á»£c chuyá»ƒn vá» trá»£ lĂ½ AI tá»± Ä‘á»™ng.`
     );
   }
 
-  await ctx.reply(`✅ Đã hoàn tất hỗ trợ và chuyển khách <code>${customerId}</code> về AUTO AI.`, {
+  await ctx.reply(`âœ… ÄĂ£ hoĂ n táº¥t há»— trá»£ vĂ  chuyá»ƒn khĂ¡ch <code>${customerId}</code> vá» AUTO AI.`, {
     parse_mode: "HTML"
   });
 });
@@ -350,15 +350,15 @@ cskhHandler.callbackQuery("cskh:menu:tickets", async (ctx) => {
 
   const tickets = await ConversationService.getActiveTickets();
   if (tickets.length === 0) {
-    return ctx.reply("📋 Hiện không có ticket nào đang ở chế độ HUMAN.");
+    return ctx.reply("đŸ“‹ Hiá»‡n khĂ´ng cĂ³ ticket nĂ o Ä‘ang á»Ÿ cháº¿ Ä‘á»™ HUMAN.");
   }
 
-  let msg = `📋 <b>DANH SÁCH KHÁCH CHỜ HỖ TRỢ (${tickets.length}):</b>\n\n`;
+  let msg = `đŸ“‹ <b>DANH SĂCH KHĂCH CHá»œ Há»– TRá»¢ (${tickets.length}):</b>\n\n`;
   const keyboard = new InlineKeyboard();
   for (const t of tickets) {
-    msg += `• Khách: <code>${t.customerId}</code> | Người nhận: ${t.claimedById || "Chưa nhận"}\n`;
+    msg += `â€¢ KhĂ¡ch: <code>${t.customerId}</code> | NgÆ°á»i nháº­n: ${t.claimedById || "ChÆ°a nháº­n"}\n`;
     if (!t.claimedById) {
-      keyboard.text(`🙋 Nhận ${t.customerId}`, `cskh:ticket:claim:${t.customerId}`).row();
+      keyboard.text(`đŸ™‹ Nháº­n ${t.customerId}`, `cskh:ticket:claim:${t.customerId}`).row();
     }
   }
   await ctx.reply(msg, { parse_mode: "HTML", reply_markup: keyboard });
@@ -374,14 +374,14 @@ cskhHandler.callbackQuery("cskh:menu:mytickets", async (ctx) => {
   const myTickets = allTickets.filter((t: any) => t.claimedById === staffTelegramId);
 
   if (myTickets.length === 0) {
-    return ctx.reply("💬 Bạn hiện không tiếp nhận cuộc trò chuyện nào.");
+    return ctx.reply("đŸ’¬ Báº¡n hiá»‡n khĂ´ng tiáº¿p nháº­n cuá»™c trĂ² chuyá»‡n nĂ o.");
   }
 
-  let msg = `💬 <b>HỘI THOẠI BẠN ĐANG PHỤ TRÁCH (${myTickets.length}):</b>\n\n`;
+  let msg = `đŸ’¬ <b>Há»˜I THOáº I Báº N ÄANG PHá»¤ TRĂCH (${myTickets.length}):</b>\n\n`;
   const keyboard = new InlineKeyboard();
   for (const t of myTickets) {
-    msg += `• Khách: <code>${t.customerId}</code>\n`;
-    keyboard.text(`🤖 Trả về AI: ${t.customerId}`, `cskh:ticket:release:${t.customerId}`).row();
+    msg += `â€¢ KhĂ¡ch: <code>${t.customerId}</code>\n`;
+    keyboard.text(`đŸ¤– Tráº£ vá» AI: ${t.customerId}`, `cskh:ticket:release:${t.customerId}`).row();
   }
   await ctx.reply(msg, { parse_mode: "HTML", reply_markup: keyboard });
 });
@@ -392,9 +392,9 @@ cskhHandler.callbackQuery("cskh:menu:orders", async (ctx) => {
   if (!allowed) return;
 
   const orders = await OrderService.getAllOrders(10);
-  let msg = `📦 <b>DANH SÁCH 10 ĐƠN HÀNG MỚI NHẤT:</b>\n\n`;
+  let msg = `đŸ“¦ <b>DANH SĂCH 10 ÄÆ N HĂ€NG Má»I NHáº¤T:</b>\n\n`;
   for (const o of orders) {
-    msg += `• <b>${o.id}</b>: ${o.sourceAmount} ${o.sourceCurrency} ➔ ${o.targetAmount} ${o.targetCurrency} [<code>${o.status}</code>]\n`;
+    msg += `â€¢ <b>${o.id}</b>: ${o.sourceAmount} ${o.sourceCurrency} â” ${o.targetAmount} ${o.targetCurrency} [<code>${o.status}</code>]\n`;
   }
   await ctx.reply(msg, { parse_mode: "HTML" });
 });
@@ -402,9 +402,9 @@ cskhHandler.callbackQuery("cskh:menu:orders", async (ctx) => {
 cskhHandler.callbackQuery("cskh:menu:find_customer", async (ctx) => {
   await ctx.answerCallbackQuery();
   await ctx.reply(
-    `🔎 <b>TÌM KIẾM KHÁCH HÀNG:</b>\n` +
-      `Vui lòng sử dụng lệnh xem lịch sử:\n` +
-      `<code>/history &lt;ID_Khách&gt;</code>`,
+    `đŸ” <b>TĂŒM KIáº¾M KHĂCH HĂ€NG:</b>\n` +
+      `Vui lĂ²ng sá»­ dá»¥ng lá»‡nh xem lá»‹ch sá»­:\n` +
+      `<code>/history &lt;ID_KhĂ¡ch&gt;</code>`,
     { parse_mode: "HTML" }
   );
 });
@@ -412,10 +412,10 @@ cskhHandler.callbackQuery("cskh:menu:find_customer", async (ctx) => {
 cskhHandler.callbackQuery("cskh:menu:notes", async (ctx) => {
   await ctx.answerCallbackQuery();
   await ctx.reply(
-    `📝 <b>GHI CHÚ NỘI BỘ:</b>\n` +
-      `Thêm ghi chú bảo mật cho khách hàng bằng cú pháp:\n` +
-      `<code>/note &lt;ID_Khách&gt; &lt;Nội dung ghi chú&gt;</code>\n\n` +
-      `<i>Ghi chú chỉ lưu nội bộ, khách hàng không thể nhìn thấy.</i>`,
+    `đŸ“ <b>GHI CHĂ Ná»˜I Bá»˜:</b>\n` +
+      `ThĂªm ghi chĂº báº£o máº­t cho khĂ¡ch hĂ ng báº±ng cĂº phĂ¡p:\n` +
+      `<code>/note &lt;ID_KhĂ¡ch&gt; &lt;Ná»™i dung ghi chĂº&gt;</code>\n\n` +
+      `<i>Ghi chĂº chá»‰ lÆ°u ná»™i bá»™, khĂ¡ch hĂ ng khĂ´ng thá»ƒ nhĂ¬n tháº¥y.</i>`,
     { parse_mode: "HTML" }
   );
 });
@@ -423,9 +423,92 @@ cskhHandler.callbackQuery("cskh:menu:notes", async (ctx) => {
 cskhHandler.callbackQuery("cskh:menu:release_prompt", async (ctx) => {
   await ctx.answerCallbackQuery();
   await ctx.reply(
-    `🤖 <b>TRẢ VỀ TRỢ LÝ AI:</b>\n` +
-      `Để chuyển cuộc trò chuyện từ CSKH về cho AI tự động xử lý, dùng lệnh:\n` +
-      `<code>/release &lt;ID_Khách&gt;</code>`,
+    `đŸ¤– <b>TRáº¢ Vá»€ TRá»¢ LĂ AI:</b>\n` +
+      `Äá»ƒ chuyá»ƒn cuá»™c trĂ² chuyá»‡n tá»« CSKH vá» cho AI tá»± Ä‘á»™ng xá»­ lĂ½, dĂ¹ng lá»‡nh:\n` +
+      `<code>/release &lt;ID_KhĂ¡ch&gt;</code>`,
     { parse_mode: "HTML" }
   );
 });
+
+/**
+ * Staff media handler (photo/voice/document).
+ *
+ * SAFE path only: caption must include explicit `/msg <customerId>`
+ * (same authorization as text /msg via canStaffMessage).
+ * Bare media without an explicit customer id is NOT inferred — deferred to Phase C.
+ * Staff media must NEVER fall through to customer bill handling (router enforces this).
+ */
+export async function handleStaffMedia(ctx: BotContext): Promise<void> {
+  const caption = (ctx.message?.caption || "").trim();
+  const staffTelegramId = String(ctx.from?.id || "");
+
+  // Explicit-customer form: caption starts with /msg <customerId> [optional note]
+  const match = caption.match(/^\/msg\s+(\S+)(?:\s+(.*))?$/i);
+  if (!match) {
+    await ctx.reply(
+      `📎 <b>GỬI MEDIA CHO KHÁCH</b>\n\n` +
+        `Để gửi ảnh/voice/file cho khách, hãy ghi caption:\n` +
+        `<code>/msg &lt;ID_Khách&gt; [ghi chú tùy chọn]</code>\n\n` +
+        `<i>Phase B: bắt buộc nêu rõ ID khách. Chọn khách nhanh thuộc Phase C.</i>`,
+      { parse_mode: "HTML" }
+    );
+    return;
+  }
+
+  const customerId = match[1];
+  const note = (match[2] || "").trim();
+
+  const canSend = await ConversationService.canStaffMessage(
+    customerId,
+    staffTelegramId,
+    ctx.identity?.userType || "CSKH",
+    ctx.identity?.staff?.permissions || []
+  );
+
+  if (!canSend) {
+    await ctx.reply(
+      "⛔ Bạn chỉ có thể gửi media cho khách hàng mà bạn đã tiếp nhận (Claim). Dùng /claim trước nếu cần."
+    );
+    return;
+  }
+
+  const customer = await prisma.customer.findUnique({ where: { id: customerId } });
+  if (!customer) {
+    await ctx.reply(`❌ Không tìm thấy khách <code>${customerId}</code>.`, { parse_mode: "HTML" });
+    return;
+  }
+
+  const messageId = ctx.message?.message_id;
+  const fromChatId = ctx.chat?.id;
+  if (!messageId || !fromChatId) {
+    await ctx.reply("❌ Không đọc được media message.");
+    return;
+  }
+
+  // Record outbound stub (text note only; media is copied natively).
+  const msgRecord = await ConversationService.createOutboundMessage({
+    customerId,
+    senderId: staffTelegramId,
+    content: note ? `[media] ${note}` : "[media]",
+    senderType:
+      ctx.identity?.userType === "ADMIN" || ctx.identity?.userType === "SUPER_ADMIN" ? "ADMIN" : "CSKH"
+  });
+
+  try {
+    if (note) {
+      await sendToCustomer(customer.telegramId, `💬 <b>Bộ phận CSKH:</b>\n${note}`);
+    }
+    const copied = await copyMessageToCustomer(customer.telegramId, fromChatId, messageId);
+    if (copied) {
+      await ConversationService.markMessageSent(msgRecord.id, Date.now());
+      await ctx.reply(`✅ Đã gửi media đến khách <code>${customerId}</code>.`, { parse_mode: "HTML" });
+    } else {
+      await ConversationService.markMessageFailed(msgRecord.id, "copyMessage returned false");
+      await ctx.reply(`⚠️ Không thể chuyển media tới Telegram khách.`, { parse_mode: "HTML" });
+    }
+  } catch (err: any) {
+    await ConversationService.markMessageFailed(msgRecord.id, err?.message || "send failed");
+    await ctx.reply(`❌ Lỗi gửi media: ${err?.message || "unknown"}`, { parse_mode: "HTML" });
+  }
+}
+
