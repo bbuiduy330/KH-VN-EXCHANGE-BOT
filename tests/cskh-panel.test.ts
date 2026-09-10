@@ -125,6 +125,111 @@ describe("CSKH panel helpers (C1)", () => {
       customerId: "cktest0000000000000001",
       mode: "HUMAN",
       claimedById: "s1",
+
+import {
+  escapeHtml,
+  getCustomerDetailKeyboard,
+  getHistoryKeyboard,
+  messageLine,
+  renderCustomerDetailText,
+  renderHistoryText,
+  senderLabel,
+  shortTime,
+  staffDisplayName
+} from "../src/bot/menus/cskh-panel.js";
+
+describe("CSKH panel C2 helpers", () => {
+  it("senderLabel maps customer/bot/staff/system", () => {
+    expect(senderLabel("CUSTOMER")).toBe("👤 Khách");
+    expect(senderLabel("AI")).toBe("🤖 Bot");
+    expect(senderLabel("BOT")).toBe("🤖 Bot");
+    expect(senderLabel("CSKH")).toBe("👨‍💼 CSKH");
+    expect(senderLabel("ADMIN")).toBe("👨‍💼 CSKH");
+    expect(senderLabel("SYSTEM")).toBe("🛎 Hệ thống");
+  });
+
+  it("escapeHtml neutralizes tags/ampersands", () => {
+    expect(escapeHtml("<b>&</b>")).toBe("&lt;b&gt;&amp;&lt;/b&gt;");
+  });
+
+  it("shortTime formats and tolerates invalid", () => {
+    expect(shortTime("2026-01-01T09:05:00Z")).toMatch(/\d{2}:\d{2}/);
+    expect(shortTime("not-a-date")).toBe("");
+  });
+
+  it("staffDisplayName: name(role) > short id fallback > unassigned", () => {
+    expect(staffDisplayName({ name: "Long", role: "CSKH" })).toBe("Long (CSKH)");
+    expect(staffDisplayName({ name: "Long" })).toBe("Long");
+    expect(staffDisplayName(null, "tg_12345678")).toBe("#345678");
+    expect(staffDisplayName(null, null)).toBe("Chưa phân công");
+  });
+
+  it("messageLine renders sender, content, time", () => {
+    const line = messageLine({ senderType: "CUSTOMER", content: "100 do", createdAt: "2026-01-01T09:05:00Z" });
+    expect(line).toContain("👤 Khách");
+    expect(line).toContain("100 do");
+  });
+
+  it("detail text includes identity, owner, need, order, lastSeen", () => {
+    const conv = {
+      customerId: "cktest0000000000000001",
+      mode: "HUMAN",
+      claimedById: "tg_owner",
+      customer: customer({ fullName: "Tomy", username: "tomy" })
+    } as never;
+    const text = renderCustomerDetailText(conv, {
+      owner: "Long (CSKH)",
+      need: "100 USD → VND",
+      order: "Đơn …",
+      lastSeen: "09:05"
+    });
+    expect(text).toContain("👤 <b>Khách</b>: Tomy");
+    expect(text).toContain("🔗 @tomy");
+    expect(text).toContain("👨‍💼 Người phụ trách: Long (CSKH)");
+    expect(text).toContain("💱 Nhu cầu / báo giá: 100 USD → VND");
+    expect(text).toContain("📦 Đơn hàng");
+    expect(text).toContain("🕒");
+  });
+
+  it("detail keyboard: unclaimed shows claim, owned shows release, never both", () => {
+    const unclaimed = getCustomerDetailKeyboard(conversation({ mode: "HUMAN", claimedById: null }) as never);
+    const uButtons = unclaimed.inline_keyboard.flat().map((b) => b.text);
+    expect(uButtons).toContain("✅ Nhận khách");
+    expect(uButtons).not.toContain("↩️ Trả khách (kết thúc hỗ trợ)");
+    expect(uButtons).toContain("📦 Xem đơn");
+    expect(uButtons).toContain("🕘 Lịch sử");
+
+    const owned = getCustomerDetailKeyboard(conversation({ mode: "HUMAN", claimedById: "me" }) as never, { isMine: true });
+    const oButtons = owned.inline_keyboard.flat().map((b) => b.text);
+    expect(oButtons).not.toContain("✅ Nhận khách");
+    expect(oButtons).toContain("↩️ Trả khách (kết thúc hỗ trợ)");
+  });
+
+  it("history text: empty vs paginated", () => {
+    expect(renderHistoryText("Tomy", [], 1, 1)).toContain("Không có tin nhắn nào.");
+    const text = renderHistoryText(
+      "Tomy",
+      [{ senderType: "CUSTOMER", content: "xin chào", createdAt: "2026-01-01T09:00:00Z" }],
+      2,
+      3
+    );
+    expect(text).toContain("trang 2/3");
+    expect(text).toContain("👤 Khách");
+  });
+
+  it("history keyboard: prev/next only when valid + back/home always", () => {
+    const single = getHistoryKeyboard("c1", 1, 1).inline_keyboard.flat().map((b) => b.text);
+    expect(single).not.toContain("⬅️");
+    expect(single).not.toContain("➡️");
+    expect(single).toContain("⬅️ Quay lại");
+    expect(single).toContain("🏠 Menu CSKH");
+
+    const mid = getHistoryKeyboard("c1", 2, 3).inline_keyboard.flat().map((b) => b.text);
+    expect(mid).toContain("⬅️");
+    expect(mid).toContain("➡️");
+  });
+});
+
       customer: customer({ fullName: "Tomy" })
     } as never;
     const text = renderCustomerPreviewText(conv, { need: "100 USD → VND", order: "Đơn …" });
