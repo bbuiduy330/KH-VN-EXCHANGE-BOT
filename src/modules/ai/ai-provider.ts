@@ -42,6 +42,8 @@ const CURRENCY_ALIASES: Array<[string, string]> = [
   ["usd", "USD"],
   ["$", "USD"],
   ["dong", "VND"],
+  ["tien viet", "VND"],
+  ["tien viet nam", "VND"],
   ["vnd", "VND"],
   ["do", "USD"],
 ];
@@ -256,6 +258,37 @@ export class AiProvider {
   }
 
   /**
+   * Finds the first supported currency token with its position in normalized text.
+   */
+  private static findCurrencyToken(normalized: string): { code: string; index: number } | null {
+    let best: { code: string; index: number } | null = null;
+    for (const [alias, code] of CURRENCY_ALIASES) {
+      if (alias === "$") {
+        const idx = normalized.indexOf("$");
+        if (idx !== -1 && (!best || idx < best.index)) best = { code, index: idx };
+      } else {
+        const regex = new RegExp(`\\b${this.escapeRegex(alias)}\\b`, "i");
+        const match = regex.exec(normalized);
+        if (match && match.index !== undefined && (!best || match.index < best.index)) {
+          best = { code, index: match.index };
+        }
+      }
+    }
+    return best;
+  }
+
+  /**
+   * True when the amount in the text is VND-scale (Vietnamese magnitude suffix
+   * or numeric value >= 1000), enabling safe VND-side inference.
+   * "10 trieu", "500k", "2 000 000" -> true; "100" -> false.
+   */
+  private static isVndScaleAmount(normalized: string): boolean {
+    if (/\b(?:trieu|tr|m|nghin|ngan|k)\b/.test(normalized)) return true;
+    const amount = this.parseAmount(normalized);
+    return amount !== null && amount >= 1000;
+  }
+
+  /**
    * Infers the target currency from the source currency.
    * USD -> VND, VND -> USD. Returns null for unsupported sources.
    */
@@ -272,7 +305,7 @@ export class AiProvider {
    */
   private static hasExchangeSignal(normalized: string): boolean {
     if (/\b(?:doi|chuyen|exchange)\b/.test(normalized)) return true;
-    if (/\b(?:sang|to|duoc|nhan)\b/.test(normalized)) return true;
+    if (/\b(?:sang|to|duoc|nhan|lay|ra|qua)\b/.test(normalized)) return true;
     if (normalized.includes("->")) return true;
     if (normalized.includes("$")) return true;
     return false;
@@ -324,8 +357,8 @@ export class AiProvider {
       return null;
     }
 
-    // Split on direction separator: sang | to | -> | duoc | nhan
-    const separatorMatch = normalized.match(/\b(?:sang|to|duoc|nhan)\b|\s*->\s*/);
+    // Split on direction separator: sang | to | -> | duoc | nhan | lay | ra | qua
+    const separatorMatch = normalized.match(/\b(?:sang|to|duoc|nhan|lay|ra|qua)\b|\s*->\s*/);
 
     let sourceCurrency: string | null = null;
     let targetCurrency: string | null = null;
@@ -335,8 +368,35 @@ export class AiProvider {
       const after = normalized.slice(separatorMatch.index + separatorMatch[0].length);
       sourceCurrency = this.detectCurrency(before);
       targetCurrency = this.detectCurrency(after);
+
+      // Direction words carry the side information: when the amount side has no
+      // explicit currency, infer it from the other side using VND magnitude.
+      // Examples: "10 trieu lay $" / "20 trieu sang do" / "10 tr lay do" -> VND -> USD.
+      if (!sourceCurrency && targetCurrency) {
+        if (this.isVndScaleAmount(normalized)) {
+          sourceCurrency = targetCurrency === "USD" ? "VND" : "USD";
+        } else {
+          // Genuinely uncertain ("100 lay do") -> ask / Gemini fallback.
+          return null;
+        }
+      }
     } else {
-      sourceCurrency = this.detectCurrency(normalized);
+      // No separator: a currency stated AFTER a change verb is the TARGET
+      // ("10m doi usd" = 10 million VND -> USD), otherwise it is the SOURCE
+      // ("100 do" = 100 USD -> VND).
+      const currencyToken = this.findCurrencyToken(normalized);
+      const amountMatch = normalized.match(/(-?\d[\d\s.,]*?)\s*(trieu|nghin|ngan|tr|m|k)?(?=\s|$)/);
+      const amountEnd =
+        amountMatch && amountMatch.index !== undefined ? amountMatch.index + amountMatch[0].length : 0;
+      const hasChangeVerbAfterAmount = /\b(?:doi|chuyen|exchange)\b/.test(normalized.slice(amountEnd));
+
+      if (currencyToken && hasChangeVerbAfterAmount && currencyToken.index >= amountEnd) {
+        targetCurrency = currencyToken.code;
+        sourceCurrency = targetCurrency === "USD" ? "VND" : "USD";
+        if (!this.isVndScaleAmount(normalized)) return null;
+      } else {
+        sourceCurrency = currencyToken ? currencyToken.code : null;
+      }
     }
 
     if (!sourceCurrency) return null;
@@ -385,7 +445,8 @@ export class AiProvider {
     const { client } = await this.getClient();
     if (!client) return null;
 
-    const models = GeminiModelStrategy.getTextModelChain();
+    const configuredModel = SystemConfigService.getGeminiTextModel();
+    const models = GeminiModelStrategy.getTextModelChain(configuredModel);
     const prompt = `Trích xuất thông tin đổi tiền từ tin nhắn khách hàng: "${text}"
 Chỉ hỗ trợ 2 loại tiền tệ: USD và VND.
 Nhận diện từ viết tắt: "đô", "$", "do" = USD; "đồng", "dong" = VND.
@@ -463,7 +524,7 @@ Trả về duy nhất:
 Trích xuất các thông tin từ biên lai để nhân viên kiểm tra đối soát:
 - bank: Tên ngân hàng hoặc ví điện tử (VD: Vietcombank, MB Bank, ABA Bank, Wing, TrueMoney...)
 - amount: Số tiền chuyển (dạng số nguyên hoặc số thực, ví dụ 1500000 hoặc 50)
-- currency: Đơn vị tiền tệ (VND, USD, KHR)
+- currency: Đơn vị tiền tệ (VND, USD)
 - sender: Tên người gửi/tài khoản chuyển nếu hiển thị
 - receiver: Số tài khoản hoặc tên người thụ hưởng
 - transactionId: Mã giao dịch/Mã bút toán/FT number

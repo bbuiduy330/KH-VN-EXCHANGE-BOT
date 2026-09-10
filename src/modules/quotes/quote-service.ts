@@ -182,11 +182,25 @@ export class QuoteService {
 
     return quote;
   }
-
   static async getQuoteById(quoteId: string) {
     return prisma.quote.findUnique({
       where: { id: quoteId },
       include: { customer: true }
+    });
+  }
+
+  /**
+   * Returns the customer's most recent PENDING, unexpired quote (or null).
+   * Used to resume an in-flight quote instead of showing a generic welcome.
+   */
+  static async getLatestActiveQuote(customerId: string) {
+    return prisma.quote.findFirst({
+      where: {
+        customerId,
+        status: "PENDING",
+        expiresAt: { gt: new Date() }
+      },
+      orderBy: { createdAt: "desc" }
     });
   }
 

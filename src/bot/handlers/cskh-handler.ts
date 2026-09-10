@@ -255,7 +255,35 @@ cskhHandler.callbackQuery(/^cskh:ticket:claim:(.+)$/, async (ctx) => {
   if (!customerId) return;
 
   const staffTelegramId = String(ctx.from?.id || "");
-  await ConversationService.claim(customerId, staffTelegramId);
+
+  try {
+    await ConversationService.claim(customerId, staffTelegramId);
+  } catch (err: any) {
+    // Ticket already claimed by another staff or unavailable:
+    // show a friendly status instead of an unhandled middleware error, and
+    // disable the stale claim button when the original message is editable.
+    try {
+      await ctx.editMessageReplyMarkup({
+        reply_markup: new InlineKeyboard().text("✔️ Đã có nhân viên tiếp nhận", "cskh:noop")
+      });
+    } catch {
+      // Stale/too-old message cannot be edited — safe to ignore.
+    }
+    await ctx.reply(
+      `⚠️ Ticket này đã được nhân viên khác tiếp nhận trước đó.\n` +
+        `Vui lòng chọn khách hàng khác trong menu Hỗ trợ.`,
+      { parse_mode: "HTML" }
+    );
+    return;
+  }
+
+  try {
+    await ctx.editMessageReplyMarkup({
+      reply_markup: new InlineKeyboard().text("✔️ Bạn đang hỗ trợ khách này", "cskh:noop")
+    });
+  } catch {
+    // Stale/too-old message cannot be edited — safe to ignore.
+  }
 
   const customer = await prisma.customer.findUnique({ where: { id: customerId } });
   if (customer) {
@@ -281,7 +309,21 @@ cskhHandler.callbackQuery(/^cskh:ticket:release:(.+)$/, async (ctx) => {
   if (!customerId) return;
 
   const staffTelegramId = String(ctx.from?.id || "");
-  await ConversationService.release(customerId, staffTelegramId);
+
+  try {
+    await ConversationService.release(customerId, staffTelegramId);
+  } catch (err: any) {
+    // Not owner / already released: friendly status instead of unhandled error.
+    try {
+      await ctx.editMessageReplyMarkup({
+        reply_markup: new InlineKeyboard().text("🔄 Trả về AI không thành công", "cskh:noop")
+      });
+    } catch {
+      // Stale/too-old message cannot be edited — safe to ignore.
+    }
+    await ctx.reply(`⚠️ ${err.message}`);
+    return;
+  }
 
   const customer = await prisma.customer.findUnique({ where: { id: customerId } });
   if (customer) {
@@ -294,6 +336,11 @@ cskhHandler.callbackQuery(/^cskh:ticket:release:(.+)$/, async (ctx) => {
   await ctx.reply(`✅ Đã hoàn tất hỗ trợ và chuyển khách <code>${customerId}</code> về AUTO AI.`, {
     parse_mode: "HTML"
   });
+});
+
+// No-op placeholder for disabled ticket buttons
+cskhHandler.callbackQuery("cskh:noop", async (ctx) => {
+  await ctx.answerCallbackQuery();
 });
 
 cskhHandler.callbackQuery("cskh:menu:tickets", async (ctx) => {

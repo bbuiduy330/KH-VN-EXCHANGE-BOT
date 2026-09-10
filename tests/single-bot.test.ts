@@ -4,7 +4,6 @@ import { hasStaffPermission } from "../src/bot/middleware/permissions.js";
 import { PermissionService } from "../src/modules/permissions/permission-service.js";
 import { ConversationService } from "../src/modules/conversation/conversation-service.js";
 import { CustomerService } from "../src/modules/customer/customer-service.js";
-import { renderCustomerStartText, getCustomerMenuKeyboard } from "../src/bot/menus/customer-menu.js";
 import { renderCskhStartText, getCskhMenuKeyboard } from "../src/bot/menus/cskh-menu.js";
 import { renderAdminStartText, getAdminMenuKeyboard } from "../src/bot/menus/admin-menu.js";
 import { setBotInstance, sendToCustomer, sendToStaff, sendToAdminNotificationChat } from "../src/bot/notifications.js";
