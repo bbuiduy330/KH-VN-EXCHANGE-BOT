@@ -106,6 +106,50 @@ export class ConversationService {
   }
 
   /**
+   * Customer-side exit from HUMAN support ("Quay lại đổi tiền" button).
+   * Performs the SAME lifecycle transition as staff release() —
+   * mode "AUTO" + claimedById null — no new database status.
+   * Customers are always allowed to leave a support session themselves.
+   * Idempotent: guarded by mode:"HUMAN" so stale/double buttons are no-ops.
+   */
+  static async releaseByCustomer(customerId: string) {
+    const conv = await this.getOrCreateConversation(customerId);
+
+    return prisma.$transaction(async (tx: any) => {
+      const result = await tx.conversation.updateMany({
+        where: {
+          id: conv.id,
+          mode: "HUMAN"
+        },
+        data: {
+          mode: "AUTO",
+          claimedById: null,
+          claimedAt: null
+        }
+      });
+
+      if (result.count !== 1) {
+        // Already AUTO (staff released first, or button pressed twice).
+        return tx.conversation.findUnique({ where: { id: conv.id } });
+      }
+
+      await AuditService.log(
+        {
+          actorId: customerId,
+          actorRole: "CUSTOMER",
+          action: "CONVERSATION_RELEASED",
+          targetType: "CONVERSATION",
+          targetId: conv.id,
+          details: { customerId, previousOwner: conv.claimedById, releasedBy: "CUSTOMER" }
+        },
+        tx
+      );
+
+      return tx.conversation.findUnique({ where: { id: conv.id } });
+    });
+  }
+
+  /**
    * Privileged takeover of conversation
    */
   static async takeover(

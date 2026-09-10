@@ -56,14 +56,24 @@ export async function showCustomerStart(ctx: BotContext) {
     return;
   }
 
-  // 3. Active HUMAN support -> do not interrupt with the generic welcome
+  // 3. Active HUMAN support -> do not interrupt with the generic welcome,
+  //    but ALWAYS offer an explicit exit back to automatic exchange
   const conv = await ConversationService.getOrCreateConversation(customer.id);
   if (conv.mode === "HUMAN") {
+    const supportModeKb = new InlineKeyboard()
+      .text("↩️ Quay lại đổi tiền", "customer:support:exit")
+      .row()
+      .text("💱 Đổi tiền", "customer:menu:quote")
+      .text("📦 Đơn của tôi", "customer:menu:orders")
+      .row()
+      .text("💬 Hỗ trợ", "customer:menu:support")
+      .text("🏦 Tài khoản nhận tiền", "customer:menu:bank");
     await ctx.reply(
       `💬 <b>BẠN ĐANG ĐƯỢC NHÂN VIÊN HỖ TRỢ TRỰC TIẾP</b>\n\n` +
         `Anh/chị vui lòng tiếp tục nhắn tin tại khung chat này.\n` +
-        `Nhân viên CSKH sẽ phản hồi anh/chị ngay.`,
-      { parse_mode: "HTML", reply_markup: keyboard }
+        `Nhân viên CSKH sẽ phản hồi anh/chị ngay.\n\n` +
+        `Muốn tự đổi tiền theo tỷ giá tự động? Bấm <b>↩️ Quay lại đổi tiền</b>.`,
+      { parse_mode: "HTML", reply_markup: supportModeKb }
     );
     return;
   }
@@ -175,8 +185,39 @@ customerHandler.command("bank", async (ctx) => {
 });
 
 // Menu callbacks
+// Customer exits HUMAN support themselves ("↩️ Quay lại đổi tiền").
+// Acknowledge the callback FIRST, then do the DB work.
+customerHandler.callbackQuery("customer:support:exit", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const telegramId = String(ctx.from?.id || "");
+  const customer = await CustomerService.getOrCreateCustomer({ telegramId });
+
+  await ConversationService.releaseByCustomer(customer.id);
+  await ctx.reply(
+    `✅ <b>Đã kết thúc phiên hỗ trợ trực tiếp.</b>\n\n` +
+      `Bạn đã quay lại chế độ đổi tiền tự động.\n` +
+      `Anh/chị chỉ cần nhắn tin số tiền muốn đổi, ví dụ: <i>"100 đô"</i>.`,
+    { parse_mode: "HTML" }
+  );
+
+  // Re-render the normal start screen: active order -> active quote -> rates welcome
+  await showCustomerStart(ctx);
+});
+
 customerHandler.callbackQuery("customer:menu:quote", async (ctx) => {
   await ctx.answerCallbackQuery();
+  const telegramId = String(ctx.from?.id || "");
+  const customer = await CustomerService.getOrCreateCustomer({ telegramId });
+
+  // Explicit customer action: leaving HUMAN support before entering the
+  // automatic exchange flow, so subsequent texts reach the quote parser
+  // instead of the staff relay.
+  const conv = await ConversationService.getOrCreateConversation(customer.id);
+  if (conv.mode === "HUMAN") {
+    await ConversationService.releaseByCustomer(customer.id);
+    await ctx.reply(`✅ Đã kết thúc phiên hỗ trợ trực tiếp. Bạn quay lại chế độ đổi tiền tự động.`);
+  }
+
   await ctx.reply(
     `💱 <b>ĐỔI TIỀN TỰ ĐỘNG</b>\n\n` +
       `Vui lòng nhắn tin số tiền bạn muốn đổi ngay tại đây.\n\n` +
