@@ -7,7 +7,7 @@ import { OrderService } from "../../modules/orders/order-service.js";
 import { QuoteService } from "../../modules/quotes/quote-service.js";
 import { PermissionService } from "../../modules/permissions/permission-service.js";
 import { prisma } from "../../database/client.js";
-import { sendToCustomer, copyMessageToCustomer } from "../notifications.js";
+import { sendToCustomer, sendToStaff, copyMessageToCustomer } from "../notifications.js";
 import { resolveLocale, t } from "../../modules/i18n/locales.js";
 import { getCskhMenuKeyboard, renderCskhStartText } from "../menus/cskh-menu.js";
 import { clearSelectedCustomer, getSelectedCustomer, setSelectedCustomer } from "../state/staff-chat-session.js";
@@ -179,7 +179,7 @@ cskhHandler.command("msg", async (ctx) => {
     try {
       const sent = await sendToCustomer(customer.telegramId, `💬 <b>Bộ phận CSKH:</b>\n${content}`);
       if (sent) {
-        await ConversationService.markMessageSent(msgRecord.id, Date.now());
+        await ConversationService.markMessageSent(msgRecord.id, sent.message_id);
         await ctx.reply(`✅ ĐĂ£ gửi tin nhắn đến khách <code>${customerId}</code>.`, { parse_mode: "HTML" });
       } else {
         await ConversationService.markMessageFailed(msgRecord.id, "Telegram send returned false");
@@ -233,7 +233,7 @@ async function deliverStaffText(ctx: BotContext, customerId: string, content: st
   try {
     const sent = await sendToCustomer(customer.telegramId, `💬 <b>Bộ phận CSKH:</b>\n${content}`);
     if (sent) {
-      await ConversationService.markMessageSent(msgRecord.id, Date.now());
+      await ConversationService.markMessageSent(msgRecord.id, sent.message_id);
       await ctx.reply(`✅ Đã gửi đến <b>${shortCustomerLabel(customer)}</b>.`, { parse_mode: "HTML" });
     } else {
       await ConversationService.markMessageFailed(msgRecord.id, "Telegram send returned false");
@@ -250,15 +250,24 @@ async function deliverStaffText(ctx: BotContext, customerId: string, content: st
  * Never guesses a recipient when no session is active.
  */
 export async function handleStaffTextMessage(ctx: BotContext, text: string): Promise<void> {
+  const isPrivate = ctx.chat?.type === "private";
   const staffTelegramId = String(ctx.from?.id || "");
   const customerId = getSelectedCustomer(staffTelegramId);
 
   if (!customerId) {
+    // Group bare staff text is never reply mode — do not spam guidance.
+    if (!isPrivate) return;
     await ctx.reply(
       `⚠️ <b>Bạn chưa chọn khách để trả lời.</b>\n` +
         `Hãy vào <b>💬 Đang hỗ trợ</b> → chọn khách → <b>💬 Trả lời khách</b>.`,
       { parse_mode: "HTML" }
     );
+    return;
+  }
+
+  if (!isPrivate) {
+    // Safety: selected-chat forwarding is PRIVATE bot chat only.
+    await ctx.reply("💬 Hãy trả lời khách trong tin nhắn riêng với bot.", { parse_mode: "HTML" });
     return;
   }
 
@@ -488,11 +497,35 @@ cskhHandler.callbackQuery(/^cskh:ticket:claim:(.+)$/, async (ctx) => {
     await sendToCustomer(customer.telegramId, t(resolveLocale(customer.language), "support.active_title"));
   }
 
-  await ctx.reply(
-    `✅ Đã tiếp nhận khách <code>${customerId}</code> (Chế độ HUMAN).\n` +
-      `Dùng <code>/msg ${customerId} &lt;nội dung&gt;</code> để nhắn tin.`,
-    { parse_mode: "HTML" }
-  );
+  const conv = (await prisma.conversation.findUnique({
+    where: { customerId },
+    include: { customer: true }
+  })) as unknown as ConversationWithCustomer | null;
+  const contextMap = await loadCustomerContext([{ customerId }]);
+  const need = contextMap.get(customerId)?.need;
+  const label = customer ? shortCustomerLabel(customer) : `#${customerId.slice(-6)}`;
+  const isPrivate = ctx.chat?.type === "private";
+
+  if (isPrivate && conv) {
+    setSelectedCustomer(staffTelegramId, customerId);
+    const replyText = renderReplyModeText(conv, { need });
+    try {
+      await ctx.editMessageText(replyText, { parse_mode: "HTML", reply_markup: getReplyModeKeyboard(customerId) });
+    } catch {
+      await ctx.reply(replyText, { parse_mode: "HTML", reply_markup: getReplyModeKeyboard(customerId) });
+    }
+    return;
+  }
+
+  await ctx.reply(`✅ Đã nhận khách: <b>${label}</b>\n💬 Bắt đầu trả lời trong tin nhắn riêng với bot.`, { parse_mode: "HTML" });
+  setSelectedCustomer(staffTelegramId, customerId);
+  if (conv) {
+    const dmText = renderReplyModeText(conv, { need });
+    const dmSent = await sendToStaff(staffTelegramId, dmText, { parse_mode: "HTML", reply_markup: getReplyModeKeyboard(customerId) });
+    if (!dmSent) {
+      await ctx.reply("⚠️ Vui lòng mở /start bot trong tin nhắn riêng để nhận màn hình trả lời.", { parse_mode: "HTML" });
+    }
+  }
 });
 
 cskhHandler.callbackQuery(/^cskh:ticket:release:(.+)$/, async (ctx) => {
@@ -972,7 +1005,7 @@ export async function handleStaffMedia(ctx: BotContext): Promise<void> {
   if (match) {
     customerId = match[1];
     note = (match[2] || "").trim();
-  } else {
+  } else if (ctx.chat?.type === "private") {
     customerId = getSelectedCustomer(staffTelegramId);
     note = caption;
   }
@@ -1029,7 +1062,7 @@ export async function handleStaffMedia(ctx: BotContext): Promise<void> {
     }
     const copied = await copyMessageToCustomer(customer.telegramId, fromChatId, messageId);
     if (copied) {
-      await ConversationService.markMessageSent(msgRecord.id, Date.now());
+      await ConversationService.markMessageSent(msgRecord.id, copied);
       await ctx.reply(`✅ Đã gửi media dến khách <code>${customerId}</code>.`, { parse_mode: "HTML" });
     } else {
       await ConversationService.markMessageFailed(msgRecord.id, "copyMessage returned false");

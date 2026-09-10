@@ -79,8 +79,8 @@ async function relayCustomerMediaToStaff(
     // Notify staff with a short text header, then native-copy the media.
     await sendToStaff(
       conv.claimedById,
-      `📎 <b>Media (${kind}) từ khách [${customer.fullName || customer.id}]:</b>\n` +
-        `Dùng caption <code>/msg ${customer.id}</code> trên media để trả lời.`,
+      `📎 <b>Media (${kind}) từ khách ${customer.fullName || (customer.username ? "@" + customer.username : `#${customer.id.slice(-6)}`)}:</b>\n` +
+        `Trả lời trực tiếp trong khung chat riêng với bot.`,
       { parse_mode: "HTML" }
     );
     const copied = await copyMessageToStaff(conv.claimedById, fromChatId, messageId);
@@ -521,9 +521,8 @@ export async function handleCustomerTextMessage(ctx: BotContext, text: string) {
     if (conv.claimedById) {
       await sendToStaff(
         conv.claimedById,
-        `💬 <b>Tin nhắn mới từ khách [${customer.fullName || customer.id}]:</b>\n\n` +
-          `"${text}"\n\n` +
-          `Dùng <code>/msg ${customer.id} &lt;nội dung&gt;</code> dể trả lời.`,
+        `💬 <b>Tin nhắn từ ${customer.fullName || (customer.username ? "@" + customer.username : `#${customer.id.slice(-6)}`)}:</b>\n\n` +
+          `"${text}"`,
         { parse_mode: "HTML" }
       );
     }

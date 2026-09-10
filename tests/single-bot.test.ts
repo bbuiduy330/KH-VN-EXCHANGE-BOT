@@ -65,7 +65,7 @@ describe("Unified Single Telegram Bot Architecture & Required Tests", () => {
     expect(identity.status).toBe("ACTIVE");
 
     const text = renderAdminStartText("Test Admin", false);
-    expect(text).toContain("HỆ THỐNG QUẢN TRỊ ADMIN");
+    expect(text).toContain("TRUNG TÂM QUẢN TRỊ");
 
     const keyboard = getAdminMenuKeyboard(false);
     const buttons = keyboard.inline_keyboard.flat().map((b) => b.text);

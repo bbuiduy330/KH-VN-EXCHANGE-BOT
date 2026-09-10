@@ -30,12 +30,21 @@ export function getAdminMenuKeyboard(isSuperAdmin: boolean = false): InlineKeybo
   return keyboard;
 }
 
-export function renderAdminStartText(staffName: string, isSuperAdmin: boolean = false): string {
-  const title = isSuperAdmin ? "🛡 HỆ THỐNG QUẢN TRỊ SUPER ADMIN" : "🛡 HỆ THỐNG QUẢN TRỊ ADMIN";
-  return (
-    `<b>${title}</b>\n\n` +
-    `Xin chào <b>${staffName || "Quản trị viên"}</b>.\n` +
-    `Chọn một chức năng bên dưới.\n` +
-    `Cần lệnh chi tiết? Bấm <b>❓ Hướng dẫn</b>.`
-  );
+export function renderAdminStartText(
+  staffName: string,
+  isSuperAdmin: boolean = false,
+  counts: { waiting?: number; active?: number; pendingOrders?: number } = {}
+): string {
+  const title = "🛡 TRUNG TÂM QUẢN TRỊ";
+  const lines: string[] = [
+    `<b>${title}</b>\n`,
+    `Xin chào <b>${staffName || "Quản trị viên"}</b>.`
+  ];
+  if (counts.waiting !== undefined || counts.active !== undefined || counts.pendingOrders !== undefined) {
+    lines.push(
+      `\n🔔 CSKH chờ: ${counts.waiting ?? 0} · 💬 Đang hỗ trợ: ${counts.active ?? 0} · 📦 Đơn cần xử lý: ${counts.pendingOrders ?? 0}`
+    );
+  }
+  lines.push(`\nChọn một chức năng bên dưới.`);
+  return lines.join("\n");
 }

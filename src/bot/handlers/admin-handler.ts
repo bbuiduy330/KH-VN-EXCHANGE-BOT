@@ -27,7 +27,20 @@ export async function showAdminStart(ctx: BotContext) {
   const staff = ctx.identity?.staff;
   const isSuperAdmin = ctx.identity?.userType === "SUPER_ADMIN";
   const staffName = staff?.name || (isSuperAdmin ? "Super Admin" : "Quản trị viên");
-  const text = renderAdminStartText(staffName, isSuperAdmin);
+
+  const [waiting, active, pendingOrders] = await Promise.all([
+    prisma.conversation.count({ where: { mode: "HUMAN", claimedById: null } }),
+    prisma.conversation.count({ where: { mode: "HUMAN", claimedById: { not: null } } }),
+    prisma.order.count({
+      where: {
+        status: {
+          in: ["WAITING_PAYMENT", "CUSTOMER_SENT_BILL", "WAITING_ADMIN_VERIFY", "WAITING_PAYOUT", "MANUAL_REVIEW", "SUSPICIOUS"]
+        }
+      }
+    })
+  ]);
+
+  const text = renderAdminStartText(staffName, isSuperAdmin, { waiting, active, pendingOrders });
   const keyboard = getAdminMenuKeyboard(isSuperAdmin);
   await ctx.reply(text, { parse_mode: "HTML", reply_markup: keyboard });
 }

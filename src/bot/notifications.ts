@@ -20,20 +20,20 @@ export async function sendToCustomer(
   customerTelegramId: string,
   text: string,
   options: { parse_mode?: "HTML" | "MarkdownV2"; reply_markup?: any } = { parse_mode: "HTML" }
-): Promise<boolean> {
+): Promise<{ message_id: number } | null> {
   if (!botInstance) {
     logger.warn({ customerTelegramId }, "Cannot send message to customer: bot instance is not initialized");
-    return false;
+    return null;
   }
   const tid = String(customerTelegramId).trim();
-  if (!tid) return false;
+  if (!tid) return null;
 
   try {
-    await botInstance.api.sendMessage(tid, text, options);
-    return true;
+    const sent = await botInstance.api.sendMessage(tid, text, options);
+    return sent;
   } catch (err: any) {
     logger.warn({ err: err?.message, customerTelegramId: tid }, "Failed to send message to customer");
-    return false;
+    return null;
   }
 }
 
@@ -85,24 +85,24 @@ export async function copyMessageToChat(
   fromChatId: string | number,
   messageId: number,
   toChatId: string | number
-): Promise<boolean> {
+): Promise<number | null> {
   if (!botInstance) {
     logger.warn({ fromChatId, toChatId, messageId }, "copyMessageToChat: bot instance not initialized");
-    return false;
+    return null;
   }
   const from = String(fromChatId).trim();
   const to = String(toChatId).trim();
-  if (!from || !to || !messageId) return false;
+  if (!from || !to || !messageId) return null;
 
   try {
-    await botInstance.api.copyMessage(to, from, messageId);
-    return true;
+    const copied = await botInstance.api.copyMessage(to, from, messageId);
+    return copied.message_id;
   } catch (err: any) {
     logger.warn(
       { err: err?.message, fromChatId: from, toChatId: to, messageId },
       "copyMessageToChat failed"
     );
-    return false;
+    return null;
   }
 }
 
@@ -110,7 +110,7 @@ export async function copyMessageToStaff(
   staffTelegramId: string,
   fromChatId: string | number,
   messageId: number
-): Promise<boolean> {
+): Promise<number | null> {
   return copyMessageToChat(fromChatId, messageId, staffTelegramId);
 }
 
@@ -118,7 +118,7 @@ export async function copyMessageToCustomer(
   customerTelegramId: string,
   fromChatId: string | number,
   messageId: number
-): Promise<boolean> {
+): Promise<number | null> {
   return copyMessageToChat(fromChatId, messageId, customerTelegramId);
 }
 
