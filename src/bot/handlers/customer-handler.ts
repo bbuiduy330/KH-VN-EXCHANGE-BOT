@@ -336,7 +336,6 @@ customerHandler.callbackQuery("customer:menu:quote", async (ctx) => {
     reply_markup: getCustomerMenuKeyboard(localeQuote)
   });
 });
-});
 
 customerHandler.callbackQuery("customer:menu:orders", async (ctx) => {
   await ctx.answerCallbackQuery();
@@ -795,7 +794,6 @@ export async function handleCustomerPhoto(ctx: BotContext) {
     `${t(locale, "bill.multi_title", { count: awaitingOrders.length })}\n\n` +
       t(locale, "bill.multi_hint"),
     { parse_mode: "HTML", reply_markup: keyboard }
-  );
   );
 }
 
