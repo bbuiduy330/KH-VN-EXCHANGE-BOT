@@ -137,6 +137,26 @@ function matchesWhere(item: any, where?: any): boolean {
         if (item[k] === (v as any).not) return false;
         continue;
       }
+      // Order comparators (gt/gte/lt/lte) — used by QuoteService.getLatestActiveQuote
+      // (expiresAt: { gt: now }). Test-only surface: production always uses the real DB.
+      let matchedComparator = false;
+      for (const op of ["gt", "gte", "lt", "lte"] as const) {
+        if (op in (v as any)) {
+          matchedComparator = true;
+          const threshold = new Date((v as any)[op]).getTime();
+          const value = new Date(item[k]).getTime();
+          const ok =
+            op === "gt"
+              ? value > threshold
+              : op === "gte"
+                ? value >= threshold
+                : op === "lt"
+                  ? value < threshold
+                  : value <= threshold;
+          if (!ok) return false;
+        }
+      }
+      if (matchedComparator) continue;
     }
     if (item[k] !== v) return false;
   }
