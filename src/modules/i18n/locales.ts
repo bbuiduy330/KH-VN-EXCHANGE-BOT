@@ -161,6 +161,10 @@ add("error.generic", "❌ Có lỗi xảy ra. Vui lòng thử lại hoặc bấm
 add("error.quote_failed", "❌ Không tạo được báo giá: {error}", "❌ Could not create a quote: {error}", "❌ មិនអាចបង្កើតសម្រង់តម្លៃ: {error}", "❌ 无法创建报价：{error}");
 add("voice.transcript", "🎙 [{lang}] <i>\"{text}\"</i>", "🎙 [{lang}] <i>\"{text}\"</i>", "🎙 [{lang}] <i>\"{text}\"</i>", "🎙 [{lang}] <i>\"{text}\"</i>");
 add("voice.failed", "🎙 Đã lưu file ghi âm nhưng hiện tại chưa thể chuyển thành văn bản. Xin vui lòng nhắn tin trực tiếp.", "🎙 Voice saved, but transcription is unavailable. Please type your message.", "🎙 បានរក្សាទុកសំឡេង ប៉ុន្តែមិនអាចបម្លែងជាអក្សរបានទេ។ សូមវាយសារ។", "🎙 语音已保存，但无法转写。请直接发送文字。");
+add("voice.heard", "🎙 Em nghe được:", "🎙 I heard:", "🎙 ខ្ញុំបានឮ:", "🎙 我听到:");
+add("voice.retry_prompt", "🎙 Em chưa nghe rõ nội dung ghi âm.\nAnh/chị có thể thử ghi âm lại hoặc chuyển sang nhân viên hỗ trợ.", "🎙 I couldn't understand the recording.\nYou can try recording again or switch to support staff.", "🎙 ខ្ញុំមិនអាចស្តាប់សំឡេងបានច្បាស់ទេ។\nសូមសាកល្បងថតម្តងទៀត ឬទាក់ទងបុគ្គលិកជំនួយ។", "🎙 我没听清录音内容。\n您可以重新录制或转接人工客服。");
+add("voice.forwarded", "🎙 Đã chuyển ghi âm cho nhân viên hỗ trợ.", "🎙 Voice forwarded to support staff.", "🎙 បានបញ្ជូនសំឡេងទៅបុគ្គលិកជំនួយ។", "🎙 语音已转发给客服。");
+
 add("status.WAITING_PAYMENT", "Chờ thanh toán", "Awaiting payment", "រង់ចាំបង់ប្រាក់", "待付款");
 add("status.CUSTOMER_SENT_BILL", "Đã gửi biên lai", "Receipt sent", "បានផ្ញើបង្កាន់ដៃ", "已发送回单");
 add("status.WAITING_ADMIN_VERIFY", "Chờ đối soát", "Awaiting verification", "រង់ចាំផ្ទៀងផ្ទាត់", "待核对");
