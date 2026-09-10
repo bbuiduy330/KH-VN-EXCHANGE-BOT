@@ -309,6 +309,9 @@ export class AiProvider {
     if (/\b(?:doi|chuyen|exchange)\b/.test(normalized)) return true;
     if (/\b(?:sang|to|duoc|nhan|lay|ra|qua)\b/.test(normalized)) return true;
     if (normalized.includes("->")) return true;
+    // Shorthand direction separators: ">" and "→" survive normalizeText (NFD
+    // does not decompose them). E.g. "doi 2,5m > $" = 2 500 000 VND -> USD.
+    if (normalized.includes(">") || normalized.includes("→")) return true;
     if (normalized.includes("$")) return true;
     return false;
   }
@@ -359,8 +362,10 @@ export class AiProvider {
       return null;
     }
 
-    // Split on direction separator: sang | to | -> | duoc | nhan | lay | ra | qua
-    const separatorMatch = normalized.match(/\b(?:sang|to|duoc|nhan|lay|ra|qua)\b|\s*->\s*/);
+    // Split on direction separator: sang | to | -> | → | > | duoc | nhan | lay | ra | qua
+    // Order matters: "->" must be tried before bare ">" so "a -> b" is not
+    // split at ">" leaving a stray "-".
+    const separatorMatch = normalized.match(/\b(?:sang|to|duoc|nhan|lay|ra|qua)\b|\s*->\s*|\s*→\s*|\s*>\s*/);
 
     let sourceCurrency: string | null = null;
     let targetCurrency: string | null = null;
