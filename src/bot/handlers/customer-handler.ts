@@ -11,7 +11,8 @@ import { ConversationalAIService } from "../../modules/ai/customer-ai-service.js
 import { FileService } from "../../modules/files/file-service.js";
 import { RuntimeConfigService } from "../../modules/system-config/runtime-config-service.js";
 import { MoneyService } from "../../modules/money/money-service.js";
-import { sendToStaff, sendToAdminNotificationChat, copyMessageToStaff, notifyEligibleStaff } from "../notifications.js";
+import { sendToStaff, sendToAdminNotificationChat, copyMessageToStaff, copyMessageToChat, notifyEligibleStaff } from "../notifications.js";
+import { SystemConfigService } from "../../modules/system-config/system-config-service.js";
 import {
   getCustomerMenuKeyboard,
   getBankWizardKeyboard,
@@ -900,54 +901,117 @@ export async function handleCustomerPhoto(ctx: BotContext) {
 }
 
 // Customer voice handler
+function escapeHtmlText(s: string): string {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+async function downloadVoiceBuffer(ctx: BotContext): Promise<Buffer | null> {
+  const voice = ctx.message?.voice;
+  if (!voice) return null;
+  const file = await ctx.api.getFile(voice.file_id);
+  const url = `https://api.telegram.org/file/bot${env.TELEGRAM_BOT_TOKEN}/${file.file_path}`;
+  const res = await fetch(url);
+  return Buffer.from(await res.arrayBuffer());
+}
+
+/** HUMAN: original audio is primary; STT is assistive enrichment only. */
+async function handleHumanVoice(ctx: BotContext, customer: { id: string; fullName?: string | null; username?: string | null }, locale: string): Promise<void> {
+  const conv = await ConversationService.getOrCreateConversation(customer.id);
+
+  if (conv.claimedById) {
+    // Claimed: forward original audio to assigned staff (relay handles copy + ack).
+    await relayCustomerMediaToStaff(ctx, customer, "voice");
+  } else {
+    // Unclaimed HUMAN: notify support group + copy original audio to the group.
+    const messageId = ctx.message?.message_id;
+    const fromChatId = ctx.chat?.id;
+    const adminChatId = SystemConfigService.getAdminNotificationChatId();
+    const name = customer.fullName || (customer.username ? "@" + customer.username : `#${customer.id.slice(-6)}`);
+    if (messageId && fromChatId && adminChatId) {
+      await copyMessageToChat(fromChatId, messageId, adminChatId);
+    }
+    await sendToAdminNotificationChat(
+      `🎙 <b>Ghi âm từ khách ${escapeHtmlText(name)} · #${customer.id.slice(-6)}</b>`,
+      {
+        parse_mode: "HTML",
+        reply_markup: new InlineKeyboard()
+          .text("👀 Xem khách", `cskh:preview:${customer.id}`)
+          .text("🙋 Nhận khách", `cskh:ticket:claim:${customer.id}`)
+      }
+    );
+    await ctx.reply(t(locale, "support.media_waiting"), { parse_mode: "HTML" });
+  }
+
+  // STT assist — never a blocker, never mutates Quote/Order.
+  try {
+    const buffer = await downloadVoiceBuffer(ctx);
+    if (!buffer) return;
+    const transcript = await AiProvider.transcribeAudio(buffer, "audio/ogg");
+    if (!transcript || !transcript.transcript) return;
+
+    // Re-fetch AFTER STT: never send transcript to a stale/former owner.
+    const fresh = await ConversationService.getOrCreateConversation(customer.id);
+    if (fresh.mode !== "HUMAN" || !fresh.claimedById) return;
+
+    const name = customer.fullName || (customer.username ? "@" + customer.username : `#${customer.id.slice(-6)}`);
+    let assist = `🎙 <b>GHI ÂM TỪ KHÁCH</b>\n👤 <b>${escapeHtmlText(name)}</b> · 🆔 #${customer.id.slice(-6)}\n\n📝 Nội dung nhận diện:\n<i>"${escapeHtmlText(transcript.transcript)}"</i>`;
+    if ((transcript.detectedLanguage || "vi") !== "vi") {
+      try {
+        const translated = await AiProvider.translateText(transcript.transcript, "vi");
+        if (translated) assist += `\n\n🇻🇳 Dịch hỗ trợ:\n<i>"${escapeHtmlText(translated)}"</i>`;
+      } catch {
+        // translation best-effort; original audio remains source of truth
+      }
+    }
+    await sendToStaff(fresh.claimedById, assist, { parse_mode: "HTML" });
+  } catch {
+    // STT assist is best-effort; original audio was already forwarded.
+  }
+}
+
 export async function handleCustomerVoice(ctx: BotContext) {
   const telegramId = String(ctx.from?.id || "");
   const customer = await CustomerService.getOrCreateCustomer({ telegramId });
+  const locale = locOf(customer);
+  const conv = await ConversationService.getOrCreateConversation(customer.id);
 
-  // HUMAN mode: relay voice to assigned staff only (no STT).
-  if (await relayCustomerMediaToStaff(ctx, customer, "voice")) {
+  // Persist the inbound voice with the REAL Telegram message_id (future replay).
+  const inboundMessageId = ctx.message?.message_id;
+  if (inboundMessageId) {
+    await ConversationService.addMessage({
+      customerId: customer.id,
+      senderType: "CUSTOMER",
+      content: "[VOICE]",
+      telegramMessageId: inboundMessageId
+    });
+  }
+
+  if (conv.mode === "HUMAN") {
+    await handleHumanVoice(ctx, customer, locale);
     return;
   }
 
-  const locale = locOf(customer);
-
+  // AUTO: voice is exchange-intent input -> transcript -> same text pipeline.
   try {
-    const voice = ctx.message?.voice;
-    if (!voice) return;
-    const file = await ctx.api.getFile(voice.file_id);
-    const botToken = env.TELEGRAM_BOT_TOKEN;
-    const url = `https://api.telegram.org/file/bot${botToken}/${file.file_path}`;
-    const res = await fetch(url);
-    const buffer = Buffer.from(await res.arrayBuffer());
-
-    // Preserve original Telegram voice file locally
-    const savedEvidence = await FileService.saveEvidenceFile(
-      buffer,
-      `voice_${customer.id}_${Date.now()}.ogg`,
-      "VOICE",
-      "audio/ogg"
-    );
-
-    // Transcribe using Gemini
-    const transcribeResult = await AiProvider.transcribeAudio(buffer, "audio/ogg");
-    if (transcribeResult && transcribeResult.transcript) {
-      const langTag = transcribeResult.detectedLanguage?.toUpperCase() || "VI";
-      await ctx.reply(t(locale, "voice.transcript", { lang: (transcribeResult.detectedLanguage || "VI").toUpperCase(), text: transcribeResult.transcript }), { parse_mode: "HTML" });
-      logger.info(
-        {
-          customerId: customer.id,
-          sha256: savedEvidence.sha256,
-          detectedLanguage: transcribeResult.detectedLanguage
-        },
-        "Customer voice transcribed successfully"
-      );
-      await handleCustomerTextMessage(ctx, transcribeResult.transcript);
-    } else {
-      await ctx.reply(t(locale, "voice.failed"));
+    const buffer = await downloadVoiceBuffer(ctx);
+    if (!buffer) {
+      await ctx.reply(t(locale, "voice.retry_prompt"), { parse_mode: "HTML" });
+      return;
     }
-  } catch (err: any) {
-    logger.error({ err }, "Voice processing error");
-    await ctx.reply("❌ Lỗi xử lý tin nhắn thoại");
+
+    await FileService.saveEvidenceFile(buffer, `voice_${customer.id}_${Date.now()}.ogg`, "VOICE", "audio/ogg");
+
+    const transcript = await AiProvider.transcribeAudio(buffer, "audio/ogg");
+    if (transcript && transcript.transcript) {
+      const heard = `${t(locale, "voice.heard")}\n<i>"${escapeHtmlText(transcript.transcript)}"</i>`;
+      await ctx.reply(heard, { parse_mode: "HTML" });
+      // Feed the SAME exchange-intent pipeline (local parser first, then AI).
+      await handleCustomerTextMessage(ctx, transcript.transcript);
+    } else {
+      await ctx.reply(t(locale, "voice.retry_prompt"), { parse_mode: "HTML" });
+    }
+  } catch {
+    await ctx.reply(t(locale, "voice.retry_prompt"), { parse_mode: "HTML" });
   }
 }
 
