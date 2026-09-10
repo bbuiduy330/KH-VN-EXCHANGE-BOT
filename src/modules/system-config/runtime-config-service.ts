@@ -2,6 +2,9 @@ import { prisma } from "../../database/client.js";
 import { env } from "../../config/env.js";
 import { logger } from "../../shared/logger.js";
 
+/** Centralized quote validity duration (business rule: exactly 10 minutes). */
+export const QUOTE_VALIDITY_MINUTES = 10;
+
 export interface BusinessConfig {
   geminiTextModel: string;
   geminiTranscribeModel: string;
@@ -28,7 +31,7 @@ export class RuntimeConfigService {
     backupScheduleHours: 6,
     defaultServiceFeeUsd: env.DEFAULT_SERVICE_FEE_USD || 2,
     largeTransactionThresholdUsd: env.LARGE_TRANSACTION_THRESHOLD_USD || 5000,
-    quoteExpiryMinutes: env.QUOTE_EXPIRY_MINUTES || 15,
+    quoteExpiryMinutes: env.QUOTE_EXPIRY_MINUTES || QUOTE_VALIDITY_MINUTES,
     paymentWaitAlertMinutes: env.PAYMENT_WAIT_ALERT_MINUTES || 30
   };
 
@@ -153,7 +156,10 @@ export class RuntimeConfigService {
   }
 
   static getQuoteExpiryMinutes(): number {
-    return this.get<number>("quoteExpiryMinutes", 15);
+    // Business rule: customer quotes are ALWAYS exactly 10 minutes.
+    // Not configurable via env or system_settings (prevents stale 15-minute
+    // overrides from silently applying in production).
+    return QUOTE_VALIDITY_MINUTES;
   }
 
   static setQuoteExpiryMinutes(minutes: number, updatedBy: string = "ADMIN"): Promise<void> {

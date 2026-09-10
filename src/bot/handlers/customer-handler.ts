@@ -17,6 +17,7 @@ import {
   getBankWizardKeyboard,
   getLanguageSelectorKeyboard,
   getSupportModeKeyboard,
+  getCustomerReplyKeyboard,
   renderCustomerWelcomeText,
   renderActiveOrderText,
   renderQuoteCard,
@@ -153,14 +154,14 @@ export async function showCustomerStart(ctx: BotContext) {
   if (conv.mode === "HUMAN") {
     await ctx.reply(renderSupportActiveText(locale), {
       parse_mode: "HTML",
-      reply_markup: getSupportModeKeyboard(locale)
+      reply_markup: getCustomerReplyKeyboard(locale, true)
     });
     return;
   }
 
   // 4. Default: two-way USD/VND rates first (localized labels)
   const text = await renderCustomerWelcomeText(customer.fullName || "Guest", locale);
-  await ctx.reply(text, { parse_mode: "HTML", reply_markup: keyboard });
+  await ctx.reply(text, { parse_mode: "HTML", reply_markup: getCustomerReplyKeyboard(locale, false) });
 }
 
 // /help command
@@ -293,8 +294,10 @@ customerHandler.callbackQuery(/^customer:lang:(vi|en|km|zh)$/, async (ctx) => {
   // Re-fetch so subsequent renders see the new language.
   const updated = await CustomerService.getOrCreateCustomer({ telegramId });
   const locale = locOf(updated);
+  const convNow = await ConversationService.getOrCreateConversation(updated.id);
   await ctx.reply(t(locale, "lang.changed", { label: LOCALE_LABELS[locale] }), {
-    parse_mode: "HTML"
+    parse_mode: "HTML",
+    reply_markup: getCustomerReplyKeyboard(locale, convNow.mode === "HUMAN")
   });
   // Immediately render normal customer start flow in the selected language.
   await showCustomerStart(ctx);
@@ -497,6 +500,105 @@ customerHandler.callbackQuery(/^customer:bill:attach:([a-zA-Z0-9_-]+):(.+)$/, as
   await processBillUpload(ctx, orderId, fileId, telegramId);
 });
 
+/** Reserved navigation labels recognized across ALL locales so a stale
+ *  old-language button still routes correctly. */
+export function matchReservedAction(text: string): "exchange" | "orders" | "support" | "support_active" | "language" | "exit_support" | null {
+  const cur = text.trim();
+  for (const loc of ["vi", "en", "km", "zh"] as const) {
+    if (cur === t(loc, "menu.exchange")) return "exchange";
+    if (cur === t(loc, "menu.orders")) return "orders";
+    if (cur === t(loc, "menu.support")) return "support";
+    if (cur === t(loc, "menu.support_active")) return "support_active";
+    if (cur === t(loc, "menu.language")) return "language";
+    if (cur === t(loc, "menu.exit_support")) return "exit_support";
+  }
+  return null;
+}
+
+/**
+ * Reserved persistent-keyboard control texts — navigation, NEVER parsed as
+ * an exchange/AI request. Returns true when handled.
+ */
+async function handleReservedCustomerControl(
+  ctx: BotContext,
+  customer: { id: string; language?: string | null; fullName?: string | null; username?: string | null; telegramId?: string | null },
+  text: string
+): Promise<boolean> {
+  const action = matchReservedAction(text);
+  if (!action) return false;
+
+  const locale = locOf(customer as { language?: string | null });
+  const conv = await ConversationService.getOrCreateConversation(customer.id);
+  const inHuman = conv.mode === "HUMAN";
+
+  switch (action) {
+    case "exchange": {
+      if (inHuman) {
+        await ConversationService.releaseByCustomer(customer.id);
+        await ctx.reply(t(locale, "support.exited"), { parse_mode: "HTML" });
+      }
+      await ctx.reply(t(locale, "exchange.instructions"), {
+        parse_mode: "HTML",
+        reply_markup: getCustomerReplyKeyboard(locale, false)
+      });
+      return true;
+    }
+    case "orders": {
+      const myOrders = await OrderService.getOrdersForCustomer(customer.id, 10);
+      if (myOrders.length === 0) {
+        await ctx.reply(t(locale, "order.list_empty"), { parse_mode: "HTML", reply_markup: getCustomerReplyKeyboard(locale, inHuman) });
+      } else {
+        let msg = `📦 <b>DANH SÁCH ĐƠN HÀNG GẦN ĐÂY:</b>\n\n`;
+        for (const o of myOrders.slice(0, 5)) {
+          const srcAmt = MoneyService.formatAmount(o.sourceAmount, o.sourceCurrency);
+          const tgtAmt = MoneyService.formatAmount(o.targetAmount, o.targetCurrency);
+          msg += `• Đơn <b>${o.id.slice(-6)}</b>\n  ${srcAmt} ${o.sourceCurrency} ➔ ${tgtAmt} ${o.targetCurrency}\n  Trạng thái: <code>${o.status}</code>\n\n`;
+        }
+        await ctx.reply(msg, { parse_mode: "HTML", reply_markup: getCustomerReplyKeyboard(locale, inHuman) });
+      }
+      return true;
+    }
+    case "support":
+    case "support_active": {
+      if (inHuman) {
+        // Already HUMAN: show current support state only — no new request/notify.
+        await ctx.reply(renderSupportActiveText(locale), { parse_mode: "HTML", reply_markup: getCustomerReplyKeyboard(locale, true) });
+        return true;
+      }
+      // Enter HUMAN support request.
+      await ConversationService.addMessage({
+        customerId: customer.id,
+        senderType: "CUSTOMER",
+        content: "[YÊU CẦU GẶP CSKH TRỰC TIẾP]"
+      });
+      await ctx.reply(t(locale, "support.requested"), { parse_mode: "HTML", reply_markup: getCustomerReplyKeyboard(locale, true) });
+
+      const notifyText =
+        `🛎 <b>YÊU CẦU HỖ TRỢ TỪ KHÁCH HÀNG:</b>\n` +
+        `• Khách: <b>${customer.fullName || customer.username || customer.telegramId}</b> (ID: <code>${customer.id}</code>)\n` +
+        `• Telegram ID: <code>${customer.telegramId}</code>`;
+      const notifyKb = new InlineKeyboard()
+        .text("👀 Xem khách", `cskh:preview:${customer.id}`)
+        .text("🙋 Nhận khách", `cskh:ticket:claim:${customer.id}`);
+      await sendToAdminNotificationChat(notifyText, { parse_mode: "HTML", reply_markup: notifyKb });
+      await notifyEligibleStaff(notifyText, { parse_mode: "HTML", reply_markup: notifyKb });
+      return true;
+    }
+    case "language": {
+      await ctx.reply(t(locale, "lang.selector_title"), { parse_mode: "HTML", reply_markup: getLanguageSelectorKeyboard() });
+      return true;
+    }
+    case "exit_support": {
+      await ConversationService.releaseByCustomer(customer.id);
+      await ctx.reply(t(locale, "support.exited"), { parse_mode: "HTML" });
+      await showCustomerStart(ctx);
+      return true;
+    }
+  }
+  return false;
+}
+
+
 // Customer text message handler
 export async function handleCustomerTextMessage(ctx: BotContext, text: string) {
   if (text.startsWith("/")) return;
@@ -507,6 +609,9 @@ export async function handleCustomerTextMessage(ctx: BotContext, text: string) {
     username: ctx.from?.username,
     fullName: [ctx.from?.first_name, ctx.from?.last_name].filter(Boolean).join(" ")
   });
+
+  // Reserved persistent-keyboard controls are navigation, never freeform input.
+  if (await handleReservedCustomerControl(ctx, customer, text)) return;
 
   const conv = await ConversationService.getOrCreateConversation(customer.id);
   await ConversationService.addMessage({

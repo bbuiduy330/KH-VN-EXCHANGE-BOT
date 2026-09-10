@@ -482,22 +482,25 @@ adminHandler.command("setrate", async (ctx) => {
   const [pair, baseRate, buyMargin, sellMargin, fee, feeCurrency] = parts as [string, string, string, string, string, string];
 
   try {
-    const updated = await QuoteService.setRate(pair, baseRate, buyMargin, sellMargin, fee, feeCurrency, adminId);
-    await AuditService.log({
-      actorId: adminId,
-      actorRole: ctx.identity?.userType || "ADMIN",
-      action: "RATE_UPDATED",
-      targetType: "EXCHANGE_RATE",
-      targetId: pair,
-      details: { baseRate, buyMargin, sellMargin, fee, feeCurrency }
-    });
+    const activeRole = ctx.identity?.userType || "ADMIN";
+    const { rate: updated, invalidatedCount: invalidatedQuotes } = await QuoteService.setRateAndInvalidate(
+      pair,
+      baseRate,
+      buyMargin,
+      sellMargin,
+      fee,
+      feeCurrency,
+      adminId,
+      activeRole
+    );
 
     await ctx.reply(
       `✅ <b>ĐÃ CẬP NHẬT TỶ GIÁ CẶP ${updated.pair}:</b>\n\n` +
         `• Tỷ giá gốc: <b>${updated.baseRate}</b>\n` +
         `• Buy margin: <b>${updated.buyMargin}</b>\n` +
         `• Sell margin: <b>${updated.sellMargin}</b>\n` +
-        `• Phí dịch vụ: <b>${updated.fee} ${updated.feeCurrency}</b>`,
+        `• Phí dịch vụ: <b>${updated.fee} ${updated.feeCurrency}</b>\n` +
+        `🧾 Báo giá đang chờ đã hết hiệu lực: <b>${invalidatedQuotes}</b>`,
       { parse_mode: "HTML" }
     );
   } catch (err: any) {

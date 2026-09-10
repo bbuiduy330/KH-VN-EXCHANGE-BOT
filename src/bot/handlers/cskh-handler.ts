@@ -250,8 +250,45 @@ async function deliverStaffText(ctx: BotContext, customerId: string, content: st
  * Never guesses a recipient when no session is active.
  */
 export async function handleStaffTextMessage(ctx: BotContext, text: string): Promise<void> {
-  const isPrivate = ctx.chat?.type === "private";
   const staffTelegramId = String(ctx.from?.id || "");
+  const ctrl = text.trim();
+
+  // ABSOLUTE SAFETY: reserved CSKH control texts are navigation, never forwarded.
+  if (ctrl === "🏠 Menu CSKH") {
+    clearSelectedCustomer(staffTelegramId);
+    await showCskhStart(ctx);
+    return;
+  }
+  if (ctrl === "🔔 Khách đang chờ" || ctrl === "💬 Đang hỗ trợ") {
+    clearSelectedCustomer(staffTelegramId);
+    await showCskhStart(ctx);
+    return;
+  }
+  if (ctrl === "🔄 Đổi khách") {
+    clearSelectedCustomer(staffTelegramId);
+    await ctx.reply("💬 Chọn khách khác trong <b>💬 Đang hỗ trợ</b>.", { parse_mode: "HTML" });
+    await showCskhStart(ctx);
+    return;
+  }
+  if (ctrl === "↩️ Kết thúc hỗ trợ") {
+    const selected = getSelectedCustomer(staffTelegramId);
+    if (selected) {
+      try {
+        await ConversationService.release(selected, staffTelegramId, ctx.identity?.userType || "CSKH", ctx.identity?.staff?.permissions || []);
+        const customer = await prisma.customer.findUnique({ where: { id: selected } });
+        if (customer) {
+          await sendToCustomer(customer.telegramId, t(resolveLocale(customer.language), "support.exited"));
+        }
+      } catch {
+        // idempotent: already released / not owner — friendly no-op
+      }
+    }
+    clearSelectedCustomer(staffTelegramId);
+    await showCskhStart(ctx);
+    return;
+  }
+
+  const isPrivate = ctx.chat?.type === "private";
   const customerId = getSelectedCustomer(staffTelegramId);
 
   if (!customerId) {
