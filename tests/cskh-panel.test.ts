@@ -2,14 +2,23 @@ import { describe, it, expect } from "vitest";
 import {
   CSKH_PAGE_SIZE,
   activeRowText,
+  escapeHtml,
   getCskhHomeKeyboard,
+  getCustomerDetailKeyboard,
   getCustomerPreviewKeyboard,
+  getHistoryKeyboard,
+  messageLine,
   orderContextText,
   paginate,
   quoteNeedText,
   renderCskhHomeText,
+  renderCustomerDetailText,
   renderCustomerPreviewText,
+  renderHistoryText,
+  senderLabel,
   shortCustomerLabel,
+  shortTime,
+  staffDisplayName,
   waitingRowText
 } from "../src/bot/menus/cskh-panel.js";
 
@@ -83,10 +92,8 @@ describe("CSKH panel helpers (C1)", () => {
     const items = Array.from({ length: 12 }, (_, i) => i);
     expect(paginate(items, 1).pageItems).toHaveLength(CSKH_PAGE_SIZE);
     expect(paginate(items, 3).pageItems).toHaveLength(2);
-    // Stale/overshoot pages clamp to last valid page
     expect(paginate(items, 99).totalPages).toBe(3);
     expect(paginate(items, 99).pageItems).toHaveLength(2);
-    // Empty list still yields one page
     expect(paginate([], 5).totalPages).toBe(1);
     expect(paginate([], 5).pageItems).toHaveLength(0);
   });
@@ -125,18 +132,10 @@ describe("CSKH panel helpers (C1)", () => {
       customerId: "cktest0000000000000001",
       mode: "HUMAN",
       claimedById: "s1",
-
-import {
-  escapeHtml,
-  getCustomerDetailKeyboard,
-  getHistoryKeyboard,
-  messageLine,
-  renderCustomerDetailText,
-  renderHistoryText,
-  senderLabel,
-  shortTime,
-  staffDisplayName
-} from "../src/bot/menus/cskh-panel.js";
+      customer: customer({ fullName: "Tomy" })
+    } as never;
+    const text = renderCustomerPreviewText(conv, { need: "100 USD → VND", order: "Đơn …" });
+    expect(text).toContain("👤 <b>Khách</b>: Tomy");
 
 describe("CSKH panel C2 helpers", () => {
   it("senderLabel maps customer/bot/staff/system", () => {
@@ -230,10 +229,6 @@ describe("CSKH panel C2 helpers", () => {
   });
 });
 
-      customer: customer({ fullName: "Tomy" })
-    } as never;
-    const text = renderCustomerPreviewText(conv, { need: "100 USD → VND", order: "Đơn …" });
-    expect(text).toContain("👤 <b>Khách</b>: Tomy");
     expect(text).toContain("🆔");
     expect(text).toContain("👨‍💼 Người phụ trách");
     expect(text).toContain("💱 Nhu cầu: 100 USD → VND");
