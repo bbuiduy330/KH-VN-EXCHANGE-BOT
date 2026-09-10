@@ -625,16 +625,26 @@ Trả về DUY NHẤT một JSON hợp lệ dạng:
     audioBuffer: Buffer,
     mimeType: string = "audio/ogg"
   ): Promise<TranscribeResult | null> {
+    if (!audioBuffer || audioBuffer.length === 0) {
+      logger.warn({ bytes: 0 }, "transcribeAudio: empty audio buffer");
+      return null;
+    }
+
     const { client } = await this.getClient();
     if (!client) return null;
 
-    const models = GeminiModelStrategy.getTranscribeModelChain();
+    // Respect the runtime-configured transcription model (same source as the
+    // working text path) instead of env-based fictional defaults.
+    const configuredModel = SystemConfigService.getGeminiTranscribeModel();
+    const models = GeminiModelStrategy.getTranscribeModelChain(configuredModel);
+
     const prompt = `Hãy nghe đoạn âm thanh này và chuyển thành văn bản chính xác.
 Đồng thời xác định ngôn ngữ (vi: Tiếng Việt, km: Tiếng Khmer, en: Tiếng Anh, zh: Tiếng Trung).
 Trả về duy nhất định dạng JSON:
 {"transcript": "nội dung đã chuyển thành văn bản", "detectedLanguage": "vi"}`;
 
     try {
+      const startedAt = Date.now();
       const execution = await GeminiModelStrategy.executeWithFallback(
         models,
         async (model) => {
@@ -655,27 +665,39 @@ Trả về duy nhất định dạng JSON:
         { contextName: "transcribeAudio" }
       );
 
+      const elapsedMs = Date.now() - startedAt;
       const raw = execution.result;
-      const jsonMatch = raw.match(/\{[\s\S]*\}/);
-      if (jsonMatch) {
-        const parsed = JSON.parse(jsonMatch[0]);
-        if (parsed.transcript) {
-          return {
-            transcript: String(parsed.transcript).trim(),
-            detectedLanguage: parsed.detectedLanguage ? String(parsed.detectedLanguage).trim() : "vi"
-          };
-        }
+      logger.info(
+        { model: execution.actualModel, bytes: audioBuffer.length, mimeType, elapsedMs },
+        "transcribeAudio: provider responded"
+      );
+
+      // Resilient parsing: JSON (possibly fenced) or plain transcript text.
+      let parsed: any = null;
+      try {
+        const cleaned = (raw || "").replace(/```(?:json)?/gi, "").trim();
+        const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
+        if (jsonMatch) parsed = JSON.parse(jsonMatch[0]);
+      } catch (parseErr: any) {
+        logger.warn({ reason: parseErr?.message || String(parseErr) }, "transcribeAudio: JSON parse failed; using raw text");
       }
 
-      // If raw response was text directly without JSON formatting
-      if (raw && raw.length > 0) {
+      if (parsed && typeof parsed.transcript === "string" && parsed.transcript.trim()) {
         return {
-          transcript: raw.trim(),
-          detectedLanguage: "vi"
+          transcript: parsed.transcript.trim(),
+          detectedLanguage: parsed.detectedLanguage ? String(parsed.detectedLanguage).trim() : undefined
         };
       }
+
+      // Provider returned plain transcript text (no JSON wrapper).
+      if (raw && raw.trim().length > 0) {
+        return { transcript: raw.trim(), detectedLanguage: undefined };
+      }
     } catch (err: any) {
-      logger.warn({ err: err?.message || err }, "Gemini voice transcription failed across models");
+      logger.warn(
+        { err: err?.message || String(err) },
+        "Gemini voice transcription failed across models"
+      );
     }
 
     return null;
