@@ -108,6 +108,21 @@ export class MoneyService {
   }
 
   /**
+   * Rounds a computed SOURCE amount conservatively (always UP) so the forward
+   * quote never yields less than the customer's requested target amount.
+   * Used only by target-amount quoting (QuoteService.calculateQuoteFromTarget).
+   */
+  static roundSourceAmount(amount: Decimal | number | string, currency: string): Decimal {
+    const dec = new Decimal(amount);
+    const code = currency.toUpperCase().trim();
+    if (code === "VND") {
+      return dec.toDecimalPlaces(0, Decimal.ROUND_UP);
+    }
+    const decimalPlaces = this.getDecimals(code);
+    return dec.toDecimalPlaces(decimalPlaces, Decimal.ROUND_UP);
+  }
+
+  /**
    * Parses a human-friendly amount expression.
    * Supports: "2M", "2m", "2 triệu", "2 trieu", "2tr", "100k", "500k",
    * "1 nghìn", "1 ngàn", "1 000 000", "100", "1000", "100.50", "100,50", "100.5", "100,5".

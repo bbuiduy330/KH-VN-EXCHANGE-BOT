@@ -9,6 +9,8 @@ export interface ParsedExchangeIntent {
   sourceCurrency: string;
   targetCurrency: string;
   amount: number;
+  /** Which side the stated amount belongs to. Default: "source". */
+  amountSide?: "source" | "target";
   confidence: number;
 }
 
@@ -362,12 +364,28 @@ export class AiProvider {
 
     let sourceCurrency: string | null = null;
     let targetCurrency: string | null = null;
+    let amountSide: "source" | "target" = "source";
 
     if (separatorMatch && separatorMatch.index !== undefined) {
       const before = normalized.slice(0, separatorMatch.index);
       const after = normalized.slice(separatorMatch.index + separatorMatch[0].length);
+      const beforeHasAmount = /\d/.test(before);
+      const afterHasAmount = /\d/.test(after);
       sourceCurrency = this.detectCurrency(before);
       targetCurrency = this.detectCurrency(after);
+
+      // Target-amount intent: the number sits on the RIGHT side of the
+      // direction word while the left side has no amount.
+      // Examples: "doi vnd lay 100 do" (wants to RECEIVE 100 USD),
+      //           "y anh la nhan 100 do" (conversational correction),
+      //           "muon nhan 100 do".
+      if (!beforeHasAmount && afterHasAmount) {
+        amountSide = "target";
+        if (!sourceCurrency && targetCurrency) {
+          // Source is implicitly the other supported currency (USD <-> VND).
+          sourceCurrency = targetCurrency === "USD" ? "VND" : "USD";
+        }
+      }
 
       // Direction words carry the side information: when the amount side has no
       // explicit currency, infer it from the other side using VND magnitude.
@@ -419,6 +437,7 @@ export class AiProvider {
       amount,
       sourceCurrency,
       targetCurrency,
+      amountSide,
       confidence: 0.9
     };
   }
