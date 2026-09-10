@@ -909,9 +909,17 @@ async function downloadVoiceBuffer(ctx: BotContext): Promise<Buffer | null> {
   const voice = ctx.message?.voice;
   if (!voice) return null;
   const file = await ctx.api.getFile(voice.file_id);
+  logger.info({ fileId: voice.file_id, filePath: file.file_path, telegramFileSize: voice.file_size }, "voice: Telegram file metadata");
   const url = `https://api.telegram.org/file/bot${env.TELEGRAM_BOT_TOKEN}/${file.file_path}`;
   const res = await fetch(url);
-  return Buffer.from(await res.arrayBuffer());
+  const buffer = Buffer.from(await res.arrayBuffer());
+  const isOgg = buffer.length >= 4 && buffer.subarray(0, 4).toString("ascii") === "OggS";
+  logger.info({ bytes: buffer.length, isOgg, contentType: res.headers.get("content-type") }, "voice: downloaded buffer");
+  if (buffer.length === 0 || !isOgg) {
+    logger.warn({ bytes: buffer.length, isOgg }, "voice: invalid/empty audio buffer (likely HTML/error body)");
+    return null;
+  }
+  return buffer;
 }
 
 /** HUMAN: original audio is primary; STT is assistive enrichment only. */
