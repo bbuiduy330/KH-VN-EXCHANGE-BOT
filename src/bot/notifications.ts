@@ -1,9 +1,10 @@
-import { Bot } from "grammy";
+import { Bot, InlineKeyboard } from "grammy";
 import { env } from "../config/env.js";
 import { logger } from "../shared/logger.js";
 import { SystemConfigService } from "../modules/system-config/system-config-service.js";
 import { prisma } from "../database/client.js";
 import { PermissionService } from "../modules/permissions/permission-service.js";
+import { MoneyService } from "../modules/money/money-service.js";
 
 
 let botInstance: Bot<any> | null = null;
@@ -156,5 +157,78 @@ export async function notifyEligibleStaff(
       }
     }
   }
+}
+
+// ---------------------------------------------------------------------------
+// Admin operational notifications (event-driven, authorized-chat only)
+// ---------------------------------------------------------------------------
+
+function shortId(id: string): string {
+  return `#${String(id || "").slice(-6)}`;
+}
+
+/**
+ * Payout-ready notification must fire ONLY after a real first transition into
+ * WAITING_PAYOUT — never merely because a handler was invoked (stale/repeated
+ * callbacks must stay silent). Callers guard `notifyPayoutReady` with this.
+ */
+export function isPayoutReadyTransition(status: string | null | undefined): boolean {
+  return status === "WAITING_PAYOUT";
+}
+
+function customerName(customer: any): string {
+  if (!customer) return "Khách";
+  if (customer.username) return `@${customer.username}`;
+  const name = (customer.fullName || "").trim();
+  return name || shortId(customer.id);
+}
+
+/** Event: customer confirmed a quote and an order was durably created. */
+export async function notifyOrderCreated(order: any, customer: any): Promise<void> {
+  const text =
+    `✅ <b>KHÁCH ĐÃ XÁC NHẬN ĐỔI TIỀN</b>\n\n` +
+    `👤 ${customerName(customer)}\n` +
+    `📦 ${shortId(order.id)}\n\n` +
+    `💱 ${MoneyService.formatMoney(order.sourceAmount, order.sourceCurrency)} → ${MoneyService.formatMoney(order.targetAmount, order.targetCurrency)}\n` +
+    `📊 Tỷ giá khóa: ${MoneyService.formatEffectiveRate(order.sourceCurrency, order.targetCurrency, order.rate)}\n` +
+    `🕒 ${new Date(order.createdAt).toLocaleTimeString("vi-VN")}`;
+
+  const kb = new InlineKeyboard()
+    .text("📦 Xem đơn", `ops:order:detail:${order.id}`)
+    .text("👤 Xem khách", `ops:customer:detail:${order.customerId}`);
+
+  await sendToAdminNotificationChat(text, { parse_mode: "HTML", reply_markup: kb });
+}
+
+/** Event: customer submitted a valid bill/evidence. */
+export async function notifyBillReceived(order: any): Promise<void> {
+  const text =
+    `📷 <b>CÓ BILL MỚI</b>\n\n` +
+    `👤 ${customerName(order.customer)}\n` +
+    `📦 ${shortId(order.id)}\n` +
+    `💱 ${MoneyService.formatMoney(order.sourceAmount, order.sourceCurrency)} → ${MoneyService.formatMoney(order.targetAmount, order.targetCurrency)}`;
+
+  const kb = new InlineKeyboard()
+    .text("📷 Xem bill", `ops:bill:view:${order.id}`)
+    .text("📦 Xem đơn", `ops:order:detail:${order.id}`)
+    .row()
+    .text("👤 Xem khách", `ops:customer:detail:${order.customerId}`);
+
+  await sendToAdminNotificationChat(text, { parse_mode: "HTML", reply_markup: kb });
+}
+
+/** Event: an order entered WAITING_PAYOUT and Admin must now pay the customer. */
+export async function notifyPayoutReady(order: any): Promise<void> {
+  const text =
+    `💸 <b>CẦN THANH TOÁN KHÁCH</b>\n\n` +
+    `👤 ${customerName(order.customer)}\n` +
+    `📦 ${shortId(order.id)}\n\n` +
+    `Khách nhận:\n${MoneyService.formatMoney(order.targetAmount, order.targetCurrency)}`;
+
+  const kb = new InlineKeyboard()
+    .text("💸 Bắt đầu payout", `ops:payout:preview:${order.id}`)
+    .text("👤 Xem khách", `ops:customer:detail:${order.customerId}`);
+
+  await sendToAdminNotificationChat(text, { parse_mode: "HTML", reply_markup: kb });
 }
 

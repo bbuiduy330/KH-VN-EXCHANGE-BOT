@@ -3,6 +3,7 @@ import { BotContext, identityMiddleware } from "./middleware/identity.js";
 import { customerHandler, showCustomerStart, handleCustomerTextMessage, handleCustomerPhoto, handleCustomerVoice } from "./handlers/customer-handler.js";
 import { cskhHandler, showCskhStart, handleStaffMedia, handleStaffTextMessage } from "./handlers/cskh-handler.js";
 import { adminHandler, showAdminStart, handleAdminPhoto, handleAdminTextMessage } from "./handlers/admin-handler.js";
+import { adminOperationsHandler, handleAdminReservedText, handleAdminSessionText, handleAdminPayoutEvidenceMedia } from "./admin/index.js";
 import { PermissionService } from "../modules/permissions/permission-service.js";
 import { sendToAdminNotificationChat } from "./notifications.js";
 
@@ -86,6 +87,9 @@ mainRouter.command("start", async (ctx) => {
 
 // 4. Register Sub-handlers
 mainRouter.use(adminHandler);
+// Admin Operations Center (Phase 1) — registered before CSKH/customer so its
+// `ops:` callbacks and `/cancel` command take precedence.
+mainRouter.use(adminOperationsHandler);
 mainRouter.use(cskhHandler);
 mainRouter.use(customerHandler);
 
@@ -98,6 +102,10 @@ mainRouter.on("message:photo", async (ctx) => {
   if (isStaff && (caption.startsWith("/addqr") || caption.startsWith("/payout"))) {
     await handleAdminPhoto(ctx);
     return;
+  }
+  // Per-admin payout-evidence session (before generic staff media relay).
+  if (userType === "ADMIN" || userType === "SUPER_ADMIN") {
+    if (await handleAdminPayoutEvidenceMedia(ctx)) return;
   }
   // Staff media must NEVER be interpreted as customer bill evidence.
   if (isStaff) {
@@ -120,6 +128,9 @@ mainRouter.on("message:voice", async (ctx) => {
 // 7. Global Document router
 mainRouter.on("message:document", async (ctx) => {
   const userType = ctx.identity?.userType;
+  if (userType === "ADMIN" || userType === "SUPER_ADMIN") {
+    if (await handleAdminPayoutEvidenceMedia(ctx)) return;
+  }
   if (userType === "ADMIN" || userType === "SUPER_ADMIN" || userType === "CSKH") {
     await handleStaffMedia(ctx);
     return;
@@ -138,6 +149,10 @@ mainRouter.on("message:text", async (ctx) => {
 
   const userType = ctx.identity?.userType;
   if (userType === "SUPER_ADMIN" || userType === "ADMIN") {
+    // Precedence: reserved controls → input session → legacy admin input →
+    // ONLY THEN generic staff/CSKH selected-chat forwarding.
+    if (await handleAdminReservedText(ctx, text)) return;
+    if (await handleAdminSessionText(ctx, text)) return;
     const handled = await handleAdminTextMessage(ctx, text);
     if (handled) return;
   }

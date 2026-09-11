@@ -9,8 +9,8 @@ import { AuditService } from "../../modules/audit/audit-service.js";
 import { LocalStorageService } from "../../modules/storage/local-storage-service.js";
 import { FileService } from "../../modules/files/file-service.js";
 import { env } from "../../config/env.js";
-import { sendToCustomer, sendToAdminNotificationChat } from "../notifications.js";
-import { getAdminMenuKeyboard, renderAdminStartText } from "../menus/admin-menu.js";
+import { sendToCustomer, sendToAdminNotificationChat, notifyPayoutReady, isPayoutReadyTransition } from "../notifications.js";
+import { showOperationsCenter } from "../admin/index.js";
 import { prisma } from "../../database/client.js";
 import { AiProvider } from "../../modules/ai/ai-provider.js";
 import { SystemConfigService } from "../../modules/system-config/system-config-service.js";
@@ -24,25 +24,8 @@ export const pendingAdminInputs = new Map<string, { action: string; [key: string
 export const adminHandler = new Composer<BotContext>();
 
 export async function showAdminStart(ctx: BotContext) {
-  const staff = ctx.identity?.staff;
-  const isSuperAdmin = ctx.identity?.userType === "SUPER_ADMIN";
-  const staffName = staff?.name || (isSuperAdmin ? "Super Admin" : "Quản trị viên");
-
-  const [waiting, active, pendingOrders] = await Promise.all([
-    prisma.conversation.count({ where: { mode: "HUMAN", claimedById: null } }),
-    prisma.conversation.count({ where: { mode: "HUMAN", claimedById: { not: null } } }),
-    prisma.order.count({
-      where: {
-        status: {
-          in: ["WAITING_PAYMENT", "CUSTOMER_SENT_BILL", "WAITING_ADMIN_VERIFY", "WAITING_PAYOUT", "MANUAL_REVIEW", "SUSPICIOUS"]
-        }
-      }
-    })
-  ]);
-
-  const text = renderAdminStartText(staffName, isSuperAdmin, { waiting, active, pendingOrders });
-  const keyboard = getAdminMenuKeyboard(isSuperAdmin);
-  await ctx.reply(text, { parse_mode: "HTML", reply_markup: keyboard });
+  // Admin Operations Center (Phase 1): persistent keyboard + live dashboard.
+  await showOperationsCenter(ctx);
 }
 
 // /admin command
@@ -729,6 +712,12 @@ adminHandler.callbackQuery(/^(?:admin:pay:step2:|pay_step2:)(.+)$/, async (ctx) 
           `Hệ thống đã xác nhận tiền vào tài khoản thành công.\n` +
           `Giao dịch viên đang tiến hành chi trả <b>${updated.targetAmount} ${updated.targetCurrency}</b> tới tài khoản ngân hàng của quý khách.`
       );
+    }
+
+    // Event-driven payout-ready notification — only after a real first
+    // transition into WAITING_PAYOUT.
+    if (isPayoutReadyTransition(updated?.status)) {
+      await notifyPayoutReady({ ...updated, customer });
     }
 
     await ctx.reply(
@@ -1860,7 +1849,6 @@ adminHandler.callbackQuery("admin:backup:toggle", async (ctx) => {
 });
 
 adminHandler.callbackQuery("admin:menu:back_start", async (ctx) => {
-  await ctx.answerCallbackQuery();
   await showAdminStart(ctx);
 });
 

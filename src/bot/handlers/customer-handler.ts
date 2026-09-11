@@ -11,7 +11,7 @@ import { ConversationalAIService } from "../../modules/ai/customer-ai-service.js
 import { FileService } from "../../modules/files/file-service.js";
 import { RuntimeConfigService } from "../../modules/system-config/runtime-config-service.js";
 import { MoneyService } from "../../modules/money/money-service.js";
-import { sendToStaff, sendToAdminNotificationChat, copyMessageToStaff, copyMessageToChat, notifyEligibleStaff } from "../notifications.js";
+import { sendToStaff, sendToAdminNotificationChat, copyMessageToStaff, copyMessageToChat, notifyEligibleStaff, notifyOrderCreated, notifyBillReceived } from "../notifications.js";
 import { SystemConfigService } from "../../modules/system-config/system-config-service.js";
 import {
   getCustomerMenuKeyboard,
@@ -466,14 +466,8 @@ customerHandler.callbackQuery(/^(?:customer:quote:confirm:|confirm_quote:)(.+)$/
       }
     }
 
-    // Notify admins
-    await sendToAdminNotificationChat(
-      `🆕 <b>ĐƠN HÀNG MỚI DƯỢC TẠO:</b> <code>${order.id}</code>\n` +
-        `• Khách: <code>${customer.id}</code>\n` +
-        `• Đổi: <b>${order.sourceAmount} ${order.sourceCurrency}</b> ➔ <b>${order.targetAmount} ${order.targetCurrency}</b>\n` +
-        `• Trạng thái: <code>WAITING_PAYMENT</code>`,
-      { parse_mode: "HTML" }
-    );
+    // Notify admins (order already durably created + audited above).
+    await notifyOrderCreated(order, customer);
   } catch (err: any) {
     // Friendly error when the DESK receiving account is missing (system
     // payment account is operator-side config, not a customer problem).
@@ -808,6 +802,10 @@ async function processBillUpload(ctx: BotContext, orderId: string, fileId: strin
         `Dơn hàng đĂ£ được ghi nhận đầy đủ bằng chứng và chuyển Admin kiểm duyệt thủ công.`,
       { parse_mode: "HTML" }
     );
+    const additionalBillOrder = await OrderService.getOrder(orderId);
+    if (additionalBillOrder) {
+      await notifyBillReceived(additionalBillOrder);
+    }
   } else {
     await ctx.reply(
       `✅ <b>ĐĂ£ nhận được biên lai thanh toán cho đơn ${orderId}.</b>\n\n` +
@@ -831,14 +829,10 @@ async function processBillUpload(ctx: BotContext, orderId: string, fileId: strin
       logger.warn({ err: promptErr, orderId }, "Failed to send payout-details prompt after bill");
     }
 
-    await sendToAdminNotificationChat(
-      `📸 <b>BIÊN LAI MỚI CHO DƠN ${orderId}</b>\n` +
-        `Admin hãy kiểm tra tài khoản ngân hàng thực tế và xác nhận đơn.`,
-      {
-        parse_mode: "HTML",
-        reply_markup: new InlineKeyboard().text("🔍 Duyệt tiền nạp", `admin:pay:step1:${orderId}`)
-      }
-    );
+    const billedOrderForNotify = await OrderService.getOrder(orderId);
+    if (billedOrderForNotify) {
+      await notifyBillReceived(billedOrderForNotify);
+    }
   }
 }
 
