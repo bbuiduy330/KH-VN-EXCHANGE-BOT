@@ -28,7 +28,7 @@ import { adminScreensHandler, showRateScreen } from "./admin-screens.js";
 
 export const adminOperationsHandler = new Composer<BotContext>();
 
-export { handleAdminPayoutEvidenceMedia };
+export { handleAdminPayoutEvidenceMedia, showOperationsCenter };
 
 adminOperationsHandler.use(adminOrdersHandler);
 adminOperationsHandler.use(adminActionsHandler);
