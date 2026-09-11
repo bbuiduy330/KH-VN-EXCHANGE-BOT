@@ -108,7 +108,9 @@ export function renderCustomerPreviewText(conv: ConversationWithCustomer, contex
   const c = conv.customer;
   const lines = [
     `👤 <b>Khách</b>: ${shortCustomerLabel(c)}`,
-    `🆔 ID ngắn: <code>${c.id.slice(-6)}</code>`,
+    c.telegramId
+      ? `🆔 Telegram ID: <code>${c.telegramId}</code>`
+      : `🆔 Ref: <code>#${c.id.slice(-6).toUpperCase()}</code>`,
     `💬 Trạng thái hỗ trợ: ${conv.mode === "HUMAN" ? (conv.claimedById ? "Đang được nhân viên hỗ trợ" : "Đang chờ nhân viên") : "AI tự động"}`
   ];
   if (conv.claimedById) lines.push(`👨‍💼 Người phụ trách: <code>${conv.claimedById}</code>`);
@@ -182,7 +184,10 @@ export function renderCustomerDetailText(
     `👤 <b>Khách</b>: ${escapeHtml(shortCustomerLabel(c))}`
   ];
   if (c.username) lines.push(`🔗 @${escapeHtml(c.username)}`);
-  lines.push(`🆔 ID ngắn: <code>${c.id.slice(-6)}</code>`);
+  if (c.telegramId) {
+    lines.push(`🆔 Telegram ID: <code>${c.telegramId}</code>`);
+  }
+  lines.push(`🔖 Ref: <code>#${c.id.slice(-6).toUpperCase()}</code>`);
   lines.push(`💬 Trạng thái hỗ trợ: ${conv.mode === "HUMAN" ? (conv.claimedById ? "Đang được nhân viên hỗ trợ" : "Đang chờ nhân viên") : "AI tự động"}`);
   lines.push(`👨‍💼 Người phụ trách: ${opts.owner || "Chưa phân công"}`);
   if (opts.need) lines.push(`💱 Nhu cầu / báo giá: ${opts.need}`);
@@ -245,7 +250,9 @@ export function renderReplyModeText(
   const lines = [
     "🎧 <b>ĐANG TRẢ LỜI KHÁCH</b>\n",
     `👤 <b>${escapeHtml(name)}</b>`,
-    `🆔 #${c.id.slice(-6)}`
+    c.telegramId
+      ? `🆔 Telegram ID: <code>${c.telegramId}</code>`
+      : `🆔 Ref: <code>#${c.id.slice(-6).toUpperCase()}</code>`
   ];
   if (context.need) lines.push(`💱 ${escapeHtml(context.need)}`);
   if (context.order) lines.push(`📦 ${escapeHtml(context.order)}`);

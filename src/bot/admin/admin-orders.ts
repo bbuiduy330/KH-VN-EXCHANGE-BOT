@@ -10,6 +10,8 @@ import { OrderService } from "../../modules/orders/order-service.js";
 import { MoneyService } from "../../modules/money/money-service.js";
 import { escapeHtml, STATUS_VI } from "../menus/cskh-panel.js";
 import { customerLabel, shortOrderId, timeAgo, maskAccountNumber, BILL_AWAITING_VERIFY_STATUSES, WARNING_REVIEW_STATUSES } from "./admin-panel.js";
+import { customerIdentity } from "../notifications.js";
+import { hasCustomerBillEvidence } from "../../modules/orders/bill-evidence.js";
 import { setAdminSearch } from "./admin-session.js";
 
 export const adminOrdersHandler = new Composer<BotContext>();
@@ -113,8 +115,7 @@ export function renderOrderDetailText(order: any): string {
   const lines: string[] = [
     `📦 <b>CHI TIẾT ĐƠN HÀNG</b> ${shortOrderId(order.id)}`,
     "",
-    `👤 Khách: <b>${escapeHtml(customerLabel(cust))}</b>`,
-    cust?.username ? `🔗 @${escapeHtml(cust.username)}` : "",
+    customerIdentity(cust),
     `📦 Mã ngắn: ${shortOrderId(order.id)}`,
     "",
     `💱 Nguồn: <b>${escapeHtml(MoneyService.formatMoney(order.sourceAmount, order.sourceCurrency))}</b>`,
@@ -154,7 +155,7 @@ export function renderOrderDetailText(order: any): string {
 
   lines.push(
     "",
-    `📷 Bill: ${order.customerBillFileId ? "Đã gửi" : "Chưa gửi"}`,
+    `📷 Bill khách: ${hasCustomerBillEvidence(order) ? "Đã gửi" : "Chưa gửi"}`,
     `💸 Trạng thái: <b>${orderStatusLabel(order.status)}</b>`,
     "",
     `🕒 Tạo: ${timeAgo(order.createdAt)}`,
@@ -170,13 +171,15 @@ export function orderDetailKeyboard(order: any): InlineKeyboard {
   const kb = new InlineKeyboard();
   const status = order.status as string;
 
-  if (order.customerBillFileId || order.payoutBillFileId) {
+  // G: customer bill evidence via the ONE authoritative check (primary
+  // reference OR evidence-table rows) — never conflated with payout evidence.
+  if (hasCustomerBillEvidence(order)) {
     kb.text("📷 Xem bill", `ops:bill:view:${order.id}`);
   }
 
   if (["WAITING_ADMIN_VERIFY", "CUSTOMER_SENT_BILL", "MANUAL_REVIEW", "SUSPICIOUS"].includes(status)) {
-    kb.row().text("✅ Xác nhận đã nhận tiền", `ops:pay:preview:${order.id}`);
-    kb.row().text("❌ Chưa nhận được tiền", `ops:pay:not_received:${order.id}`);
+    kb.row().text("✅ ĐÃ NHẬN TIỀN", `ops:pay:preview:${order.id}`);
+    kb.row().text("❌ CHƯA NHẬN ĐƯỢC TIỀN", `ops:pay:not_received:${order.id}`);
   } else if (status === "WAITING_PAYOUT") {
     if (OrderService.isPayoutReady(order as any)) {
       kb.row().text("💸 Sẵn sàng payout", `ops:payout:preview:${order.id}`);

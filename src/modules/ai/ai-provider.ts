@@ -5,6 +5,45 @@ import { SystemConfigService } from "../system-config/system-config-service.js";
 import { GeminiModelStrategy, GeminiErrorClassification } from "./gemini-models.js";
 import { MoneyService } from "../money/money-service.js";
 
+// ---------------------------------------------------------------------------
+// Bounded AI timeouts (runtime hardening)
+//
+// Every external AI operation MUST be bounded so a slow/hung Gemini call can
+// never stall the update pipeline. Recommended budgets:
+//  - intent parsing / text reply: ~6-8s
+//  - bill image analysis:         ~15s (multimodal)
+//  - voice STT:                   ~30s (longer media upload)
+// On timeout the call FAILS SOFT (returns null) — deterministic financial
+// flows never depend on AI, so nothing fabricates and nothing hangs.
+// ---------------------------------------------------------------------------
+export const AI_TIMEOUT_INTENT_MS = 7000;
+export const AI_TIMEOUT_TEXT_MS = 8000;
+export const AI_TIMEOUT_BILL_MS = 15000;
+export const AI_TIMEOUT_STT_MS = 30000;
+
+export class AiTimeoutError extends Error {
+  constructor(context: string, timeoutMs: number) {
+    super(`AI_TIMEOUT (${context}): exceeded ${timeoutMs}ms`);
+    this.name = "AiTimeoutError";
+  }
+}
+
+export function withAiTimeout<T>(promise: Promise<T>, timeoutMs: number, context: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new AiTimeoutError(context, timeoutMs)), timeoutMs);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (err) => {
+        clearTimeout(timer);
+        reject(err);
+      }
+    );
+  });
+}
+
 export interface ParsedExchangeIntent {
   sourceCurrency: string;
   targetCurrency: string;
@@ -119,7 +158,7 @@ export class AiProvider {
   /**
    * Executes a text prompt through the safe fallback model chain.
    */
-  static async executeTextPrompt(prompt: string, systemInstruction?: string): Promise<string | null> {
+  static async executeTextPrompt(prompt: string, systemInstruction?: string, timeoutMs: number = AI_TIMEOUT_TEXT_MS): Promise<string | null> {
     const { client } = await this.getClient();
     if (!client) return null;
 
@@ -131,28 +170,37 @@ export class AiProvider {
     }
 
     try {
-      const execution = await GeminiModelStrategy.executeWithFallback(
-        models,
-        async (model) => {
-          const config: Record<string, any> = {};
-          if (systemInstruction) {
-            config.systemInstruction = systemInstruction;
-          }
+      const execution = await withAiTimeout(
+        GeminiModelStrategy.executeWithFallback(
+          models,
+          async (model) => {
+            const config: Record<string, any> = {};
+            if (systemInstruction) {
+              config.systemInstruction = systemInstruction;
+            }
 
-          const response = await client.models.generateContent({
-            model,
-            contents: prompt,
-            config: Object.keys(config).length > 0 ? config : undefined
-          });
+            const response = await client.models.generateContent({
+              model,
+              contents: prompt,
+              config: Object.keys(config).length > 0 ? config : undefined
+            });
 
-          return response.text?.trim() || "";
-        },
-        { contextName: "executeTextPrompt" }
+            return response.text?.trim() || "";
+          },
+          { contextName: "executeTextPrompt" }
+        ),
+        timeoutMs,
+        "executeTextPrompt"
       );
 
       return execution.result || null;
     } catch (err: any) {
-      logger.warn({ err: err?.message || err }, "Failed to execute text prompt across fallback models");
+      // AI_TIMEOUT / provider failure must fail SOFT: localized deterministic
+      // fallbacks in the callers stay usable. Never fabricate a reply.
+      logger.warn(
+        { err: err?.message || err, isTimeout: err?.name === "AiTimeoutError" },
+        "AI text prompt failed (bounded) — returning null for deterministic fallback"
+      );
       return null;
     }
   }
@@ -506,16 +554,20 @@ Trả về duy nhất:
 {"valid": false}`;
 
     try {
-      const execution = await GeminiModelStrategy.executeWithFallback(
-        models,
-        async (model) => {
-          const response = await client.models.generateContent({
-            model,
-            contents: prompt
-          });
-          return response.text?.trim() || "";
-        },
-        { contextName: "parseExchangeIntent" }
+      const execution = await withAiTimeout(
+        GeminiModelStrategy.executeWithFallback(
+          models,
+          async (model) => {
+            const response = await client.models.generateContent({
+              model,
+              contents: prompt
+            });
+            return response.text?.trim() || "";
+          },
+          { contextName: "parseExchangeIntent" }
+        ),
+        AI_TIMEOUT_INTENT_MS,
+        "parseExchangeIntent"
       );
 
       const raw = execution.result;
@@ -593,24 +645,28 @@ Trả về DUY NHẤT một JSON hợp lệ dạng:
 }`;
 
     try {
-      const execution = await GeminiModelStrategy.executeWithFallback(
-        models,
-        async (model) => {
-          const response = await client.models.generateContent({
-            model,
-            contents: [
-              prompt,
-              {
-                inlineData: {
-                  mimeType,
-                  data: imageBuffer.toString("base64")
+      const execution = await withAiTimeout(
+        GeminiModelStrategy.executeWithFallback(
+          models,
+          async (model) => {
+            const response = await client.models.generateContent({
+              model,
+              contents: [
+                prompt,
+                {
+                  inlineData: {
+                    mimeType,
+                    data: imageBuffer.toString("base64")
+                  }
                 }
-              }
-            ]
-          });
-          return response.text?.trim() || "";
-        },
-        { contextName: "analyzeBillImage" }
+              ]
+            });
+            return response.text?.trim() || "";
+          },
+          { contextName: "analyzeBillImage" }
+        ),
+        AI_TIMEOUT_BILL_MS,
+        "analyzeBillImage"
       );
 
       const raw = execution.result;
@@ -673,24 +729,28 @@ Trả về duy nhất định dạng JSON:
 
     try {
       const startedAt = Date.now();
-      const execution = await GeminiModelStrategy.executeWithFallback(
-        models,
-        async (model) => {
-          const response = await client.models.generateContent({
-            model,
-            contents: [
-              prompt,
-              {
-                inlineData: {
-                  mimeType,
-                  data: audioBuffer.toString("base64")
+      const execution = await withAiTimeout(
+        GeminiModelStrategy.executeWithFallback(
+          models,
+          async (model) => {
+            const response = await client.models.generateContent({
+              model,
+              contents: [
+                prompt,
+                {
+                  inlineData: {
+                    mimeType,
+                    data: audioBuffer.toString("base64")
+                  }
                 }
-              }
-            ]
-          });
-          return response.text?.trim() || "";
-        },
-        { contextName: "transcribeAudio" }
+              ]
+            });
+            return response.text?.trim() || "";
+          },
+          { contextName: "transcribeAudio" }
+        ),
+        AI_TIMEOUT_STT_MS,
+        "transcribeAudio"
       );
 
       const elapsedMs = Date.now() - startedAt;
