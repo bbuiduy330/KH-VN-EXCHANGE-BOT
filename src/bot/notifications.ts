@@ -1,4 +1,4 @@
-import { Bot, InlineKeyboard } from "grammy";
+import { Bot, InlineKeyboard, InputFile } from "grammy";
 import { env } from "../config/env.js";
 import { logger } from "../shared/logger.js";
 import { SystemConfigService } from "../modules/system-config/system-config-service.js";
@@ -6,6 +6,8 @@ import { prisma } from "../database/client.js";
 import { PermissionService } from "../modules/permissions/permission-service.js";
 import { MoneyService } from "../modules/money/money-service.js";
 import { OrderService } from "../modules/orders/order-service.js";
+import { getCustomerBillEvidence } from "../modules/orders/bill-evidence.js";
+import { LocalStorageService } from "../modules/storage/local-storage-service.js";
 
 
 let botInstance: Bot<any> | null = null;
@@ -197,14 +199,98 @@ function customerName(customer: any): string {
   return name || shortId(customer.id);
 }
 
+/**
+ * B — Stable Admin/CSKH identity rendering:
+ *   👤 @username
+ *   🆔 Telegram ID: 123456789
+ *   🔖 Ref: #VEAZ8C
+ * The Telegram numeric ID comes from the persisted Customer.telegramId.
+ * The short ref is ONLY a UI reference and is never presented as "ID".
+ * (Customer-facing flows never expose the Telegram numeric ID to other
+ * customers — this helper is for Admin/CSKH surfaces only.)
+ */
+export function customerIdentity(customer: {
+  username?: string | null;
+  fullName?: string | null;
+  telegramId?: string | null;
+  id?: string;
+} | null | undefined): string {
+  if (!customer) return "👤 Khách";
+  const lines: string[] = [];
+  if (customer.username) {
+    lines.push(`👤 @${customer.username}`);
+  } else if ((customer.fullName || "").trim()) {
+    lines.push(`👤 ${customer.fullName.trim()}`);
+  } else {
+    lines.push("👤 Khách");
+  }
+  if (customer.telegramId) {
+    lines.push(`🆔 Telegram ID: <code>${customer.telegramId}</code>`);
+  }
+  if (customer.id) {
+    lines.push(`🔖 Ref: #${String(customer.id).slice(-6).toUpperCase()}`);
+  }
+  return lines.join("\n");
+}
+
+/**
+ * Runtime deep link into the private bot chat (no new env requirements).
+ * Uses the bot username resolved at startup (bot.botInfo, set in
+ * startSingleBot). Returns null when the username is unknown — callers then
+ * fall back to the text instruction only.
+ */
+export function getPrivateBotChatUrl(): string | null {
+  const me = botInstance?.botInfo as { username?: string } | undefined;
+  const username = me?.username;
+  return username ? `https://t.me/${username}` : null;
+}
+
+/**
+ * Keyboard tail for ADMIN NOTIFICATION destinations (which may be a group).
+ * Financial mutations are PRIVATE-CHAT-ONLY (denyNotPrivate), so group
+ * notifications must NEVER present buttons that will be rejected there.
+ * Only genuinely group-safe read-only actions + a deep link/instruction into
+ * the private bot chat are shown.
+ */
+function addPrivateChatProcessingTail(
+  kb: InlineKeyboard,
+  rows: Array<(kb: InlineKeyboard) => InlineKeyboard> = []
+): InlineKeyboard {
+  for (const row of rows) kb = row(kb);
+  // No dead fallback button: when the runtime username is unknown the text
+  // instruction alone carries the guidance.
+  const url = getPrivateBotChatUrl();
+  if (url) {
+    kb.row().url("▶️ Mở chat riêng với bot", url);
+  }
+  return kb;
+}
+
 /** Event: customer confirmed a quote and an order was durably created. */
 export async function notifyOrderCreated(order: any, customer: any): Promise<void> {
+  // ADMIN OPERATIONAL NOTIFICATION ONLY (Vietnamese, authorized chat).
+  // This is NOT the customer's payment instruction and NOT the bank transfer
+  // memo — those are generated separately in the customer flow. The memo is
+  // included here only so Admin can match the incoming transfer.
+  let memo = "";
+  try {
+    const { generateTransferMemo } = await import("../modules/orders/transfer-memo.js");
+    memo = generateTransferMemo(SystemConfigService.getTransferMemoTemplate(), {
+      orderId: order.id,
+      username: customer?.username,
+      telegramId: customer?.telegramId
+    });
+  } catch {
+    memo = "";
+  }
+
   const text =
-    `✅ <b>KHÁCH ĐÃ XÁC NHẬN ĐỔI TIỀN</b>\n\n` +
-    `👤 ${customerName(customer)}\n` +
+    `✅ <b>KHÁCH ĐÃ XÁC NHẬN ĐỔI TIỀN</b> <i>(thông báo nội bộ Admin)</i>\n\n` +
+    `${customerIdentity(customer)}\n` +
     `📦 ${shortId(order.id)}\n\n` +
     `💱 ${MoneyService.formatMoney(order.sourceAmount, order.sourceCurrency)} → ${MoneyService.formatMoney(order.targetAmount, order.targetCurrency)}\n` +
     `📊 Tỷ giá khóa: ${MoneyService.formatEffectiveRate(order.sourceCurrency, order.targetCurrency, order.rate)}\n` +
+    (memo ? `🔖 Nội dung CK khách cần dùng: <code>${escapeHtml(memo)}</code>\n` : "") +
     `🕒 ${new Date(order.createdAt).toLocaleTimeString("vi-VN")}`;
 
   const kb = new InlineKeyboard()
@@ -214,19 +300,64 @@ export async function notifyOrderCreated(order: any, customer: any): Promise<voi
   await sendToAdminNotificationChat(text, { parse_mode: "HTML", reply_markup: kb });
 }
 
-/** Event: customer submitted a valid bill/evidence. */
+/**
+ * H — Customer bill accepted: Admin receives the ACTUAL evidence (photo or
+ * PDF document) plus an identity/amount notification. Uses the ONE
+ * authoritative evidence reader (getCustomerBillEvidence) so legacy
+ * Order.customerBillFileId and evidence-table uploads both resolve.
+ */
 export async function notifyBillReceived(order: any): Promise<void> {
   const text =
-    `📷 <b>CÓ BILL MỚI</b>\n\n` +
-    `👤 ${customerName(order.customer)}\n` +
+    `📷 <b>CÓ BILL MỚI — CHỜ XÁC MINH</b>\n\n` +
+    `${customerIdentity(order.customer)}\n` +
     `📦 ${shortId(order.id)}\n` +
-    `💱 ${MoneyService.formatMoney(order.sourceAmount, order.sourceCurrency)} → ${MoneyService.formatMoney(order.targetAmount, order.targetCurrency)}`;
+    `💱 ${MoneyService.formatMoney(order.sourceAmount, order.sourceCurrency)} → ${MoneyService.formatMoney(order.targetAmount, order.targetCurrency)}\n\n` +
+    `⚠️ Xử lý tài chính thực hiện trong <b>chat riêng với bot</b> → 🔴 Việc cần xử lý.`;
 
-  const kb = new InlineKeyboard()
-    .text("📷 Xem bill", `ops:bill:view:${order.id}`)
-    .text("📦 Xem đơn", `ops:order:detail:${order.id}`)
-    .row()
-    .text("👤 Xem khách", `ops:customer:detail:${order.customerId}`);
+  // GROUP-SAFE READ-ONLY ACTIONS ONLY. ✅ ĐÃ NHẬN TIỀN / ❌ CHƯA NHẬN ĐƯỢC
+  // TIỀN are financial mutations (private-chat-only) and are intentionally
+  // NOT offered here — they live in the private bot Order Detail and 🔴
+  // Việc cần xử lý, where they actually execute.
+  const kb = addPrivateChatProcessingTail(
+    new InlineKeyboard()
+      .text("📷 Xem bill", `ops:bill:view:${order.id}`)
+      .text("📦 Xem đơn", `ops:order:detail:${order.id}`)
+      .row()
+      .text("👤 Xem khách", `ops:customer:detail:${order.customerId}`)
+  );
+
+  // Attach the actual evidence image/document (Telegram-native, no paths).
+  let evidenceAttached = false;
+  try {
+    const evidence = await getCustomerBillEvidence(order.id);
+    if (evidence?.filePath) {
+      const buffer = await LocalStorageService.readFile(evidence.filePath);
+      if (buffer && buffer.length > 0) {
+        const isPdf = (evidence.mimeType || "").includes("pdf");
+        const chatId = SystemConfigService.getAdminNotificationChatId()?.trim();
+        if (chatId && botInstance) {
+          if (isPdf) {
+            await botInstance.api.sendDocument(chatId, new InputFile(buffer, evidence.fileName || "bill.pdf"), {
+              caption: `📷 Biên lai khách · đơn ${shortId(order.id)}`,
+              parse_mode: "HTML"
+            });
+          } else {
+            await botInstance.api.sendPhoto(chatId, new InputFile(buffer), {
+              caption: `📷 Biên lai khách · đơn ${shortId(order.id)}`,
+              parse_mode: "HTML"
+            });
+          }
+          evidenceAttached = true;
+        }
+      }
+    }
+  } catch (err: any) {
+    logger.warn({ err: err?.message, orderRef: order?.id?.slice?.(-6) }, "notifyBillReceived: evidence attach failed");
+  }
+
+  if (!evidenceAttached) {
+    logger.warn({ orderRef: order?.id?.slice?.(-6) }, "notifyBillReceived: evidence not attached — Admin uses 📷 Xem bill");
+  }
 
   await sendToAdminNotificationChat(text, { parse_mode: "HTML", reply_markup: kb });
 }
@@ -235,13 +366,17 @@ export async function notifyBillReceived(order: any): Promise<void> {
 export async function notifyPayoutReady(order: any): Promise<void> {
   const text =
     `💸 <b>CẦN THANH TOÁN KHÁCH</b>\n\n` +
-    `👤 ${customerName(order.customer)}\n` +
+    `${customerIdentity(order.customer)}\n` +
     `📦 ${shortId(order.id)}\n\n` +
-    `Khách nhận:\n${MoneyService.formatMoney(order.targetAmount, order.targetCurrency)}`;
+    `Khách nhận:\n${MoneyService.formatMoney(order.targetAmount, order.targetCurrency)}\n\n` +
+    `⚠️ Xử lý tài chính thực hiện trong <b>chat riêng với bot</b> → 🔴 Việc cần xử lý.`;
 
-  const kb = new InlineKeyboard()
-    .text("💸 Bắt đầu payout", `ops:payout:preview:${order.id}`)
-    .text("👤 Xem khách", `ops:customer:detail:${order.customerId}`);
+  // Group-safe: "💸 Bắt đầu payout" is a private-chat-only financial action.
+  const kb = addPrivateChatProcessingTail(
+    new InlineKeyboard()
+      .text("📦 Xem đơn", `ops:order:detail:${order.id}`)
+      .text("👤 Xem khách", `ops:customer:detail:${order.customerId}`)
+  );
 
   await sendToAdminNotificationChat(text, { parse_mode: "HTML", reply_markup: kb });
 }
@@ -254,7 +389,7 @@ export async function notifyPayoutReady(order: any): Promise<void> {
 export async function notifyAwaitingPayoutInfo(order: any): Promise<void> {
   const text =
     `🟡 <b>ĐÃ NHẬN TIỀN — CHỜ KHÁCH GỬI TK/QR NHẬN</b>\n\n` +
-    `👤 ${customerName(order.customer)}\n` +
+    `${customerIdentity(order.customer)}\n` +
     `📦 ${shortId(order.id)}\n` +
     `💰 Cần chi trả: ${MoneyService.formatMoney(order.targetAmount, order.targetCurrency)}\n\n` +
     `Đơn CHƯA SẴN SÀNG payout. Khách đã được yêu cầu chọn tài khoản nhận tiền; ` +
@@ -280,7 +415,7 @@ function escapeHtml(s: string): string {
 export async function notifyOrderCancelledByCustomer(order: any): Promise<void> {
   const text =
     `❌ <b>KHÁCH ĐÃ HỦY ĐƠN</b>\n\n` +
-    `👤 ${customerName(order.customer)}\n` +
+    `${customerIdentity(order.customer)}\n` +
     `📦 ${shortId(order.id)}\n` +
     `💱 ${MoneyService.formatMoney(order.sourceAmount, order.sourceCurrency)} → ${MoneyService.formatMoney(order.targetAmount, order.targetCurrency)}\n` +
     `📍 Trạng thái: <b>CANCELLED</b>\n` +
@@ -294,7 +429,7 @@ export async function notifyOrderCancelledByCustomer(order: any): Promise<void> 
 export async function notifyOrderCancelledByAdmin(order: any, adminLabel: string, reason: string): Promise<void> {
   const text =
     `❌ <b>ADMIN ĐÃ HỦY ĐƠN</b>\n\n` +
-    `👤 Khách: ${customerName(order.customer)}\n` +
+    `${customerIdentity(order.customer)}\n` +
     `📦 ${shortId(order.id)}\n` +
     `🔐 Admin: <b>${escapeHtml(adminLabel)}</b>\n` +
     `📝 Lý do: <b>${escapeHtml(reason)}</b>\n` +
@@ -309,7 +444,7 @@ export async function notifyOrderCancelledByAdmin(order: any, adminLabel: string
 export async function notifyOrderAutoCancelled(order: any, remindersSent: number): Promise<void> {
   const text =
     `⏰ <b>TỰ ĐỘNG HỦY ĐƠN — QUÁ HẠN THANH TOÁN</b>\n\n` +
-    `👤 Khách: ${customerName(order.customer)}\n` +
+    `${customerIdentity(order.customer)}\n` +
     `📦 Mã đơn: ${shortId(order.id)}\n` +
     `🕒 Tạo lúc: ${new Date(order.createdAt).toLocaleString("vi-VN")}\n` +
     `🔔 Số lần nhắc đã gửi: <b>${remindersSent}</b>\n` +
@@ -324,7 +459,7 @@ export async function notifyOrderAutoCancelled(order: any, remindersSent: number
 export async function notifyLateBillOnCancelledOrder(order: any): Promise<void> {
   const text =
     `🚨 <b>BIÊN LAI GỬI SAU KHI ĐƠN ĐÃ HỦY — CẦN XEM XÉT THỦ CÔNG</b>\n\n` +
-    `👤 Khách: ${customerName(order.customer)}\n` +
+    `${customerIdentity(order.customer)}\n` +
     `📦 ${shortId(order.id)}\n\n` +
     `Khách vừa gửi bằng chứng chuyển tiền cho một đơn đã ở trạng thái <b>CANCELLED</b>. ` +
     `KHÔNG tự động mở lại đơn. Vui lòng xem biên lai gốc trong kho lưu trữ và quyết định thủ công ` +

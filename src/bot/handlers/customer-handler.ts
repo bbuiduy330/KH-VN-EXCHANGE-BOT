@@ -95,7 +95,7 @@ async function relayCustomerMediaToStaff(
     // Notify staff with a short text header, then native-copy the media.
     await sendToStaff(
       conv.claimedById,
-      `📎 <b>Media (${kind}) từ khách ${customer.fullName || (customer.username ? "@" + customer.username : `#${customer.id.slice(-6)}`)}:</b>\n` +
+      `📎 <b>Media (${kind}) từ khách ${customer.fullName || (customer.username ? "@" + customer.username : `Telegram ID ${(customer as any).telegramId || "?"}`)}:</b>\n` +
         `Trả lời trực tiếp trong khung chat riêng với bot.`,
       { parse_mode: "HTML" }
     );
@@ -223,7 +223,13 @@ customerHandler.command("orders", async (ctx) => {
       `${t(locale, "order.date", { date: new Date(o.createdAt).toLocaleString("vi-VN") })}\n\n`;
   }
 
-  await ctx.reply(msg, { parse_mode: "HTML", reply_markup: getCustomerMenuKeyboard(locale) });
+  // E: active unpaid orders keep their full action set reachable from
+  // "My Orders" (💳 info / 📷 bill / 💬 support / ❌ cancel).
+  const actionable = myOrders.find((o: any) => OrderService.canCustomerCancel(o).allowed);
+  await ctx.reply(msg, {
+    parse_mode: "HTML",
+    reply_markup: actionable ? getActiveOrderActionKeyboard(actionable, locale) : getCustomerMenuKeyboard(locale)
+  });
 });
 
 // ===========================================================================
@@ -491,7 +497,13 @@ customerHandler.callbackQuery("customer:menu:orders", async (ctx) => {
       `${t(locale, "order.exchange", { src: `${srcAmt} ${o.sourceCurrency}`, tgt: `${tgtAmt} ${o.targetCurrency}` })}\n` +
       `${t(locale, "order.status", { status: t(locale, `status.${o.status}`) })}\n\n`;
   }
-  await ctx.reply(msg, { parse_mode: "HTML", reply_markup: getCustomerMenuKeyboard(locale) });
+  // E: active unpaid orders keep their full action set reachable from
+  // "My Orders" (💳 info / 📷 bill / 💬 support / ❌ cancel).
+  const actionable = myOrders.find((o: any) => OrderService.canCustomerCancel(o).allowed);
+  await ctx.reply(msg, {
+    parse_mode: "HTML",
+    reply_markup: actionable ? getActiveOrderActionKeyboard(actionable, locale) : getCustomerMenuKeyboard(locale)
+  });
 });
 
 customerHandler.callbackQuery("customer:menu:bank", async (ctx) => {
@@ -652,7 +664,14 @@ customerHandler.callbackQuery(/^(?:customer:quote:confirm:|confirm_quote:)(.+)$/
       `${t(locale, "order.pay_bill_hint")}\n\n` +
       t(locale, "order.pay_later_note", { currency: order.targetCurrency });
 
-    await ctx.reply(msg, { parse_mode: "HTML" });
+    // E: the payment card MUST carry the active-order inline actions
+    // (💳 transfer info / 📷 send bill / 💬 support / ❌ cancel) immediately —
+    // canCustomerCancel(order) == allowed ⇔ the ❌ button appears NOW, not
+    // after bill/payment verification.
+    await ctx.reply(msg, {
+      parse_mode: "HTML",
+      reply_markup: getActiveOrderActionKeyboard(order as any, locale)
+    });
 
     if (receivingSnapshot?.qrFilePath) {
       const qrBuffer = await FileService.getFile(receivingSnapshot.qrFilePath);
@@ -821,8 +840,20 @@ export async function handleCustomerTextMessage(ctx: BotContext, text: string) {
     fullName: [ctx.from?.first_name, ctx.from?.last_name].filter(Boolean).join(" ")
   });
 
-  // Reserved persistent-keyboard controls are navigation, never freeform input.
+  // Reserved persistent-keyboard controls are navigation, never freeform
+  // input — they win even while a payout session is active.
   if (await handleReservedCustomerControl(ctx, customer, text)) return;
+
+  // 0a. J — RESERVED FINANCIAL ROUTING PRECEDENCE: an active payout-destination
+  // input session is a reserved financial action and MUST be intercepted
+  // BEFORE generic HUMAN support relay. A customer talking to CSKH while
+  // entering payout details still gets the payout flow, never a plain
+  // forward of bank data into the support chat.
+  const payoutSession = getPayoutInputSession(telegramId);
+  if (payoutSession) {
+    const handled = await handlePayoutTextInput(ctx, customer, payoutSession, text);
+    if (handled) return;
+  }
 
   const conv = await ConversationService.getOrCreateConversation(customer.id);
   await ConversationService.addMessage({
@@ -837,7 +868,7 @@ export async function handleCustomerTextMessage(ctx: BotContext, text: string) {
     if (conv.claimedById) {
       await sendToStaff(
         conv.claimedById,
-        `💬 <b>Tin nhắn từ ${customer.fullName || (customer.username ? "@" + customer.username : `#${customer.id.slice(-6)}`)}:</b>\n\n` +
+        `💬 <b>Tin nhắn từ ${customer.fullName || (customer.username ? "@" + customer.username : `Telegram ID ${customer.telegramId}`)}:</b>\n\n` +
           `"${text}"`,
         { parse_mode: "HTML" }
       );
@@ -861,15 +892,8 @@ export async function handleCustomerTextMessage(ctx: BotContext, text: string) {
     };
   }
 
-  // 0a. Customer payout-destination input (state-aware). The active input
-  // session BINDS this text to ONE explicit Order; without a session the text
-  // is NEVER treated as payout data. Nothing is persisted without explicit
-  // ✅ confirmation on a preview.
-  const payoutSession = getPayoutInputSession(telegramId);
-  if (payoutSession && conv.mode !== "HUMAN") {
-    const handled = await handlePayoutTextInput(ctx, customer, payoutSession, text);
-    if (handled) return;
-  }
+  // 0a (moved above): the payout-input session is intercepted BEFORE the
+  // HUMAN relay — nothing left to do here in AUTO mode.
 
   // 0b. Conversational saved-default-account capture (customer-initiated;
   // stores CustomerPayoutBank only — it is NOT attached to any Order):
@@ -1634,18 +1658,22 @@ async function handlePayoutQrUpload(
 }
 
 // Customer photo or document handler (Safe Bill Target Selection)
+//
+// J — RESERVED FINANCIAL ROUTING PRECEDENCE:
+//   1. Active payout-QR session  -> payout QR (never bill, never CSKH relay)
+//   2. Billable order (WAITING_PAYMENT) -> bill evidence (works even while the
+//      customer is in HUMAN support; CSKH/Admin are notified separately)
+//   3. ONLY THEN generic HUMAN media relay to the assigned staff.
+// A customer talking to CSKH while sending a payment bill therefore STILL
+// gets the bill stored on the order — it is not swallowed as a support
+// attachment, and a payout QR never becomes a bill or a relayed photo.
 export async function handleCustomerPhoto(ctx: BotContext) {
   const telegramId = String(ctx.from?.id || "");
   const customer = await CustomerService.getOrCreateCustomer({ telegramId });
 
-  // HUMAN mode: relay photo/document to assigned staff only (no bill attach).
-  if (await relayCustomerMediaToStaff(ctx, customer, ctx.message?.document ? "document" : "photo")) {
-    return;
-  }
-
-  // State-aware payout QR: an active payout-input session BINDS this photo to
-  // ONE explicit eligible Order. Without a session, a photo is never treated
-  // as a payout QR (arbitrary photos can never overwrite payout details).
+  // 1. State-aware payout QR: an active payout-input session BINDS this photo
+  // to ONE explicit eligible Order. Without a session, a photo is never
+  // treated as a payout QR (arbitrary photos can never overwrite details).
   const payoutSession = getPayoutInputSession(telegramId);
   if (payoutSession && payoutSession.kind === "qr") {
     await handlePayoutQrUpload(ctx, customer as any, payoutSession);
@@ -1654,65 +1682,85 @@ export async function handleCustomerPhoto(ctx: BotContext) {
 
   const locale = locOf(customer);
 
-  // Safe Bill Target Selection: Query orders waiting for bill
+  // 2. Reserved bill evidence routing (beats the generic HUMAN relay).
   const awaitingOrders = await OrderService.getOrdersAwaitingBill(customer.id);
+
+  if (awaitingOrders.length > 0) {
+    // Routing is based on customer + eligible Order + state + media type —
+    // never on media type alone (requirement I). A document carrying a safe
+    // image/PDF is bill evidence here; a payout-QR session would have captured
+    // it earlier, and without that session it can NEVER become payout data.
+    let fileId: string | undefined;
+    let mediaType: "photo" | "document" = "photo";
+    if (ctx.message?.photo && ctx.message.photo.length > 0) {
+      const photo = ctx.message.photo[ctx.message.photo.length - 1];
+      if (photo) {
+        fileId = photo.file_id;
+        mediaType = "photo";
+      }
+    } else if (ctx.message?.document) {
+      fileId = ctx.message.document.file_id;
+      mediaType = "document";
+    }
+
+    if (fileId) {
+      const mediaInfo = {
+        type: mediaType,
+        telegramMime: (ctx.message as any)?.document?.mime_type || null,
+        fileName: (ctx.message as any)?.document?.file_name || null
+      } as const;
+
+      // If customer has exactly ONE eligible order, attach automatically
+      if (awaitingOrders.length === 1) {
+        const targetOrder = awaitingOrders[0];
+        try {
+          await processBillUpload(ctx, targetOrder.id, fileId, telegramId, mediaInfo);
+        } catch (err: any) {
+          logger.error({ err }, "Error processing single customer bill");
+          await ctx.reply(t(locale, "bill.error", { error: String(err?.message || err) }));
+        }
+        // J: the bill was accepted while the customer is in HUMAN support —
+        // give the assigned staff a short heads-up (no media duplication;
+        // Admin gets the full evidence via the bill notification).
+        const conv = await ConversationService.getOrCreateConversation(customer.id);
+        if (conv.mode === "HUMAN" && conv.claimedById) {
+          await sendToStaff(
+            conv.claimedById,
+            `📷 <b>Khách ${customer.fullName || (customer.username ? "@" + customer.username : `Telegram ID ${customer.telegramId}`)} vừa gửi bill cho đơn #${targetOrder.id.slice(-6).toUpperCase()}.</b>\nĐơn chuyển sang chờ Admin đối soát.`,
+            { parse_mode: "HTML" }
+          ).catch(() => {});
+        }
+        return;
+      }
+
+      // If multiple eligible orders exist, present interactive selection buttons
+      const keyboard = new InlineKeyboard();
+      for (const order of awaitingOrders.slice(0, 5)) {
+        const srcAmt = MoneyService.formatAmount(order.sourceAmount, order.sourceCurrency);
+        keyboard.text(
+          t(locale, "bill.order_btn", { id: order.id.slice(-6), amount: `${srcAmt} ${order.sourceCurrency}` }),
+          `customer:bill:attach:${order.id}:${fileId}`
+        ).row();
+      }
+
+      await ctx.reply(
+        `${t(locale, "bill.multi_title", { count: awaitingOrders.length })}\n\n` +
+          t(locale, "bill.multi_hint"),
+        { parse_mode: "HTML", reply_markup: keyboard }
+      );
+      return;
+    }
+  }
+
+  // 3. Generic HUMAN-mode media relay — only AFTER reserved financial routing
+  // declined the media.
+  if (await relayCustomerMediaToStaff(ctx, customer, ctx.message?.document ? "document" : "photo")) {
+    return;
+  }
 
   if (awaitingOrders.length === 0) {
     return ctx.reply(t(locale, "bill.none"));
   }
-
-  // Routing is based on customer + eligible Order + state + media type —
-  // never on media type alone (requirement I). A document carrying a safe
-  // image/PDF is bill evidence here; a payout-QR session would have captured
-  // it earlier, and without that session it can NEVER become payout data.
-  let fileId: string | undefined;
-  let mediaType: "photo" | "document" = "photo";
-  if (ctx.message?.photo && ctx.message.photo.length > 0) {
-    const photo = ctx.message.photo[ctx.message.photo.length - 1];
-    if (photo) {
-      fileId = photo.file_id;
-      mediaType = "photo";
-    }
-  } else if (ctx.message?.document) {
-    fileId = ctx.message.document.file_id;
-    mediaType = "document";
-  }
-
-  if (!fileId) return;
-
-  const mediaInfo = {
-    type: mediaType,
-    telegramMime: (ctx.message as any)?.document?.mime_type || null,
-    fileName: (ctx.message as any)?.document?.file_name || null
-  } as const;
-
-  // If customer has exactly ONE eligible order, attach automatically
-  if (awaitingOrders.length === 1) {
-    const targetOrder = awaitingOrders[0];
-    try {
-      await processBillUpload(ctx, targetOrder.id, fileId, telegramId, mediaInfo);
-    } catch (err: any) {
-      logger.error({ err }, "Error processing single customer bill");
-      await ctx.reply(t(locale, "bill.error", { error: String(err?.message || err) }));
-    }
-    return;
-  }
-
-  // If multiple eligible orders exist, present interactive selection buttons
-  const keyboard = new InlineKeyboard();
-  for (const order of awaitingOrders.slice(0, 5)) {
-    const srcAmt = MoneyService.formatAmount(order.sourceAmount, order.sourceCurrency);
-    keyboard.text(
-      t(locale, "bill.order_btn", { id: order.id.slice(-6), amount: `${srcAmt} ${order.sourceCurrency}` }),
-      `customer:bill:attach:${order.id}:${fileId}`
-    ).row();
-  }
-
-  await ctx.reply(
-    `${t(locale, "bill.multi_title", { count: awaitingOrders.length })}\n\n` +
-      t(locale, "bill.multi_hint"),
-    { parse_mode: "HTML", reply_markup: keyboard }
-  );
 }
 
 // Customer voice handler
@@ -1749,12 +1797,12 @@ async function handleHumanVoice(ctx: BotContext, customer: { id: string; fullNam
     const messageId = ctx.message?.message_id;
     const fromChatId = ctx.chat?.id;
     const adminChatId = SystemConfigService.getAdminNotificationChatId();
-    const name = customer.fullName || (customer.username ? "@" + customer.username : `#${customer.id.slice(-6)}`);
+    const name = customer.fullName || (customer.username ? "@" + customer.username : `Telegram ID ${customer.telegramId}`);
     if (messageId && fromChatId && adminChatId) {
       await copyMessageToChat(fromChatId, messageId, adminChatId);
     }
     await sendToAdminNotificationChat(
-      `🎙 <b>Ghi âm từ khách ${escapeHtmlText(name)} · #${customer.id.slice(-6)}</b>`,
+      `🎙 <b>Ghi âm từ khách ${escapeHtmlText(name)} · 🆔 Telegram ID ${customer.telegramId}</b>`,
       {
         parse_mode: "HTML",
         reply_markup: new InlineKeyboard()
@@ -1776,8 +1824,8 @@ async function handleHumanVoice(ctx: BotContext, customer: { id: string; fullNam
     const fresh = await ConversationService.getOrCreateConversation(customer.id);
     if (fresh.mode !== "HUMAN" || !fresh.claimedById) return;
 
-    const name = customer.fullName || (customer.username ? "@" + customer.username : `#${customer.id.slice(-6)}`);
-    let assist = `🎙 <b>GHI ÂM TỪ KHÁCH</b>\n👤 <b>${escapeHtmlText(name)}</b> · 🆔 #${customer.id.slice(-6)}\n\n📝 Nội dung nhận diện:\n<i>"${escapeHtmlText(transcript.transcript)}"</i>`;
+    const name = customer.fullName || (customer.username ? "@" + customer.username : `Telegram ID ${customer.telegramId}`);
+    let assist = `🎙 <b>GHI ÂM TỪ KHÁCH</b>\n👤 <b>${escapeHtmlText(name)}</b>\n🆔 Telegram ID: <code>${customer.telegramId}</code>\n🔖 Ref: #${customer.id.slice(-6).toUpperCase()}\n\n📝 Nội dung nhận diện:\n<i>"${escapeHtmlText(transcript.transcript)}"</i>`;
     if ((transcript.detectedLanguage || "vi") !== "vi") {
       try {
         const translated = await AiProvider.translateText(transcript.transcript, "vi");

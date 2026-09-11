@@ -12,10 +12,11 @@ import { env } from "../../config/env.js";
 import { OrderService } from "../../modules/orders/order-service.js";
 import { FileService } from "../../modules/files/file-service.js";
 import { MoneyService } from "../../modules/money/money-service.js";
-import { sendToCustomer, notifyPayoutReady, notifyAwaitingPayoutInfo, shouldNotifyPayoutReady, notifyOrderCancelledByAdmin } from "../notifications.js";
+import { sendToCustomer, notifyPayoutReady, notifyAwaitingPayoutInfo, shouldNotifyPayoutReady, notifyOrderCancelledByAdmin, customerIdentity } from "../notifications.js";
 import { escapeHtml, STATUS_VI } from "../menus/cskh-panel.js";
 import { customerLabel, shortOrderId, maskAccountNumber } from "./admin-panel.js";
 import { sendPayoutDestinationPromptToCustomer } from "../handlers/customer-handler.js";
+import { getCustomerBillEvidence } from "../../modules/orders/bill-evidence.js";
 import { clearAdminSession, clearPendingFinancialAction, getAdminSession, setPendingFinancialAction, setPayoutEvidenceSession, setPendingAction, consumePendingAction, startWizard, clearWizard } from "./admin-session.js";
 import { ADMIN_CANCEL_REASONS, adminCancelReasonLabel } from "../../modules/orders/order-safety.js";
 import { resolveLocale, t } from "../../modules/i18n/locales.js";
@@ -41,15 +42,11 @@ export async function showBillView(ctx: BotContext, orderId: string): Promise<vo
     return;
   }
 
-  const billFileId = order.customerBillFileId || order.payoutBillFileId;
-  if (!billFileId) {
-    await ctx.reply(`📷 Đơn ${shortOrderId(order.id)} chưa có biên lai nào.`).catch(() => {});
-    return;
-  }
-
-  const evidence = await prisma.fileEvidence.findUnique({ where: { id: billFileId } });
+  // G: ONE authoritative reader — resolves both the promoted primary
+  // reference (Order.customerBillFileId) and evidence-table uploads.
+  const evidence = await getCustomerBillEvidence(orderId);
   if (!evidence || !evidence.filePath) {
-    await ctx.reply("⚠️ Không thể truy cập biên lai này (thiếu dữ liệu lưu trữ).").catch(() => {});
+    await ctx.reply(`📷 Đơn ${shortOrderId(order.id)} chưa có biên lai khách nào.`).catch(() => {});
     return;
   }
 
@@ -59,13 +56,15 @@ export async function showBillView(ctx: BotContext, orderId: string): Promise<vo
     return;
   }
 
-  const caption = `📷 Biên lai cho đơn ${shortOrderId(order.id)} · ${STATUS_VI[order.status] || order.status}`;
+  const caption =
+    `📷 Biên lai cho đơn ${shortOrderId(order.id)} · ${STATUS_VI[order.status] || order.status}\n` +
+    `👤 ${escapeHtml(customerLabel(order.customer))}${order.customer?.telegramId ? ` · 🆔 <code>${order.customer.telegramId}</code>` : ""}`;
   const isPdf = (evidence.mimeType || "").includes("pdf");
   try {
     if (isPdf) {
-      await ctx.replyWithDocument(new InputFile(buffer, evidence.fileName || "bill.pdf"), { caption });
+      await ctx.replyWithDocument(new InputFile(buffer, evidence.fileName || "bill.pdf"), { caption, parse_mode: "HTML" });
     } else {
-      await ctx.replyWithPhoto(new InputFile(buffer), { caption });
+      await ctx.replyWithPhoto(new InputFile(buffer), { caption, parse_mode: "HTML" });
     }
   } catch {
     await ctx.reply("⚠️ Không gửi được biên lai (tệp không hợp lệ hoặc quá lớn).").catch(() => {});
@@ -88,7 +87,7 @@ export async function showPayPreview(ctx: BotContext, orderId: string): Promise<
 
   const text =
     `⚠️ <b>XÁC NHẬN ĐÃ NHẬN TIỀN</b>\n\n` +
-    `👤 ${escapeHtml(customerLabel(order.customer))}\n` +
+    `${customerIdentity(order.customer)}\n` +
     `📦 ${shortOrderId(order.id)}\n\n` +
     `Khách cần chuyển:\n` +
     `<b>${escapeHtml(MoneyService.formatMoney(order.sourceAmount, order.sourceCurrency))}</b>\n\n` +
@@ -185,7 +184,7 @@ export async function showNotReceived(ctx: BotContext, orderId: string): Promise
 
   const text =
     `❌ <b>CHƯA NHẬN ĐƯỢC TIỀN</b>\n\n` +
-    `👤 ${escapeHtml(customerLabel(order.customer))}\n` +
+    `${customerIdentity(order.customer)}\n` +
     `📦 ${shortOrderId(order.id)}\n` +
     `💱 ${escapeHtml(MoneyService.formatMoney(order.sourceAmount, order.sourceCurrency))}\n\n` +
     `Đơn hàng vẫn giữ nguyên trạng thái <b>${STATUS_VI[order.status] || order.status}</b>.\n` +
@@ -237,7 +236,7 @@ export async function showPayoutPreview(ctx: BotContext, orderId: string): Promi
   const lines = [
     payoutReady ? "💸 <b>SẴN SÀNG PAYOUT</b>" : "🟡 <b>ĐÃ NHẬN TIỀN — CHỜ KHÁCH GỬI TK/QR NHẬN</b>",
     "",
-    `👤 ${escapeHtml(customerLabel(order.customer))}`,
+    customerIdentity(order.customer),
     `📦 ${shortOrderId(order.id)}`,
     `💰 Khách nhận: <b>${escapeHtml(MoneyService.formatMoney(order.targetAmount, order.targetCurrency))}</b>`,
     ""
@@ -435,7 +434,7 @@ export async function showCompletePayoutPreview(ctx: BotContext, orderId: string
 
   const text =
     `⚠️ <b>HOÀN TẤT ĐƠN HÀNG</b>\n\n` +
-    `👤 ${escapeHtml(customerLabel(order.customer))}\n` +
+    `${customerIdentity(order.customer)}\n` +
     `📦 ${shortOrderId(order.id)}\n` +
     `💰 ${escapeHtml(MoneyService.formatMoney(order.targetAmount, order.targetCurrency))}\n\n` +
     `Trạng thái hiện tại: <b>Đã chi tiền (PAYOUT_SENT)</b>\n` +
@@ -540,7 +539,7 @@ export async function showCancelReasonChoice(ctx: BotContext, orderId: string): 
 
   await ctx.reply(
     `❌ <b>HUỶ ĐƠN ${shortOrderId(order.id)}</b>\n\n` +
-      `👤 ${escapeHtml(customerLabel(order.customer))}\n` +
+      `${customerIdentity(order.customer)}\n` +
       `📍 Trạng thái: <b>${STATUS_VI[order.status] || order.status}</b>\n\n` +
       `Chọn lý do huỷ đơn:`,
     { parse_mode: "HTML", reply_markup: kb }
@@ -590,7 +589,7 @@ async function showCancelPreviewWithReason(ctx: BotContext, orderId: string, rea
 
   const text =
     `⚠️ <b>XEM TRƯỚC KHI HUỶ ĐƠN</b>\n\n` +
-    `👤 Khách: ${escapeHtml(customerLabel(order.customer))}\n` +
+    `${customerIdentity(order.customer)}\n` +
     `📦 Mã: ${shortOrderId(order.id)}\n` +
     `💱 ${escapeHtml(MoneyService.formatMoney(order.sourceAmount, order.sourceCurrency))} → ${escapeHtml(MoneyService.formatMoney(order.targetAmount, order.targetCurrency))}\n` +
     `📍 Trạng thái: <b>${STATUS_VI[order.status] || order.status}</b>\n` +

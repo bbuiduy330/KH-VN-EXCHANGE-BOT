@@ -4,7 +4,7 @@
  */
 import { Composer, InlineKeyboard } from "grammy";
 import { BotContext } from "../middleware/identity.js";
-import { requirePermission } from "../middleware/permissions.js";
+import { requireRole } from "../middleware/permissions.js";
 import { SystemConfigService } from "../../modules/system-config/system-config-service.js";
 import { validateTransferMemoTemplate, generateTransferMemo } from "../../modules/orders/transfer-memo.js";
 import { escapeHtml } from "../menus/cskh-panel.js";
@@ -58,7 +58,11 @@ const CONFIG_LABEL: Record<string, string> = {
 
 export async function startConfigEdit(ctx: BotContext, key: string): Promise<void> {
   await ctx.answerCallbackQuery();
-  if (!(await requirePermission(ctx, "staff.manage"))) return;
+  // Runtime fix: config editing (including the transfer-memo template) must be
+  // reachable from the NORMAL Admin UX. "staff.manage" is NOT part of
+  // DEFAULT_ADMIN_PERMISSIONS, so the previous check silently denied every
+  // non-Super Admin. Operational config is an ADMIN-role capability.
+  if (!(await requireRole(ctx, ["ADMIN", "SUPER_ADMIN"]))) return;
   startWizard(String(ctx.from?.id || ""), "config_edit", { key });
   const label = CONFIG_LABEL[key] || key;
   const hint =
@@ -120,7 +124,7 @@ export async function handleConfigInput(ctx: BotContext, text: string): Promise<
 
 export async function confirmConfigSave(ctx: BotContext): Promise<void> {
   await ctx.answerCallbackQuery();
-  if (!(await requirePermission(ctx, "staff.manage"))) return;
+  if (!(await requireRole(ctx, ["ADMIN", "SUPER_ADMIN"]))) return;
   const adminId = String(ctx.from?.id || "");
   if (isSessionExpired(adminId)) {
     clearWizard(adminId);
@@ -151,7 +155,7 @@ export async function cancelConfigWizard(ctx: BotContext): Promise<void> {
 
 export async function toggleBackup(ctx: BotContext): Promise<void> {
   await ctx.answerCallbackQuery();
-  if (!(await requirePermission(ctx, "staff.manage"))) return;
+  if (!(await requireRole(ctx, ["ADMIN", "SUPER_ADMIN"]))) return;
   const next = !SystemConfigService.isBackupEnabled();
   await SystemConfigService.updateConfig({ backupEnabled: next }, String(ctx.from?.id || ""));
   await ctx.reply(`✅ Đã ${next ? "BẬT" : "TẮT"} sao lưu tự động.`).catch(() => {});

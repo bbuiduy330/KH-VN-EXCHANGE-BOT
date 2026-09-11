@@ -11,7 +11,8 @@ import { ConversationService } from "../../modules/conversation/conversation-ser
 import { PermissionService } from "../../modules/permissions/permission-service.js";
 import { MoneyService } from "../../modules/money/money-service.js";
 import { escapeHtml, staffDisplayName } from "../menus/cskh-panel.js";
-import { customerLabel, shortCustomerId, shortOrderId } from "./admin-panel.js";
+import { customerLabel, shortOrderId } from "./admin-panel.js";
+import { customerIdentity } from "../notifications.js";
 import { setAdminSearch } from "./admin-session.js";
 import { clearSelectedCustomer, getSelectedCustomer, setSelectedCustomer } from "../state/staff-chat-session.js";
 
@@ -40,9 +41,7 @@ export function renderCustomerDetailText(customer: any, conv: any, latestOrder: 
   const lines = [
     `👤 <b>KHÁCH HÀNG</b>`,
     "",
-    `👤 ${escapeHtml(customerLabel(customer))}`,
-    customer.username ? `🔗 @${escapeHtml(customer.username)}` : "",
-    `🆔 ${shortCustomerId(customer.id)}`,
+    customerIdentity(customer),
     `🌐 ${escapeHtml(customer.language || "vi")}`,
     ""
   ];
@@ -139,7 +138,7 @@ export async function showCustomerList(ctx: BotContext): Promise<void> {
     lines.push("Chưa có khách hàng nào.");
   } else {
     for (const c of customers) {
-      lines.push(`👤 ${escapeHtml(customerLabel(c))} · 🆔 ${shortCustomerId(c.id)}`);
+      lines.push(`👤 ${escapeHtml(customerLabel(c))}${c.telegramId ? ` · 🆔 <code>${c.telegramId}</code>` : ""} · 🔖 #${String(c.id).slice(-6).toUpperCase()}`);
       kb.row().text(`👤 ${escapeHtml(customerLabel(c))}`, `ops:customer:detail:${c.id}`);
     }
   }
@@ -169,7 +168,7 @@ export async function runCustomerSearch(ctx: BotContext, query: string): Promise
   const lines = [`🔎 <b>Tìm thấy ${matches.length} khách:</b>`, ""];
   const kb = new InlineKeyboard();
   for (const c of matches) {
-    lines.push(`👤 ${escapeHtml(customerLabel(c))} · 🆔 ${shortCustomerId(c.id)}`);
+    lines.push(`👤 ${escapeHtml(customerLabel(c))}${c.telegramId ? ` · 🆔 <code>${c.telegramId}</code>` : ""} · 🔖 #${String(c.id).slice(-6).toUpperCase()}`);
     kb.row().text(`👤 ${escapeHtml(customerLabel(c))}`, `ops:customer:detail:${c.id}`);
   }
   kb.row().text("🏠 Menu Admin", "ops:home");

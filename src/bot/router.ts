@@ -172,3 +172,21 @@ mainRouter.on("message:text", async (ctx) => {
     await handleStaffTextMessage(ctx, text);
   }
 });
+
+// 9. Diagnostic catch-all for UNMATCHED inline-button callbacks (F).
+// Any callback that reached the end of the router without a handler is a
+// wiring bug — log it (data only, no content) and NEVER leave the click
+// silently unanswered ("button does nothing").
+mainRouter.on("callback_query", async (ctx) => {
+  const data = ctx.callbackQuery?.data || "";
+  logger.warn(
+    { callbackDataPrefix: data.slice(0, 64), telegramId: String(ctx.from?.id || ""), chatType: ctx.chat?.type },
+    "callback:UNMATCHED — no handler registered for this callback data (routing bug)"
+  );
+  await ctx
+    .answerCallbackQuery({
+      text: "⚠️ Chức năng này không còn khả dụng. Vui lòng mở lại từ menu.",
+      show_alert: true
+    })
+    .catch(() => {});
+});
