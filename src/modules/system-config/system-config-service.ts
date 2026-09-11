@@ -54,4 +54,12 @@ export class SystemConfigService {
   static getPaymentWaitAlertMinutes(): number {
     return RuntimeConfigService.getPaymentWaitAlertMinutes();
   }
+
+  static getTransferMemoTemplate(): string {
+    return RuntimeConfigService.getTransferMemoTemplate();
+  }
+
+  static setTransferMemoTemplate(template: string, updatedBy: string = "ADMIN"): Promise<void> {
+    return RuntimeConfigService.setTransferMemoTemplate(template, updatedBy);
+  }
 }

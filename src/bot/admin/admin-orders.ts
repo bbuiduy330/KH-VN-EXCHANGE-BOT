@@ -9,7 +9,7 @@ import { prisma } from "../../database/client.js";
 import { OrderService } from "../../modules/orders/order-service.js";
 import { MoneyService } from "../../modules/money/money-service.js";
 import { escapeHtml, STATUS_VI } from "../menus/cskh-panel.js";
-import { customerLabel, shortOrderId, timeAgo, BILL_AWAITING_VERIFY_STATUSES, WARNING_REVIEW_STATUSES } from "./admin-panel.js";
+import { customerLabel, shortOrderId, timeAgo, maskAccountNumber, BILL_AWAITING_VERIFY_STATUSES, WARNING_REVIEW_STATUSES } from "./admin-panel.js";
 import { setAdminSearch } from "./admin-session.js";
 
 export const adminOrdersHandler = new Composer<BotContext>();
@@ -123,6 +123,16 @@ export function renderOrderDetailText(order: any): string {
     `💵 Phí: ${escapeHtml(MoneyService.formatMoney(order.fee, order.feeCurrency))}`
   ];
 
+  if (order.status === "WAITING_PAYOUT") {
+    // J: clearly distinguish the two WAITING_PAYOUT sub-states for Admin.
+    lines.push(
+      "",
+      OrderService.isPayoutReady(order as any)
+        ? "💸 <b>SẴN SÀNG PAYOUT</b> — có tài khoản nhận đã xác nhận"
+        : "🟡 ĐÃ NHẬN TIỀN — chờ khách gửi TK/QR nhận (chưa payout được)"
+    );
+  }
+
   if (receiving) {
     lines.push(
       "",
@@ -134,7 +144,9 @@ export function renderOrderDetailText(order: any): string {
     lines.push(
       "",
       "💳 <b>KHÁCH NHẬN VỀ</b>",
-      `• ${escapeHtml(payout.bankName || "")} · ${escapeHtml(payout.accountNumber || "")} (${escapeHtml(payout.accountName || "")})`
+      payout.type === "qr"
+        ? `• Loại: <b>Ảnh QR</b>${payout.confirmedByCustomer ? " · ✅ khách đã xác nhận" : ""}`
+        : `• ${escapeHtml(payout.bankName || "")} · ${escapeHtml(maskAccountNumber(payout.accountNumber || ""))} (${escapeHtml(payout.accountName || "")})${payout.confirmedByCustomer ? " · ✅ khách đã xác nhận" : ""}`
     );
   } else {
     lines.push("", "💳 <b>KHÁCH NHẬN VỀ</b>", "• Chưa có tài khoản nhận");
@@ -166,9 +178,23 @@ export function orderDetailKeyboard(order: any): InlineKeyboard {
     kb.row().text("✅ Xác nhận đã nhận tiền", `ops:pay:preview:${order.id}`);
     kb.row().text("❌ Chưa nhận được tiền", `ops:pay:not_received:${order.id}`);
   } else if (status === "WAITING_PAYOUT") {
-    kb.row().text("💸 Bắt đầu payout", `ops:payout:preview:${order.id}`);
+    if (OrderService.isPayoutReady(order as any)) {
+      kb.row().text("💸 Sẵn sàng payout", `ops:payout:preview:${order.id}`);
+    } else {
+      // WAITING_PAYOUT without destination = waiting for customer payout info.
+      kb.row().text("🟡 Chờ khách gửi TK/QR nhận", `ops:payout:preview:${order.id}`);
+      kb.row().text("🔔 Nhắc khách gửi TK/QR", `ops:payout:nudge:${order.id}`);
+    }
   } else if (status === "PAYOUT_SENT") {
     kb.row().text("✅ Hoàn tất đơn", `ops:payout:complete:preview:${order.id}`);
+  }
+
+  // Requirement B: explicit two-step Admin cancel (reason → preview → confirm).
+  // Uses the centralized OrderService.canAdminCancel rules — confirmed-money
+  // states (PAYMENT_CONFIRMED/WAITING_PAYOUT/PAYOUT_SENT/COMPLETED/CANCELLED)
+  // never get a simple cancel button.
+  if (OrderService.canAdminCancel(order).allowed) {
+    kb.row().text("❌ Huỷ đơn", `ops:cancel:reason:${order.id}`);
   }
 
   kb.row().text("👤 Xem khách", `ops:customer:detail:${order.customerId}`);
@@ -275,15 +301,46 @@ export async function showActionInbox(ctx: BotContext): Promise<void> {
   }
 
   if (payoutOrders.length) {
-    lines.push(`💸 <b>CẦN THANH TOÁN / HOÀN TẤT (${payoutOrders.length})</b>`, "");
-    for (const o of payoutOrders) {
-      lines.push(
-        `👤 ${escapeHtml(customerLabel(o.customer))}`,
-        `📦 ${shortOrderId(o.id)}`,
-        `💰 ${escapeHtml(MoneyService.formatMoney(o.targetAmount, o.targetCurrency))} · ${orderStatusLabel(o.status)}`
-      );
-      kb.row().text(`📦 ${shortOrderId(o.id)}`, `ops:order:detail:${o.id}`);
-      lines.push("");
+    // Distinguish payout-ready (💸) from awaiting customer payout info (🟡).
+    const ready = payoutOrders.filter((o: any) => OrderService.isPayoutReady(o as any));
+    const awaitingInfo = payoutOrders.filter((o: any) => !OrderService.isPayoutReady(o as any) && o.status === "WAITING_PAYOUT");
+    const payoutSent = payoutOrders.filter((o: any) => o.status === "PAYOUT_SENT");
+
+    if (ready.length) {
+      lines.push(`💸 <b>SẴN SÀNG PAYOUT (${ready.length})</b>`, "");
+      for (const o of ready) {
+        lines.push(
+          `👤 ${escapeHtml(customerLabel(o.customer))}`,
+          `📦 ${shortOrderId(o.id)}`,
+          `💰 ${escapeHtml(MoneyService.formatMoney(o.targetAmount, o.targetCurrency))} · ${orderStatusLabel(o.status)}`
+        );
+        kb.row().text(`💸 Payout ${shortOrderId(o.id)}`, `ops:payout:preview:${o.id}`);
+        lines.push("");
+      }
+    }
+    if (awaitingInfo.length) {
+      lines.push(`🟡 <b>ĐÃ NHẬN TIỀN — CHỜ KHÁCH GỬI TK/QR (${awaitingInfo.length})</b>`, "");
+      for (const o of awaitingInfo) {
+        lines.push(
+          `👤 ${escapeHtml(customerLabel(o.customer))}`,
+          `📦 ${shortOrderId(o.id)}`,
+          `💰 ${escapeHtml(MoneyService.formatMoney(o.targetAmount, o.targetCurrency))} · KHÔNG payout được`
+        );
+        kb.row().text(`🔔 Nhắc khách ${shortOrderId(o.id)}`, `ops:payout:nudge:${o.id}`)
+          .text(`📦 ${shortOrderId(o.id)}`, `ops:order:detail:${o.id}`);
+        lines.push("");
+      }
+    }
+    if (payoutSent.length) {
+      lines.push(`📤 <b>ĐÃ CHI TIỀN — CHỜ HOÀN TẤT (${payoutSent.length})</b>`, "");
+      for (const o of payoutSent) {
+        lines.push(
+          `👤 ${escapeHtml(customerLabel(o.customer))}`,
+          `📦 ${shortOrderId(o.id)}`
+        );
+        kb.row().text(`📦 ${shortOrderId(o.id)}`, `ops:order:detail:${o.id}`);
+        lines.push("");
+      }
     }
   }
 

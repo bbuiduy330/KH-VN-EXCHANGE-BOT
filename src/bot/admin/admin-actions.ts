@@ -12,10 +12,13 @@ import { env } from "../../config/env.js";
 import { OrderService } from "../../modules/orders/order-service.js";
 import { FileService } from "../../modules/files/file-service.js";
 import { MoneyService } from "../../modules/money/money-service.js";
-import { sendToCustomer, notifyPayoutReady, isPayoutReadyTransition } from "../notifications.js";
+import { sendToCustomer, notifyPayoutReady, notifyAwaitingPayoutInfo, shouldNotifyPayoutReady, notifyOrderCancelledByAdmin } from "../notifications.js";
 import { escapeHtml, STATUS_VI } from "../menus/cskh-panel.js";
-import { customerLabel, shortOrderId } from "./admin-panel.js";
-import { clearAdminSession, clearPendingFinancialAction, getAdminSession, setPendingFinancialAction, setPayoutEvidenceSession } from "./admin-session.js";
+import { customerLabel, shortOrderId, maskAccountNumber } from "./admin-panel.js";
+import { sendPayoutDestinationPromptToCustomer } from "../handlers/customer-handler.js";
+import { clearAdminSession, clearPendingFinancialAction, getAdminSession, setPendingFinancialAction, setPayoutEvidenceSession, setPendingAction, consumePendingAction, startWizard, clearWizard } from "./admin-session.js";
+import { ADMIN_CANCEL_REASONS, adminCancelReasonLabel } from "../../modules/orders/order-safety.js";
+import { resolveLocale, t } from "../../modules/i18n/locales.js";
 
 export const adminActionsHandler = new Composer<BotContext>();
 
@@ -144,7 +147,7 @@ export async function confirmPayment(ctx: BotContext, orderId: string): Promise<
         customer.telegramId,
         `✅ <b>ĐÃ XÁC NHẬN NHẬN TIỀN</b>\n\n` +
           `Đơn ${shortOrderId(updated.id)} đã được xác nhận tiền vào.\n` +
-          `Chúng tôi đang chuyển <b>${escapeHtml(MoneyService.formatMoney(updated.targetAmount, updated.targetCurrency))}</b> tới tài khoản của bạn.`
+          `Số tiền nhận: <b>${escapeHtml(MoneyService.formatMoney(updated.targetAmount, updated.targetCurrency))}</b>.`
       );
     }
 
@@ -155,10 +158,14 @@ export async function confirmPayment(ctx: BotContext, orderId: string): Promise<
       { parse_mode: "HTML" }
     );
 
-    // Event-driven payout-ready notification for authorized admins — only
-    // after a real first transition into WAITING_PAYOUT.
-    if (isPayoutReadyTransition(updated?.status)) {
+    // Event-driven notifications — payout-ready ONLY when the order already
+    // has a valid destination; otherwise Admin sees 🟡 awaiting customer
+    // payout info and the customer is prompted to choose an account.
+    if (shouldNotifyPayoutReady(updated)) {
       await notifyPayoutReady({ ...updated, customer: customer || order.customer });
+    } else if (customer?.telegramId) {
+      await notifyAwaitingPayoutInfo({ ...updated, customer: customer || order.customer });
+      await sendPayoutDestinationPromptToCustomer(String(customer.telegramId), updated.id);
     }
   } catch (err: any) {
     await ctx.reply(`❌ Xác nhận thất bại: ${escapeHtml(err?.message || "Lỗi không xác định")}`, { parse_mode: "HTML" }).catch(() => {});
@@ -204,6 +211,11 @@ export async function showNotReceived(ctx: BotContext, orderId: string): Promise
  * Payout preview (WAITING_PAYOUT). Informational only — the real mutation is
  * uploading the payout bill (OrderService.submitPayoutBill), because the
  * lifecycle has no separate "payout started" state.
+ *
+ * UX contract (payout hardening):
+ * - 🟡 "Đã nhận tiền — chờ khách gửi TK/QR nhận" when NO valid destination.
+ * - 💸 "Sẵn sàng payout" when a confirmed destination exists.
+ * - The payout-evidence action is HIDDEN while not payout-ready (blocked).
  */
 export async function showPayoutPreview(ctx: BotContext, orderId: string): Promise<void> {
   await ctx.answerCallbackQuery();
@@ -221,22 +233,32 @@ export async function showPayoutPreview(ctx: BotContext, orderId: string): Promi
   }
 
   const payout = order.payoutBankSnapshot as any;
+  const payoutReady = OrderService.isPayoutReady(order as any);
   const lines = [
-    `⚠️ <b>XÁC NHẬN PAYOUT</b>`,
+    payoutReady ? "💸 <b>SẴN SÀNG PAYOUT</b>" : "🟡 <b>ĐÃ NHẬN TIỀN — CHỜ KHÁCH GỬI TK/QR NHẬN</b>",
     "",
     `👤 ${escapeHtml(customerLabel(order.customer))}`,
     `📦 ${shortOrderId(order.id)}`,
     `💰 Khách nhận: <b>${escapeHtml(MoneyService.formatMoney(order.targetAmount, order.targetCurrency))}</b>`,
     ""
   ];
-  if (payout) {
-    lines.push(
-      `🏦 ${escapeHtml(payout.bankName || "")}`,
-      `👤 ${escapeHtml(payout.accountName || "")}`,
-      `💳 ${escapeHtml(payout.accountNumber || "")}`
-    );
+  if (payout && payoutReady) {
+    if (payout.type === "qr") {
+      lines.push(
+        `🖱 Loại tài khoản nhận: <b>Ảnh QR</b>`,
+        `✅ Khách đã xác nhận${payout.confirmedAt ? ` · ${new Date(payout.confirmedAt).toLocaleString("vi-VN")}` : ""}`
+      );
+    } else {
+      lines.push(
+        `🏦 ${escapeHtml(payout.bankName || "")}`,
+        `👤 ${escapeHtml(payout.accountName || "")}`,
+        `💳 ${escapeHtml(maskAccountNumber(payout.accountNumber || ""))}`,
+        `✅ Khách đã xác nhận${payout.confirmedAt ? ` · ${new Date(payout.confirmedAt).toLocaleString("vi-VN")}` : ""}`
+      );
+    }
   } else {
-    lines.push("⚠️ Khách chưa cung cấp tài khoản nhận tiền.");
+    lines.push("⚠️ Khách CHƯA cung cấp tài khoản nhận tiền đã xác nhận.");
+    lines.push("Đơn này CHƯA sẵn sàng payout — hãy nhắc khách gửi TK/QR nhận.");
   }
   lines.push(
     "",
@@ -245,20 +267,39 @@ export async function showPayoutPreview(ctx: BotContext, orderId: string): Promi
     "Sau khi chuyển tiền thật, gửi ảnh biên lai chi trả để chuyển đơn sang <b>Đã chi tiền (PAYOUT_SENT)</b>."
   );
 
-  const kb = new InlineKeyboard()
-    .row().text("📎 Gửi bằng chứng payout", `ops:payout:evidence:${order.id}`)
-    .row().text("👤 Xem khách", `ops:customer:detail:${order.customerId}`)
+  const kb = new InlineKeyboard();
+  if (payoutReady) {
+    kb.row().text("📎 Gửi bằng chứng payout", `ops:payout:evidence:${order.id}`);
+  } else {
+    kb.row().text("🔔 Nhắc khách gửi TK/QR", `ops:payout:nudge:${order.id}`);
+  }
+  kb.row().text("👤 Xem khách", `ops:customer:detail:${order.customerId}`)
     .text("🏠 Menu Admin", "ops:home");
+
+  const sendPreview = async (): Promise<void> => {
+    if (payoutReady && payout?.type === "qr" && payout.qrFilePath) {
+      const qrBuffer = await FileService.getFile(payout.qrFilePath);
+      if (qrBuffer) {
+        await ctx.replyWithPhoto(new InputFile(qrBuffer), {
+          caption: `🖼 QR nhận tiền của khách · đơn ${shortOrderId(order.id)}`
+        });
+      } else {
+        await ctx.reply("⚠️ Không đọc được ảnh QR nhận tiền của khách.").catch(() => {});
+      }
+    }
+    await ctx.reply(lines.join("\n"), { parse_mode: "HTML", reply_markup: kb });
+  };
 
   if (ctx.callbackQuery) {
     try {
       await ctx.editMessageText(lines.join("\n"), { parse_mode: "HTML", reply_markup: kb });
+      await sendPreview();
       return;
     } catch {
       /* fall through */
     }
   }
-  await ctx.reply(lines.join("\n"), { parse_mode: "HTML", reply_markup: kb });
+  await sendPreview();
 }
 
 /** Enter per-admin payout-evidence mode for exactly one selected order. */
@@ -274,6 +315,14 @@ export async function startPayoutEvidence(ctx: BotContext, orderId: string): Pro
   }
   if (order.status !== "WAITING_PAYOUT") {
     await ctx.reply(`⚠️ Đơn hàng đang ở trạng thái <b>${order.status}</b>.`, { parse_mode: "HTML" }).catch(() => {});
+    return;
+  }
+  // Payout action must be blocked without a confirmed payout destination.
+  if (!OrderService.isPayoutReady(order as any)) {
+    await ctx.reply(
+      "🟡 <b>Chưa thể payout</b> — khách chưa gửi tài khoản/QR nhận tiền đã xác nhận. Dùng <b>🔔 Nhắc khách gửi TK/QR</b>.",
+      { parse_mode: "HTML" }
+    ).catch(() => {});
     return;
   }
 
@@ -443,12 +492,241 @@ export async function confirmCompletePayout(ctx: BotContext, orderId: string): P
   }
 }
 
+// ===========================================================================
+// Admin order cancellation (requirement B) — reason → preview → final confirm.
+// Uses the SAME centralized OrderService rules as the customer flow and the
+// scheduler (requirement L). Confirmed-money states are never simple-cancelled.
+// ===========================================================================
+
+/** Step 1: reason selection (preset buttons or free-text "other reason"). */
+export async function showCancelReasonChoice(ctx: BotContext, orderId: string): Promise<void> {
+  await ctx.answerCallbackQuery();
+  if (!(await requirePermission(ctx, "payment.verify"))) return;
+  if (!isPrivate(ctx)) return denyNotPrivate(ctx);
+
+  const order = await OrderService.getOrder(orderId);
+  if (!order) {
+    await ctx.reply("❌ Không tìm thấy đơn hàng.").catch(() => {});
+    return;
+  }
+  const decision = OrderService.canAdminCancel(order);
+  if (!decision.allowed) {
+    let hint: string;
+    if (decision.code === "PAYMENT_CONFIRMED") {
+      hint =
+        "Đơn đã XÁC NHẬN TIỀN VÀO hoặc đã giải ngân — KHÔNG thể huỷ trực tiếp. " +
+        "Dùng Manual Override / xem xét thủ công nếu chắc chắn có sự cố.";
+    } else if (decision.code === "BILL_EXISTS") {
+      hint =
+        "⛔ Đơn này ĐÃ CÓ bill/chứng cứ chuyển tiền — tiền CÓ THỂ đã vào tài khoản. " +
+        "KHÔNG thể huỷ đơn thông thường (evidence sẽ bị bỏ ngỏ). " +
+        "Hãy dùng luồng an toàn hiện có: <b>❌ Chưa nhận được tiền</b> hoặc " +
+        "<b>Manual Override (xem xét thủ công)</b>. Mọi chứng cứ được giữ nguyên.";
+    } else {
+      hint =
+        `⛔ Đơn ở trạng thái <b>${STATUS_VI[order.status] || order.status}</b> — ` +
+        "đây là vùng xem xét thủ công (manual review), KHÔNG thể huỷ thông thường. " +
+        "Dùng <b>❌ Chưa nhận được tiền</b> hoặc Manual Override nếu cần xử lý.";
+    }
+    await ctx.reply(hint, { parse_mode: "HTML" }).catch(() => {});
+    return;
+  }
+
+  const kb = new InlineKeyboard();
+  for (const r of ADMIN_CANCEL_REASONS) {
+    kb.text(r.label, `ops:cancel:preview:${order.id}:${r.key}`).row();
+  }
+  kb.text("✍️ Lý do khác (nhập text)", `ops:cancel:custom:${order.id}`);
+
+  await ctx.reply(
+    `❌ <b>HUỶ ĐƠN ${shortOrderId(order.id)}</b>\n\n` +
+      `👤 ${escapeHtml(customerLabel(order.customer))}\n` +
+      `📍 Trạng thái: <b>${STATUS_VI[order.status] || order.status}</b>\n\n` +
+      `Chọn lý do huỷ đơn:`,
+    { parse_mode: "HTML", reply_markup: kb }
+  );
+}
+
+/** Custom reason input (wizard-bound, one admin at a time). */
+export async function handleCancelReasonInput(ctx: BotContext, text: string): Promise<boolean> {
+  const adminId = String(ctx.from?.id || "");
+  const session = getAdminSession(adminId);
+  if (session.wizard?.kind !== "order_cancel_reason") return false;
+  const orderId = String(session.wizard.data?.orderId || "");
+  const reason = text.trim();
+  if (orderId && reason.length >= 3) {
+    clearWizard(adminId);
+    await showCancelPreviewWithReason(ctx, orderId, "custom", reason);
+  } else {
+    await ctx.reply("⚠️ Lý do phải từ 3 ký tự trở lên. Gửi lại lý do, hoặc /cancel để thoát.").catch(() => {});
+  }
+  return true;
+}
+
+/** Step 2: preview (NO mutation) with the chosen reason. */
+async function showCancelPreviewWithReason(ctx: BotContext, orderId: string, reasonKey: string, customReason?: string): Promise<void> {
+  const adminId = String(ctx.from?.id || "");
+  // Reload the authoritative order BEFORE showing the preview.
+  const order = await OrderService.getOrder(orderId);
+  if (!order) {
+    await ctx.reply("❌ Không tìm thấy đơn hàng.").catch(() => {});
+    return;
+  }
+  const decision = OrderService.canAdminCancel(order);
+  if (!decision.allowed) {
+    await ctx.reply("⛔ Đơn không còn ở trạng thái có thể huỷ.", { parse_mode: "HTML" }).catch(() => {});
+    return;
+  }
+
+  const reason = adminCancelReasonLabel(reasonKey, customReason);
+  // Persist the reason with the pending action so the final confirm is
+  // self-contained (and stale/expired confirmations are rejected).
+  setPendingAction(adminId, "cancel_order", orderId, { reason });
+
+  const warning = decision.billWarning
+    ? "⚠️ <b>ĐƠN ĐÃ CÓ BILL/CHỨNG CỨ CHUYỂN TIỀN.</b> Tiền CÓ THỂ đã vào tài khoản. Sau khi huỷ, hãy xem xét biên lai gốc và hoàn tiền thủ công nếu cần.\n\n"
+    : "";
+  const evidenceLine = decision.billWarning ? "✅ Có bill" : "— Không có bill";
+
+  const text =
+    `⚠️ <b>XEM TRƯỚC KHI HUỶ ĐƠN</b>\n\n` +
+    `👤 Khách: ${escapeHtml(customerLabel(order.customer))}\n` +
+    `📦 Mã: ${shortOrderId(order.id)}\n` +
+    `💱 ${escapeHtml(MoneyService.formatMoney(order.sourceAmount, order.sourceCurrency))} → ${escapeHtml(MoneyService.formatMoney(order.targetAmount, order.targetCurrency))}\n` +
+    `📍 Trạng thái: <b>${STATUS_VI[order.status] || order.status}</b>\n` +
+    `📷 Bill: ${evidenceLine}\n` +
+    `📝 Lý do: <b>${escapeHtml(reason)}</b>\n\n` +
+    warning +
+    `Xác nhận huỷ?`;
+
+  const kb = new InlineKeyboard()
+    .text("✅ XÁC NHẬN HUỶ ĐƠN", `ops:cancel:confirm:${order.id}`)
+    .row()
+    .text("❌ KHÔNG huỷ", `ops:order:detail:${order.id}`);
+
+  if (ctx.callbackQuery) {
+    try {
+      await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: kb });
+      return;
+    } catch {
+      /* fall through */
+    }
+  }
+  await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb });
+}
+
+/** Step 3: final confirmation — reload + re-verify + authoritative cancel. */
+async function confirmCancelOrder(ctx: BotContext, orderId: string): Promise<void> {
+  await ctx.answerCallbackQuery();
+  if (!(await requirePermission(ctx, "payment.verify"))) return;
+  if (!isPrivate(ctx)) return denyNotPrivate(ctx);
+
+  const adminId = String(ctx.from?.id || "");
+  // Reject stale callbacks: the preview (with reason) must still be pending.
+  const pending = consumePendingAction(adminId, "cancel_order", orderId);
+  if (!pending.valid) {
+    await ctx.reply(
+      pending.expired
+        ? "⚠️ Phiên xác nhận huỷ đã hết hạn. Vui lòng mở lại đơn hàng và chọn lý do từ đầu."
+        : "⚠️ Không có yêu cầu huỷ nào đang chờ. Hãy bấm ❌ Huỷ đơn trong chi tiết đơn.",
+      { parse_mode: "HTML" }
+    ).catch(() => {});
+    return;
+  }
+  const reason = String(pending.data?.reason || "ADMIN_CANCELLED");
+
+  // Reload the AUTHORITATIVE order right before mutating.
+  const order = await OrderService.getOrder(orderId);
+  if (!order) {
+    await ctx.reply("❌ Không tìm thấy đơn hàng.").catch(() => {});
+    return;
+  }
+  if (!OrderService.canAdminCancel(order).allowed) {
+    await ctx.reply("⛔ Đơn không còn ở trạng thái có thể huỷ (có thể đã thay đổi sau khi xem trước).", { parse_mode: "HTML" }).catch(() => {});
+    return;
+  }
+
+  try {
+    const updated = await OrderService.cancelOrder(orderId, adminId, "ADMIN", reason, {
+      source: "ADMIN_CANCELLED",
+      metadata: { adminTelegramId: adminId }
+    });
+
+    // Localized customer notice (safe wording — money may already have moved).
+    const customer = updated?.customer || order.customer;
+    if (customer?.telegramId) {
+      const locale = resolveLocale(customer.language);
+      await sendToCustomer(
+        String(customer.telegramId),
+        t(locale, "order.cancelled_by_admin", { id: orderId, reason }),
+        { parse_mode: "HTML" }
+      );
+    }
+
+    // Vietnamese Admin audit notification (actor + reason, no bank contents).
+    await notifyOrderCancelledByAdmin(
+      { ...(updated || order), customer },
+      `Admin ${adminId}`,
+      reason
+    );
+
+    await ctx.reply(
+      `❌ <b>ĐÃ HUỶ ĐƠN ${shortOrderId(orderId)}</b>\n📝 Lý do: ${escapeHtml(reason)}`,
+      { parse_mode: "HTML" }
+    ).catch(() => {});
+  } catch (err: any) {
+    await ctx.reply(`❌ Huỷ thất bại: ${escapeHtml(err?.message || "Lỗi không xác định")}`, { parse_mode: "HTML" }).catch(() => {});
+  }
+}
+
+adminActionsHandler.callbackQuery(/^ops:cancel:reason:(.+)$/, (ctx) => showCancelReasonChoice(ctx, ctx.match?.[1] || ""));
+adminActionsHandler.callbackQuery(/^ops:cancel:custom:([a-zA-Z0-9_-]+)$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  if (!(await requirePermission(ctx, "payment.verify"))) return;
+  if (!isPrivate(ctx)) return denyNotPrivate(ctx);
+  const adminId = String(ctx.from?.id || "");
+  startWizard(adminId, "order_cancel_reason", { orderId: ctx.match?.[1] || "" });
+  await ctx.reply(
+    "✍️ Nhập <b>lý do huỷ đơn</b> (tối thiểu 3 ký tự).\nGửi /cancel để thoát.",
+    { parse_mode: "HTML" }
+  ).catch(() => {});
+});
+adminActionsHandler.callbackQuery(/^ops:cancel:preview:([a-zA-Z0-9_-]+):([a-z_]+)$/, async (ctx) => {
+  const orderId = ctx.match?.[1] || "";
+  const reasonKey = ctx.match?.[2] || "";
+  if (!(await requirePermission(ctx, "payment.verify"))) return;
+  await showCancelPreviewWithReason(ctx, orderId, reasonKey);
+});
+adminActionsHandler.callbackQuery(/^ops:cancel:confirm:([a-zA-Z0-9_-]+)$/, (ctx) => confirmCancelOrder(ctx, ctx.match?.[1] || ""));
+
 adminActionsHandler.callbackQuery(/^ops:bill:view:(.+)$/, (ctx) => showBillView(ctx, ctx.match?.[1] || ""));
 adminActionsHandler.callbackQuery(/^ops:pay:preview:(.+)$/, (ctx) => showPayPreview(ctx, ctx.match?.[1] || ""));
 adminActionsHandler.callbackQuery(/^ops:pay:confirm:(.+)$/, (ctx) => confirmPayment(ctx, ctx.match?.[1] || ""));
 adminActionsHandler.callbackQuery(/^ops:pay:not_received:(.+)$/, (ctx) => showNotReceived(ctx, ctx.match?.[1] || ""));
 adminActionsHandler.callbackQuery(/^ops:payout:preview:(.+)$/, (ctx) => showPayoutPreview(ctx, ctx.match?.[1] || ""));
 adminActionsHandler.callbackQuery(/^ops:payout:evidence:(.+)$/, (ctx) => startPayoutEvidence(ctx, ctx.match?.[1] || ""));
+adminActionsHandler.callbackQuery(/^ops:payout:nudge:(.+)$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const orderId = ctx.match?.[1] || "";
+  if (!(await requirePermission(ctx, "payout.approve"))) return;
+  const order = await OrderService.getOrder(orderId);
+  if (!order || order.status !== "WAITING_PAYOUT" || OrderService.isPayoutReady(order as any)) {
+    await ctx.reply("⚠️ Đơn không còn ở trạng thái chờ khách gửi TK/QR.").catch(() => {});
+    return;
+  }
+  const customer = order.customer;
+  if (!customer?.telegramId) {
+    await ctx.reply("⚠️ Không có Telegram ID của khách để gửi yêu cầu.").catch(() => {});
+    return;
+  }
+  const sent = await sendPayoutDestinationPromptToCustomer(String(customer.telegramId), orderId);
+  await ctx.reply(
+    sent
+      ? `🔔 <b>Đã gửi yêu cầu cho khách</b> — đơn ${shortOrderId(orderId)}: khách sẽ chọn tài khoản/QR nhận tiền.`
+      : "⚠️ Không gửi được tin nhắn cho khách (có thể khách đã chặn bot).",
+    { parse_mode: "HTML" }
+  ).catch(() => {});
+});
 adminActionsHandler.callbackQuery(/^ops:payout:complete:preview:(.+)$/, (ctx) => showCompletePayoutPreview(ctx, ctx.match?.[1] || ""));
 adminActionsHandler.callbackQuery(/^ops:payout:complete:confirm:(.+)$/, (ctx) => confirmCompletePayout(ctx, ctx.match?.[1] || ""));
 

@@ -7,9 +7,36 @@ import { FileService } from "../files/file-service.js";
 import { AiProvider } from "../ai/ai-provider.js";
 import { AuditService } from "../audit/audit-service.js";
 import { LocalStorageService } from "../storage/local-storage-service.js";
+import {
+  canCustomerCancel,
+  canAdminCancel,
+  isOrderPaymentReminderEligible,
+  isOrderSafelyAutoCancellable,
+  hasValidPaymentEvidence,
+  CANCELLATION_SOURCES
+} from "./order-safety.js";
 import { logger } from "../../shared/logger.js";
 
 export class OrderService {
+  // -------------------------------------------------------------------------
+  // Authoritative safety rules (single source of truth — requirement L).
+  // Handlers/scheduler MUST use these instead of duplicating state checks.
+  // -------------------------------------------------------------------------
+  static canCustomerCancel(order: any) {
+    return canCustomerCancel(order as any);
+  }
+  static canAdminCancel(order: any) {
+    return canAdminCancel(order as any);
+  }
+  static isOrderPaymentReminderEligible(order: any) {
+    return isOrderPaymentReminderEligible(order as any);
+  }
+  static isOrderSafelyAutoCancellable(order: any) {
+    return isOrderSafelyAutoCancellable(order as any);
+  }
+  static hasValidPaymentEvidence(order: any) {
+    return hasValidPaymentEvidence(order as any);
+  }
   /**
    * Create an order from a calculated quote
    * Initial status: WAITING_PAYMENT
@@ -145,6 +172,62 @@ export class OrderService {
       include: { customer: true }
     });
     if (!order) throw new Error("Không tìm thấy đơn hàng");
+
+    // FINANCIAL SAFETY (audit fix): a late bill may ONLY be attached to an
+    // order owned by the uploading customer, and only through an EXPLICITLY
+    // bound target (the customer:bill:attach selection callback). There is no
+    // "latest CANCELLED order" guessing anywhere — random photos can never be
+    // attached to an arbitrary old cancelled order.
+    const actorCustomer = await prisma.customer.findUnique({
+      where: { telegramId: actorTelegramId || "" }
+    });
+    if (!actorCustomer || actorCustomer.id !== order.customerId) {
+      throw new Error("Không tìm thấy đơn hàng");
+    }
+
+    // Late bill after auto-cancel (requirement E): NEVER automatically reopen,
+    // confirm payment, or create a payout. Preserve the original evidence,
+    // record an audit trail, and let Admin/CSKH review manually. The order
+    // status stays CANCELLED — the customer is told staff will review.
+    if (order.status === "CANCELLED") {
+      const evidence = await FileService.saveEvidenceFile(
+        fileBuffer,
+        fileName,
+        "CUSTOMER_BILL",
+        mimeType,
+        orderId
+      );
+      await prisma.orderBillEvidence.create({
+        data: {
+          orderId,
+          fileId: evidence.id,
+          filePath: evidence.filePath,
+          sha256: evidence.sha256,
+          extracted: {},
+          uploadedBy: actorTelegramId || order.customerId
+        }
+      });
+      await prisma.orderStateHistory.create({
+        data: {
+          orderId,
+          fromStatus: "CANCELLED",
+          toStatus: "CANCELLED",
+          actorId: actorTelegramId || order.customerId,
+          actorRole: "CUSTOMER",
+          reason: "LATE_BILL_FOR_CANCELLED_ORDER",
+          metadata: { fileId: evidence.id, sha256: evidence.sha256 }
+        }
+      });
+      await AuditService.log({
+        actorId: actorTelegramId || order.customerId,
+        actorRole: "CUSTOMER",
+        action: "BILL_RECEIVED_AFTER_CANCEL",
+        targetType: "ORDER",
+        targetId: orderId,
+        details: { fileId: evidence.id, sha256: evidence.sha256, requiresManualReview: true }
+      });
+      return { status: "LATE_BILL_CANCELLED", orderId };
+    }
 
     // Check allowed statuses for uploading bill
     const allowedStatuses = ["WAITING_PAYMENT", "CUSTOMER_SENT_BILL", "WAITING_ADMIN_VERIFY", "MANUAL_REVIEW"];
@@ -460,6 +543,17 @@ export class OrderService {
     fileName: string,
     mimeType: string
   ) {
+    // HARD GATE: payout execution is blocked unless the order is truly
+    // payout-ready (WAITING_PAYOUT + valid customer-confirmed destination).
+    // This protects both the ops-center flow and the legacy /payout command.
+    const current = await prisma.order.findUnique({ where: { id: orderId } });
+    if (!current) throw new Error("Không tìm thấy đơn hàng.");
+    if (!OrderService.isPayoutReady(current as any)) {
+      throw new Error(
+        "Chưa thể chi trả: đơn chưa có tài khoản/QR nhận tiền đã xác nhận. Vui lòng yêu cầu khách gửi tài khoản nhận trước."
+      );
+    }
+
     const evidence = await FileService.saveEvidenceFile(
       fileBuffer,
       fileName,
@@ -521,6 +615,144 @@ export class OrderService {
     LocalStorageService.archiveOrderMetadata(orderId).catch(() => {});
 
     return updated;
+  }
+
+  // -------------------------------------------------------------------------
+  // Customer payout destination (per-Order snapshot; no new OrderStatus)
+  // -------------------------------------------------------------------------
+
+  /**
+   * An order is "payout-ready" only when:
+   * - status === WAITING_PAYOUT (incoming payment already verified), AND
+   * - a confirmed payout destination snapshot exists.
+   * Orders in WAITING_PAYOUT without a destination are "awaiting customer
+   * payout info" — never presented as ready for payout.
+   */
+  static isPayoutReady(order: { status: string; payoutBankSnapshot?: any }): boolean {
+    if (!order) return false;
+    if (order.status !== "WAITING_PAYOUT") return false;
+    const snap = order.payoutBankSnapshot as any;
+    if (!snap) return false;
+    if (snap.type === "qr") return Boolean(snap.qrFileId || snap.qrFilePath);
+    return Boolean(snap.bankName && snap.accountNumber && snap.accountName);
+  }
+
+  /**
+   * Attach a customer-confirmed payout destination to a specific Order.
+   * destination types:
+   *  - text: { type:"text", currency, bankName, accountName, accountNumber }
+   *  - qr:   { type:"qr", qrFileId, qrFilePath, qrSha256, mimeType }
+   * Only the owner customer on a WAITING_PAYOUT order can set it (state-aware,
+   * no global session). Never mutates historical orders.
+   */
+  static async attachPayoutDestination(
+    orderId: string,
+    customerId: string,
+    destination: { type: "text" | "qr"; [k: string]: any }
+  ) {
+    return prisma.$transaction(async (tx: any) => {
+      const order = await tx.order.findUnique({ where: { id: orderId } });
+      if (!order) throw new Error("Không tìm thấy đơn hàng.");
+      if (order.customerId !== customerId) {
+        throw new Error("Đơn hàng không thuộc về tài khoản của bạn.");
+      }
+      if (order.status !== "WAITING_PAYOUT") {
+        throw new Error(`Không thể cập nhật tài khoản nhận ở trạng thái ${order.status}.`);
+      }
+      if (!destination || !destination.type) {
+        throw new Error("Thiếu thông tin tài khoản nhận.");
+      }
+
+      const snapshot =
+        destination.type === "qr"
+          ? {
+              type: "qr",
+              qrFileId: destination.qrFileId || null,
+              qrFilePath: destination.qrFilePath || null,
+              qrSha256: destination.qrSha256 || null,
+              mimeType: destination.mimeType || "image/png",
+              confirmedByCustomer: true,
+              confirmedAt: new Date().toISOString()
+            }
+          : {
+              type: "text",
+              currency: String(destination.currency || "VND").toUpperCase(),
+              bankName: String(destination.bankName || "").trim(),
+              accountName: String(destination.accountName || "").trim(),
+              accountNumber: String(destination.accountNumber || "").trim(),
+              confirmedByCustomer: true,
+              confirmedAt: new Date().toISOString()
+            };
+
+      const updated = await tx.order.update({
+        where: { id: orderId },
+        data: { payoutBankSnapshot: snapshot }
+      });
+
+      await tx.orderStateHistory.create({
+        data: {
+          orderId,
+          fromStatus: order.status,
+          toStatus: order.status,
+          actorId: customerId,
+          actorRole: "CUSTOMER",
+          reason: "PAYOUT_DESTINATION_CONFIRMED",
+          metadata: { type: snapshot.type }
+        }
+      });
+
+      await AuditService.logStrict(
+        {
+          actorId: customerId,
+          actorRole: "CUSTOMER",
+          action: "PAYOUT_DESTINATION_CONFIRMED",
+          targetType: "ORDER",
+          targetId: orderId,
+          details: { type: snapshot.type, orderId }
+        },
+        tx
+      );
+
+      return tx.order.findUnique({ where: { id: orderId }, include: { customer: true } });
+    });
+  }
+
+  /** Most recent WAITING_PAYOUT order for a customer (destination binding target). */
+  static async getLatestEligiblePayoutOrder(customerId: string) {
+    return prisma.order.findFirst({
+      where: { customerId, status: "WAITING_PAYOUT" },
+      orderBy: { createdAt: "desc" },
+      include: { customer: true }
+    });
+  }
+
+  /**
+   * Recent unique payout destinations from THIS customer's own COMPLETED
+   * orders (snapshots only — no new SavedBankAccount table). Never exposes
+   * another customer's data.
+   */
+  static async getRecentPayoutDestinations(customerId: string, limit: number = 5) {
+    const orders = await prisma.order.findMany({
+      where: { customerId, status: "COMPLETED" },
+      orderBy: { createdAt: "desc" },
+      take: 50
+    });
+
+    const seen = new Set<string>();
+    const result: any[] = [];
+    for (const o of orders) {
+      const snap = (o.payoutBankSnapshot || null) as any;
+      if (!snap) continue;
+      const key =
+        snap.type === "qr"
+          ? `qr:${snap.qrSha256 || snap.qrFilePath || ""}`
+          : `text:${String(snap.bankName || "").toUpperCase()}:${String(snap.accountNumber || "")}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      result.push({ ...snap });
+      if (result.length >= limit) break;
+    }
+    return result;
   }
 
   /**
@@ -666,24 +898,51 @@ export class OrderService {
   }
 
   /**
-   * Cancel an active order safely
+   * Cancel an active order safely (authoritative, centralized rules).
+   *
+   * SAFETY (requirement A/B/L):
+   * - Reloads the authoritative order inside the transaction.
+   * - CUSTOMER cancellations are gated by the centralized canCustomerCancel
+   *   rules (unpaid + no evidence only).
+   * - ADMIN cancellations are gated by canAdminCancel (confirmed-money states
+   *   are never simple-cancelled).
+   * - Idempotent: cancelling an already-CANCELLED order is a no-op success.
+   * - Conditional updateMany prevents concurrent double-cancellation.
    */
-  static async cancelOrder(orderId: string, actorId: string, actorRole: string, reason: string) {
+  static async cancelOrder(
+    orderId: string,
+    actorId: string,
+    actorRole: string,
+    reason: string,
+    options?: { source?: string; metadata?: Record<string, any> }
+  ) {
     return prisma.$transaction(async (tx: any) => {
       const order = await tx.order.findUnique({ where: { id: orderId } });
       if (!order) throw new Error("Không tìm thấy đơn hàng");
 
-      const cancelableStatuses = [
-        "WAITING_PAYMENT",
-        "CUSTOMER_SENT_BILL",
-        "WAITING_ADMIN_VERIFY",
-        "PAYMENT_MISMATCH",
-        "MANUAL_REVIEW",
-        "SUSPICIOUS"
-      ];
+      // Idempotency: already cancelled → return as-is (no state change).
+      if (order.status === "CANCELLED") {
+        return order;
+      }
 
-      if (!cancelableStatuses.includes(order.status)) {
-        throw new Error(`Đơn hàng đang ở trạng thái ${order.status}, không thể hủy.`);
+      if (actorRole === "CUSTOMER") {
+        const decision = canCustomerCancel(order);
+        if (!decision.allowed) {
+          if (decision.code === "BILL_EXISTS") {
+            throw new Error("BILL_EXISTS");
+          }
+          throw new Error(`Đơn hàng đang ở trạng thái ${order.status}, không thể hủy.`);
+        }
+      } else {
+        // ADMIN / SYSTEM path — same centralized rules as the scheduler.
+        const decision = canAdminCancel(order);
+        if (!decision.allowed) {
+          throw new Error(
+            decision.code === "PAYMENT_CONFIRMED"
+              ? "Đơn đã xác nhận tiền vào hoặc đã giải ngân — không thể hủy trực tiếp. Dùng xem xét thủ công (manual override)."
+              : `Đơn hàng đang ở trạng thái ${order.status}, không thể hủy.`
+          );
+        }
       }
 
       const result = await tx.order.updateMany({
@@ -695,6 +954,8 @@ export class OrderService {
         throw new Error("Order đã thay đổi trạng thái, vui lòng thử lại.");
       }
 
+      const source = options?.source || (actorRole === "CUSTOMER" ? CANCELLATION_SOURCES.CUSTOMER : CANCELLATION_SOURCES.ADMIN);
+
       await tx.orderStateHistory.create({
         data: {
           orderId,
@@ -703,7 +964,11 @@ export class OrderService {
           actorId,
           actorRole,
           reason,
-          metadata: { canceledAt: new Date().toISOString() }
+          metadata: {
+            canceledAt: new Date().toISOString(),
+            source,
+            ...(options?.metadata || {})
+          }
         }
       });
 
@@ -714,7 +979,7 @@ export class OrderService {
           action: "ORDER_CANCELLED",
           targetType: "ORDER",
           targetId: orderId,
-          details: { reason }
+          details: { reason, source }
         },
         tx
       );
@@ -723,6 +988,88 @@ export class OrderService {
       LocalStorageService.archiveFullOrder(orderId).catch(() => {});
       return updated;
     });
+  }
+
+  /**
+   * Scheduler auto-cancel after payment timeout (requirement D).
+   * Atomic + idempotent: re-validates against the authoritative row inside the
+   * transaction and uses a conditional update so two scheduler runs can never
+   * cancel the same order twice. Returns { cancelled:false } when the order is
+   * no longer safely auto-cancellable (evidence arrived, payment confirmed,
+   * already cancelled, etc.).
+   */
+  static async cancelOrderForPaymentTimeout(orderId: string, actorId: string = "SYSTEM_SCHEDULER") {
+    return prisma.$transaction(async (tx: any) => {
+      const order = await tx.order.findUnique({ where: { id: orderId } });
+      if (!order) return { cancelled: false, reason: "NOT_FOUND" as const };
+
+      if (!isOrderSafelyAutoCancellable(order)) {
+        return { cancelled: false, reason: "NOT_ELIGIBLE" as const, status: order.status };
+      }
+
+      const result = await tx.order.updateMany({
+        where: { id: orderId, status: "WAITING_PAYMENT" },
+        data: { status: "CANCELLED" }
+      });
+      if (result.count !== 1) {
+        // Lost the race — another scheduler run / handler mutated it first.
+        return { cancelled: false, reason: "RACE_LOST" as const };
+      }
+
+      await tx.orderStateHistory.create({
+        data: {
+          orderId,
+          fromStatus: "WAITING_PAYMENT",
+          toStatus: "CANCELLED",
+          actorId,
+          actorRole: "SYSTEM",
+          reason: CANCELLATION_SOURCES.AUTO_TIMEOUT,
+          metadata: {
+            canceledAt: new Date().toISOString(),
+            source: CANCELLATION_SOURCES.AUTO_TIMEOUT
+          }
+        }
+      });
+
+      await AuditService.logStrict(
+        {
+          actorId,
+          actorRole: "SYSTEM",
+          action: "ORDER_AUTO_CANCELLED_PAYMENT_TIMEOUT",
+          targetType: "ORDER",
+          targetId: orderId,
+          details: {
+            reason: "PAYMENT_TIMEOUT",
+            source: CANCELLATION_SOURCES.AUTO_TIMEOUT
+          }
+        },
+        tx
+      );
+
+      const updated = await tx.order.findUnique({ where: { id: orderId } });
+      LocalStorageService.archiveFullOrder(orderId).catch(() => {});
+      return { cancelled: true as const, order: updated };
+    });
+  }
+
+  /**
+   * Number of payment reminders already sent for an order, derived from the
+   * persisted AuditLog (authoritative). This survives container restarts and
+   * prevents duplicate reminder spam after restart (requirement K) — no
+   * in-memory counter, no schema change.
+   */
+  static async countPaymentReminders(orderId: string): Promise<number> {
+    try {
+      // findMany + length instead of count(): works identically on the real
+      // database and on the in-memory test mock (which has no count()).
+      const rows = await prisma.auditLog.findMany({
+        where: { action: "PAYMENT_REMINDER_SENT", targetType: "ORDER", targetId: orderId }
+      });
+      return Array.isArray(rows) ? rows.length : 0;
+    } catch (err: any) {
+      logger.warn({ err: err?.message, orderId }, "countPaymentReminders failed; treating as 0");
+      return 0;
+    }
   }
 
   static async getOrder(id: string) {

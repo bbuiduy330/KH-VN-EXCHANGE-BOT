@@ -15,6 +15,8 @@ export interface BusinessConfig {
   largeTransactionThresholdUsd: number;
   quoteExpiryMinutes: number;
   paymentWaitAlertMinutes: number;
+  /** Deterministic bank-transfer reference template (stored, no schema change). */
+  transferMemoTemplate: string;
   updatedAt: string;
   updatedBy: string;
 }
@@ -32,7 +34,8 @@ export class RuntimeConfigService {
     defaultServiceFeeUsd: env.DEFAULT_SERVICE_FEE_USD || 2,
     largeTransactionThresholdUsd: env.LARGE_TRANSACTION_THRESHOLD_USD || 5000,
     quoteExpiryMinutes: env.QUOTE_EXPIRY_MINUTES || QUOTE_VALIDITY_MINUTES,
-    paymentWaitAlertMinutes: env.PAYMENT_WAIT_ALERT_MINUTES || 30
+    paymentWaitAlertMinutes: env.PAYMENT_WAIT_ALERT_MINUTES || 30,
+    transferMemoTemplate: "{shortOrder} CK"
   };
 
   /**
@@ -174,6 +177,14 @@ export class RuntimeConfigService {
     return this.set<number>("paymentWaitAlertMinutes", minutes, updatedBy);
   }
 
+  static getTransferMemoTemplate(): string {
+    return this.get<string>("transferMemoTemplate", "{shortOrder} CK");
+  }
+
+  static setTransferMemoTemplate(template: string, updatedBy: string = "ADMIN"): Promise<void> {
+    return this.set<string>("transferMemoTemplate", template, updatedBy);
+  }
+
   static getConfig(): BusinessConfig {
     return {
       geminiTextModel: this.getGeminiTextModel(),
@@ -185,6 +196,7 @@ export class RuntimeConfigService {
       largeTransactionThresholdUsd: this.getLargeTransactionThresholdUsd(),
       quoteExpiryMinutes: this.getQuoteExpiryMinutes(),
       paymentWaitAlertMinutes: this.getPaymentWaitAlertMinutes(),
+      transferMemoTemplate: this.getTransferMemoTemplate(),
       updatedAt: new Date().toISOString(),
       updatedBy: "SYSTEM"
     };
