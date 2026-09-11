@@ -551,4 +551,78 @@ export class PermissionService {
       data: { status }
     });
   }
+
+  /**
+   * Focused staff name edit (authoritative; no raw Prisma in callback handlers).
+   */
+  static async updateStaffName(actorTelegramId: string, targetTelegramId: string, name: string) {
+    const canManage = await this.canManageStaff(actorTelegramId);
+    if (!canManage) {
+      throw new Error("UNAUTHORIZED: Bạn không có quyền 'staff.manage' để sửa tên nhân sự.");
+    }
+    if (this.isSuperAdmin(targetTelegramId)) {
+      throw new Error("Không thể sửa thông tin Super Admin.");
+    }
+    const trimmed = (name || "").trim();
+    if (!trimmed) throw new Error("Tên hiển thị không được để trống.");
+
+    const updated = await prisma.staffUser.update({
+      where: { telegramId: String(targetTelegramId) },
+      data: { name: trimmed }
+    });
+
+    const actor = await this.getStaffUser(actorTelegramId);
+    await AuditService.log({
+      actorId: String(actorTelegramId),
+      actorRole: (actor?.role as any) || "ADMIN",
+      action: "STAFF_NAME_UPDATED",
+      targetType: "STAFF",
+      targetId: String(targetTelegramId),
+      details: { timestamp: new Date().toISOString() }
+    });
+
+    return updated;
+  }
+
+  /**
+   * Focused staff role edit with privilege-escalation protection:
+   * - only staff.manage holders may act
+   * - Super Admin role is never changeable
+   * - only SUPER_ADMIN may grant the ADMIN role
+   * - demotion resets permissions to the role's safe defaults
+   */
+  static async updateStaffRole(actorTelegramId: string, targetTelegramId: string, role: "ADMIN" | "CSKH") {
+    const canManage = await this.canManageStaff(actorTelegramId);
+    if (!canManage) {
+      throw new Error("UNAUTHORIZED: Bạn không có quyền 'staff.manage' để đổi vai trò nhân sự.");
+    }
+    if (this.isSuperAdmin(targetTelegramId)) {
+      throw new Error("Không thể đổi vai trò Super Admin.");
+    }
+    if (role === "ADMIN" && !this.isSuperAdmin(actorTelegramId)) {
+      throw new Error("Chỉ Super Admin mới có quyền cấp vai trò ADMIN.");
+    }
+
+    const staff = await prisma.staffUser.findUnique({ where: { telegramId: String(targetTelegramId) } });
+    if (!staff) throw new Error("Không tìm thấy nhân viên.");
+
+    const defaultPerms = role === "ADMIN" ? [...DEFAULT_ADMIN_PERMISSIONS] : [...DEFAULT_CSKH_PERMISSIONS];
+
+    const updated = await prisma.staffUser.update({
+      where: { telegramId: String(targetTelegramId) },
+      data: { role, permissions: defaultPerms }
+    });
+
+    const actor = await this.getStaffUser(actorTelegramId);
+    await AuditService.log({
+      actorId: String(actorTelegramId),
+      actorRole: (actor?.role as any) || "ADMIN",
+      action: "STAFF_ROLE_UPDATED",
+      targetType: "STAFF",
+      targetId: String(targetTelegramId),
+      details: { oldRole: staff.role, newRole: role, timestamp: new Date().toISOString() }
+    });
+
+    return updated;
+  }
 }

@@ -161,9 +161,10 @@ export class AiProvider {
    * Diagnostic test with model fallback visibility (Requirement 11 & 12).
    * Uses minimal test prompt: "Return exactly: OK" (does not expose customer/payment data).
    */
-  static async testGeminiConnection(overrideKey?: string): Promise<DiagnosticResult> {
+  static async testGeminiConnection(overrideKey?: string, overrideModel?: string): Promise<DiagnosticResult> {
     const { client, key, source } = await this.getClient(overrideKey);
-    const primaryModel = SystemConfigService.getGeminiTextModel() || GeminiModelStrategy.getPrimaryModel();
+    const requestedModel = overrideModel?.trim();
+    const primaryModel = requestedModel || SystemConfigService.getGeminiTextModel() || GeminiModelStrategy.getPrimaryModel();
 
     if (!client || !key) {
       return {
@@ -176,7 +177,8 @@ export class AiProvider {
       };
     }
 
-    const models = GeminiModelStrategy.getTextModelChain(primaryModel);
+    // Model-validation mode: test the exact requested candidate only (no fallback).
+    const models = requestedModel ? [requestedModel] : GeminiModelStrategy.getTextModelChain(primaryModel);
     if (models.length === 0) {
       return {
         ok: false,
@@ -642,7 +644,8 @@ Trả về DUY NHẤT một JSON hợp lệ dạng:
    */
   static async transcribeAudio(
     audioBuffer: Buffer,
-    mimeType: string = "audio/ogg"
+    mimeType: string = "audio/ogg",
+    overrideModel?: string
   ): Promise<TranscribeResult | null> {
     if (!audioBuffer || audioBuffer.length === 0) {
       logger.warn({ bytes: 0 }, "transcribeAudio: empty audio buffer");
@@ -655,7 +658,9 @@ Trả về DUY NHẤT một JSON hợp lệ dạng:
     // Respect the runtime-configured transcription model (fall back to the
     // configured text model when STT model is not explicitly set).
     const configuredModel = SystemConfigService.getGeminiTranscribeModel() || SystemConfigService.getGeminiTextModel();
-    const models = GeminiModelStrategy.getTranscribeModelChain(configuredModel);
+    // Model-validation mode: test the exact requested candidate only (no fallback).
+    const override = overrideModel?.trim();
+    const models = override ? [override] : GeminiModelStrategy.getTranscribeModelChain(configuredModel);
     if (models.length === 0) {
       logger.warn("AI_MODEL_UNCONFIGURED: no Gemini transcription model configured");
       return null;
