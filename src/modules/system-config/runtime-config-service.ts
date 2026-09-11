@@ -24,8 +24,8 @@ export class RuntimeConfigService {
   private static isInitialized = false;
 
   private static readonly DEFAULTS: Record<string, any> = {
-    geminiTextModel: env.GEMINI_PRIMARY_MODEL || "gemini-3.8-flash",
-    geminiTranscribeModel: env.GEMINI_PRIMARY_MODEL || "gemini-3.8-flash",
+    geminiTextModel: env.GEMINI_TEXT_MODEL || "gemini-3.8-flash",
+    geminiTranscribeModel: env.GEMINI_TRANSCRIBE_MODEL || "",
     adminNotificationChatId: env.ADMIN_NOTIFICATION_CHAT_ID || env.SUPER_ADMIN_TELEGRAM_ID || "",
     backupEnabled: env.BACKUP_ENABLED ?? false,
     backupScheduleHours: 6,
@@ -104,7 +104,7 @@ export class RuntimeConfigService {
 
   // Domain accessors:
   static getGeminiTextModel(): string {
-    return this.get<string>("geminiTextModel", env.GEMINI_PRIMARY_MODEL || "gemini-3.8-flash");
+    return this.get<string>("geminiTextModel", env.GEMINI_TEXT_MODEL || "gemini-3.8-flash");
   }
 
   static setGeminiTextModel(model: string, updatedBy: string = "ADMIN"): Promise<void> {
@@ -112,7 +112,7 @@ export class RuntimeConfigService {
   }
 
   static getGeminiTranscribeModel(): string {
-    return this.get<string>("geminiTranscribeModel", env.GEMINI_PRIMARY_MODEL || "gemini-3.8-flash");
+    return this.get<string>("geminiTranscribeModel", env.GEMINI_TRANSCRIBE_MODEL || "");
   }
 
   static getAdminNotificationChatId(): string {

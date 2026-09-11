@@ -94,13 +94,14 @@ export class AiProvider {
 
     const resolved = await SystemSecretService.resolveGeminiApiKey();
     if (!resolved.key) {
+      logger.warn({ geminiKeyAvailable: false, geminiKeySource: "NONE" }, "AI_CLIENT_UNAVAILABLE: no Gemini API key configured");
       return { client: null, key: null, source: "NONE" };
     }
 
     if (!this.cachedClient || this.cachedClientKey !== resolved.key) {
       this.cachedClient = new GoogleGenAI({ apiKey: resolved.key });
       this.cachedClientKey = resolved.key;
-      logger.info({ source: resolved.source }, "Initialized GoogleGenAI client");
+      logger.info({ geminiKeyAvailable: true, geminiKeySource: resolved.source }, "Initialized GoogleGenAI client");
     }
 
     return {
@@ -124,6 +125,10 @@ export class AiProvider {
 
     const configuredModel = SystemConfigService.getGeminiTextModel();
     const models = GeminiModelStrategy.getTextModelChain(configuredModel);
+    if (models.length === 0) {
+      logger.warn("AI_MODEL_UNCONFIGURED: no Gemini text model configured");
+      return null;
+    }
 
     try {
       const execution = await GeminiModelStrategy.executeWithFallback(
@@ -172,6 +177,16 @@ export class AiProvider {
     }
 
     const models = GeminiModelStrategy.getTextModelChain(primaryModel);
+    if (models.length === 0) {
+      return {
+        ok: false,
+        configured: false,
+        source,
+        primaryModel: "",
+        latencyMs: 0,
+        error: "Gemini model chưa được cấu hình. Dùng /setmodel <model> hoặc thiết lập GEMINI_TEXT_MODEL."
+      };
+    }
     const startTime = Date.now();
 
     try {
@@ -471,6 +486,10 @@ export class AiProvider {
 
     const configuredModel = SystemConfigService.getGeminiTextModel();
     const models = GeminiModelStrategy.getTextModelChain(configuredModel);
+    if (models.length === 0) {
+      logger.warn("AI_MODEL_UNCONFIGURED: no Gemini text model configured for exchange intent");
+      return null;
+    }
     const prompt = `Trích xuất thông tin đổi tiền từ tin nhắn khách hàng: "${text}"
 Chỉ hỗ trợ 2 loại tiền tệ: USD và VND.
 Nhận diện từ viết tắt: "đô", "$", "do" = USD; "đồng", "dong" = VND.
@@ -633,10 +652,14 @@ Trả về DUY NHẤT một JSON hợp lệ dạng:
     const { client } = await this.getClient();
     if (!client) return null;
 
-    // Respect the runtime-configured transcription model (same source as the
-    // working text path) instead of env-based fictional defaults.
-    const configuredModel = SystemConfigService.getGeminiTranscribeModel();
+    // Respect the runtime-configured transcription model (fall back to the
+    // configured text model when STT model is not explicitly set).
+    const configuredModel = SystemConfigService.getGeminiTranscribeModel() || SystemConfigService.getGeminiTextModel();
     const models = GeminiModelStrategy.getTranscribeModelChain(configuredModel);
+    if (models.length === 0) {
+      logger.warn("AI_MODEL_UNCONFIGURED: no Gemini transcription model configured");
+      return null;
+    }
 
     const prompt = `Hãy nghe đoạn âm thanh này và chuyển thành văn bản chính xác.
 Đồng thời xác định ngôn ngữ (vi: Tiếng Việt, km: Tiếng Khmer, en: Tiếng Anh, zh: Tiếng Trung).
