@@ -31,6 +31,8 @@ export interface PendingAction {
   action: string;
   targetId: string;
   timestamp: number;
+  /** Optional payload captured at preview time (e.g. cancel reason). */
+  data?: Record<string, any>;
 }
 
 export interface AdminSession {
@@ -177,9 +179,14 @@ export function isSessionExpired(telegramId: string): boolean {
 // ---------------------------------------------------------------------------
 
 /** Record a two-step action awaiting final confirmation (with its own timestamp). */
-export function setPendingAction(telegramId: string, action: string, targetId: string): void {
+export function setPendingAction(
+  telegramId: string,
+  action: string,
+  targetId: string,
+  data?: Record<string, any>
+): void {
   updateAdminSession(telegramId, {
-    pendingAction: { action, targetId, timestamp: Date.now() }
+    pendingAction: { action, targetId, timestamp: Date.now(), ...(data ? { data } : {}) }
   });
 }
 
@@ -187,14 +194,14 @@ export function setPendingAction(telegramId: string, action: string, targetId: s
  * Validate + consume a two-step action. Returns:
  * - valid:false, expired:true  → the preview is older than the timeout
  * - valid:false, expired:false → no matching pending action
- * - valid:true,  expired:false → ok to proceed
+ * - valid:true,  expired:false → ok to proceed (data carries preview payload)
  * Always clears the pending action.
  */
 export function consumePendingAction(
   telegramId: string,
   action: string,
   targetId: string
-): { valid: boolean; expired: boolean } {
+): { valid: boolean; expired: boolean; data?: Record<string, any> } {
   const session = getAdminSession(telegramId);
   const pending = session.pendingAction;
   updateAdminSession(telegramId, { pendingAction: null });
@@ -202,5 +209,5 @@ export function consumePendingAction(
   const expired = Date.now() - pending.timestamp > ADMIN_WIZARD_TIMEOUT_MS;
   if (expired) return { valid: false, expired: true };
   const match = pending.action === action && pending.targetId === targetId;
-  return { valid: match, expired: false };
+  return { valid: match, expired: false, data: pending.data };
 }

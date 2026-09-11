@@ -133,7 +133,10 @@ const RATE_DIRECTION_LABEL: Record<string, string> = {
  * reciprocal value.
  */
 export function applyRateInput(current: number, parsed: RateParseResult): number {
-  return parsed.kind === "absolute" ? parsed.value : current + parsed.value;
+  if (parsed.kind === "absolute") return parsed.value;
+  if (parsed.kind === "delta") return current + parsed.value;
+  // Error kind: caller should have rejected it before reaching here — treat as no-op.
+  return current;
 }
 
 export async function startRateEdit(ctx: BotContext, direction: string): Promise<void> {

@@ -6,6 +6,7 @@ import { startSingleBot, stopSingleBot } from "./bot/index.js";
 import { prisma, isRealPrismaClient, sanitizeDatabaseError } from "./database/client.js";
 import { RuntimeConfigService } from "./modules/system-config/runtime-config-service.js";
 import { BackupService } from "./modules/backup/backup-service.js";
+import { startPaymentReminderScheduler, stopPaymentReminderScheduler } from "./modules/orders/payment-reminder-service.js";
 
 const app = express();
 app.use(express.json());
@@ -103,6 +104,10 @@ const server = app.listen(PORT, "0.0.0.0", () => {
   // 2. Start automated backup scheduler if enabled
   BackupService.startScheduler();
 
+  // 2b. Start the payment reminder / auto-cancel scheduler (DB-derived polling;
+  // survives restarts because reminder state is re-derived from the database).
+  startPaymentReminderScheduler();
+
   // 3. Bootstrap Unified Telegram Bot gracefully
   startSingleBot().catch((err) => {
     logger.warn({ err }, "Unified Telegram Bot startup error or token missing");
@@ -113,6 +118,7 @@ const server = app.listen(PORT, "0.0.0.0", () => {
 process.on("SIGTERM", async () => {
   logger.info("SIGTERM received, gracefully shutting down server and Telegram bot...");
   BackupService.stopScheduler();
+  stopPaymentReminderScheduler();
   await stopSingleBot();
   server.close(() => {
     logger.info("HTTP server closed");
@@ -123,6 +129,7 @@ process.on("SIGTERM", async () => {
 process.on("SIGINT", async () => {
   logger.info("SIGINT received, gracefully shutting down server and Telegram bot...");
   BackupService.stopScheduler();
+  stopPaymentReminderScheduler();
   await stopSingleBot();
   server.close(() => {
     logger.info("HTTP server closed");

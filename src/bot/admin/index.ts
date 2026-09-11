@@ -22,12 +22,12 @@ import {
 } from "./admin-panel.js";
 import { clearAdminSession, getAdminSession } from "./admin-session.js";
 import { adminOrdersHandler, runOrderSearch, showActionInbox, showOrderList } from "./admin-orders.js";
-import { adminActionsHandler, handleAdminPayoutEvidenceMedia } from "./admin-actions.js";
+import { adminActionsHandler, handleAdminPayoutEvidenceMedia, handleCancelReasonInput } from "./admin-actions.js";
 import { adminCustomersHandler, runCustomerSearch, showCustomerList } from "./admin-customers.js";
 import { adminCskhHandler, showCskhOverview } from "./admin-cskh.js";
 import { adminScreensHandler } from "./admin-screens.js";
 import { adminRatesHandler, showRateManagement, handleRateWizardInput } from "./admin-rates.js";
-import { adminAccountsHandler, handleAccountWizardInput, handlePriorityInput } from "./admin-accounts.js";
+import { adminAccountsHandler, handleAccountWizardInput, handlePriorityInput, handleAccountAddQrMedia, handleAccountQrUpdateMedia } from "./admin-accounts.js";
 import { adminStaffHandler, handleStaffWizardInput, handleStaffNameInput } from "./admin-staff.js";
 import { adminAiHandler, handleAiKeyInput, handleAiModelInput, handleAiVoiceTestMedia } from "./admin-ai.js";
 import { adminConfigHandler, handleConfigInput } from "./admin-config.js";
@@ -35,7 +35,7 @@ import { adminAuditHandler } from "./admin-audit.js";
 
 export const adminOperationsHandler = new Composer<BotContext>();
 
-export { handleAdminPayoutEvidenceMedia, handleAiVoiceTestMedia, showOperationsCenter };
+export { handleAdminPayoutEvidenceMedia, handleAiVoiceTestMedia, showOperationsCenter, handleAccountAddQrMedia, handleAccountQrUpdateMedia };
 
 adminOperationsHandler.use(adminOrdersHandler);
 adminOperationsHandler.use(adminActionsHandler);
@@ -99,6 +99,11 @@ export async function handleAdminSessionText(ctx: BotContext, text: string): Pro
     if (kind === "ai_key_input") return handleAiKeyInput(ctx, text);
     if (kind === "ai_text_model" || kind === "ai_stt_model") return handleAiModelInput(ctx, text);
     if (kind === "config_edit") return handleConfigInput(ctx, text);
+    if (kind === "order_cancel_reason") return handleCancelReasonInput(ctx, text);
+    if (kind === "account_qr") {
+      await ctx.reply("📷 Vui lòng gửi <b>ảnh QR</b> vào khung chat, hoặc gửi /cancel để hủy.", { parse_mode: "HTML" });
+      return true;
+    }
   }
 
   // 2. Search session.

@@ -3,7 +3,7 @@ import { BotContext, identityMiddleware } from "./middleware/identity.js";
 import { customerHandler, showCustomerStart, handleCustomerTextMessage, handleCustomerPhoto, handleCustomerVoice } from "./handlers/customer-handler.js";
 import { cskhHandler, showCskhStart, handleStaffMedia, handleStaffTextMessage } from "./handlers/cskh-handler.js";
 import { adminHandler, showAdminStart, handleAdminPhoto, handleAdminTextMessage } from "./handlers/admin-handler.js";
-import { adminOperationsHandler, handleAdminReservedText, handleAdminSessionText, handleAdminPayoutEvidenceMedia, handleAiVoiceTestMedia } from "./admin/index.js";
+import { adminOperationsHandler, handleAdminReservedText, handleAdminSessionText, handleAdminPayoutEvidenceMedia, handleAiVoiceTestMedia, handleAccountAddQrMedia, handleAccountQrUpdateMedia } from "./admin/index.js";
 import { PermissionService } from "../modules/permissions/permission-service.js";
 import { sendToAdminNotificationChat } from "./notifications.js";
 
@@ -105,6 +105,10 @@ mainRouter.on("message:photo", async (ctx) => {
   }
   // Per-admin payout-evidence session (before generic staff media relay).
   if (userType === "ADMIN" || userType === "SUPER_ADMIN") {
+    // SYSTEM receiving-account QR sessions (add-wizard QR step + account QR
+    // update) take precedence — they are bound to the selected account.
+    if (await handleAccountAddQrMedia(ctx)) return;
+    if (await handleAccountQrUpdateMedia(ctx)) return;
     if (await handleAdminPayoutEvidenceMedia(ctx)) return;
   }
   // Staff media must NEVER be interpreted as customer bill evidence.

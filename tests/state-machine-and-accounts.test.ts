@@ -211,10 +211,10 @@ describe("State Machine, Account Versioning & Fraud Prevention Tests", () => {
       const cancelled = await OrderService.cancelOrder(order.id, customerId, "CUSTOMER", "Đổi ý");
       expect(cancelled.status).toBe("CANCELLED");
 
-      // Cannot cancel an already cancelled order
-      await expect(
-        OrderService.cancelOrder(order.id, customerId, "CUSTOMER", "Thử lại")
-      ).rejects.toThrow();
+      // Idempotent re-cancel (hardening contract): an already-CANCELLED order
+      // is returned as-is — no second mutation, no duplicate audit entry.
+      const again = await OrderService.cancelOrder(order.id, customerId, "CUSTOMER", "Thử lại");
+      expect(again.status).toBe("CANCELLED");
     });
 
     it("Detects duplicate bill hash across orders and flags as SUSPICIOUS", async () => {

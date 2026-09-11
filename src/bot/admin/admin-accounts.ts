@@ -7,6 +7,7 @@ import { BotContext } from "../middleware/identity.js";
 import { requirePermission } from "../middleware/permissions.js";
 import { PaymentAccountService } from "../../modules/payment-accounts/account-service.js";
 import { escapeHtml } from "../menus/cskh-panel.js";
+import { env } from "../../config/env.js";
 import { maskAccountNumber } from "./admin-panel.js";
 import { clearWizard, consumePendingAction, getAdminSession, isSessionExpired, setPendingAction, startWizard, updateWizard } from "./admin-session.js";
 
@@ -56,10 +57,11 @@ export async function showAccountDetail(ctx: BotContext, accountId: string): Pro
     `Chủ tài khoản: ${escapeHtml(a.accountName)}\n` +
     `Số tài khoản: <code>${escapeHtml(maskAccountNumber(a.accountNumber))}</code>\n` +
     `Trạng thái: ${a.isActive ? "🟢 Đang hoạt động" : "⚪ Tạm ngưng"}\n` +
-    `Mặc định: ${a.isDefault ? "⭐ Có" : "—"} · Ưu tiên: ${a.priority}\n\n` +
-    `Cập nhật QR dùng lệnh /addqr.`;
+    `Mặc định: ${a.isDefault ? "⭐ Có" : "—"} · Ưu tiên: ${a.priority}\n` +
+    `QR: ${a.qrFilePath ? `✅ có · v${a.qrVersion}` : "— chưa có"}\n`;
 
   const kb = new InlineKeyboard()
+    .row().text("🖼 Cập nhật QR", `ops:account:qr:${a.id}`)
     .row().text("⭐ Đặt mặc định", `ops:account:default:preview:${a.id}`)
     .text("↕️ Ưu tiên", `ops:account:priority:${a.id}`)
     .row().text(a.isActive ? "⚪ Ngừng sử dụng" : "🟢 Kích hoạt", `ops:account:toggle:preview:${a.id}`)
@@ -86,7 +88,7 @@ export async function startAccountAdd(ctx: BotContext): Promise<void> {
   if (!(await requirePermission(ctx, "payment_account.edit"))) return;
   startWizard(String(ctx.from?.id || ""), "account_add", {});
   await ctx.reply(
-    `🏦 <b>THÊM TÀI KHOẢN — BƯỚC 1/4</b>\n\nNhập tên ngân hàng/nhà cung cấp (ví dụ: Vietcombank).\n\nGửi /cancel để hủy.`,
+    `🏦 <b>THÊM TÀI KHOẢN — BƯỚC 1/5</b>\n\nNhập tên ngân hàng/nhà cung cấp (ví dụ: Vietcombank).\n\nGửi /cancel để hủy.`,
     { parse_mode: "HTML" }
   );
 }
@@ -111,7 +113,7 @@ export async function handleAccountWizardInput(ctx: BotContext, text: string): P
 
   if (step === 1) {
     updateWizard(adminId, { step: 2, data: { bankName: value } });
-    await ctx.reply(`💵 <b>BƯỚC 2/4</b>\n\nNhập loại tiền tệ (${ACCOUNT_CURRENCIES.join(" hoặc ")}):`).catch(() => {});
+    await ctx.reply(`💵 <b>BƯỚC 2/5</b>\n\nNhập loại tiền tệ (${ACCOUNT_CURRENCIES.join(" hoặc ")}):`).catch(() => {});
   } else if (step === 2) {
     const cur = value.toUpperCase();
     if (!ACCOUNT_CURRENCIES.includes(cur)) {
@@ -119,13 +121,79 @@ export async function handleAccountWizardInput(ctx: BotContext, text: string): P
       return true;
     }
     updateWizard(adminId, { step: 3, data: { currency: cur } });
-    await ctx.reply(`🔢 <b>BƯỚC 3/4</b>\n\nNhập số tài khoản:`).catch(() => {});
+    await ctx.reply(`🔢 <b>BƯỚC 3/5</b>\n\nNhập số tài khoản:`).catch(() => {});
   } else if (step === 3) {
     updateWizard(adminId, { step: 4, data: { accountNumber: value } });
-    await ctx.reply(`👤 <b>BƯỚC 4/4</b>\n\nNhập tên chủ tài khoản:`).catch(() => {});
+    await ctx.reply(`👤 <b>BƯỚC 4/5</b>\n\nNhập tên chủ tài khoản:`).catch(() => {});
   } else if (step === 4) {
     updateWizard(adminId, { step: 5, data: { accountName: value } });
+    // Step 5 (optional QR): Admin may attach the SYSTEM receiving-account QR
+    // or skip. QR is stored via PaymentAccountService (existing architecture).
+    const kb = new InlineKeyboard()
+      .text("📷 Gửi QR", "ops:account:add:qr")
+      .text("⏭ Bỏ qua", "ops:account:add:skipqr");
+    await ctx.reply(
+      `📷 <b>BƯỚC 5/6 — MÃ QR (TÙY CHỌN)</b>\n\n` +
+        `Gửi ảnh QR nhận tiền cho tài khoản này, hoặc bỏ qua.\n\n` +
+        `📷 <b>Gửi QR</b> — gửi ảnh QR vào khung chat này.\n` +
+        `⏭ <b>Bỏ qua</b> — lưu tài khoản không kèm QR.\n\n` +
+        `Gửi /cancel để hủy.`,
+      { parse_mode: "HTML", reply_markup: kb }
+    );
+  } else if (step === 6) {
+    // Step 6 is the QR-photo step; text is not accepted here.
+    await ctx.reply("📷 Vui lòng gửi ảnh QR, hoặc bấm ⏭ Bỏ qua.").catch(() => {});
+  }
+  return true;
+}
+
+/** Wizard step 5 action: await a QR photo. */
+export async function startAccountAddQr(ctx: BotContext): Promise<void> {
+  await ctx.answerCallbackQuery();
+  const adminId = String(ctx.from?.id || "");
+  const wizard = getAdminSession(adminId).wizard;
+  if (!wizard || wizard.kind !== "account_add" || wizard.step < 5) return;
+  updateWizard(adminId, { step: 6 });
+  await ctx.reply("📷 Vui lòng gửi ảnh QR nhận tiền vào khung chat này.\n\nGửi /cancel để hủy.").catch(() => {});
+}
+
+/** Wizard step 5: skip QR → preview. */
+export async function skipAccountAddQr(ctx: BotContext): Promise<void> {
+  await ctx.answerCallbackQuery();
+  const adminId = String(ctx.from?.id || "");
+  const wizard = getAdminSession(adminId).wizard;
+  if (!wizard || wizard.kind !== "account_add" || wizard.step < 5) return;
+  updateWizard(adminId, { step: 5, data: { qrBuffer: null } });
+  await showAccountAddPreview(ctx, adminId);
+}
+
+/**
+ * Consumes the next Admin photo while the account_add wizard is on the QR
+ * step (step 6). The QR is bound to the account being CREATED in this admin's
+ * wizard session — never to another account.
+ */
+export async function handleAccountAddQrMedia(ctx: BotContext): Promise<boolean> {
+  const adminId = String(ctx.from?.id || "");
+  const session = getAdminSession(adminId);
+  const wizard = session.wizard;
+  if (!wizard || wizard.kind !== "account_add" || wizard.step !== 6) return false;
+
+  const photo = ctx.message?.photo?.length ? ctx.message.photo[ctx.message.photo.length - 1] : undefined;
+  if (!photo) {
+    await ctx.reply("📷 Vui lòng gửi ảnh QR, hoặc bấm ⏭ Bỏ qua.").catch(() => {});
+    return true;
+  }
+  try {
+    const file = await ctx.api.getFile(photo.file_id);
+    const url = `https://api.telegram.org/file/bot${env.TELEGRAM_BOT_TOKEN}/${file.file_path}`;
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`Tải tệp thất bại (HTTP ${res.status})`);
+    const buffer = Buffer.from(await res.arrayBuffer());
+    updateWizard(adminId, { step: 5, data: { qrBuffer: buffer } });
+    await ctx.reply("✅ Đã nhận ảnh QR. Xem lại thông tin bên dưới trước khi lưu.").catch(() => {});
     await showAccountAddPreview(ctx, adminId);
+  } catch (err: any) {
+    await ctx.reply(`❌ Không tải được ảnh QR: ${escapeHtml(err?.message || "lỗi tải")}`, { parse_mode: "HTML" }).catch(() => {});
   }
   return true;
 }
@@ -139,7 +207,8 @@ async function showAccountAddPreview(ctx: BotContext, adminId: string): Promise<
     `Ngân hàng: <b>${escapeHtml(d.bankName)}</b>\n` +
     `Tiền tệ: ${escapeHtml(d.currency)}\n` +
     `Chủ tài khoản: ${escapeHtml(d.accountName)}\n` +
-    `Số tài khoản: <code>${escapeHtml(maskAccountNumber(d.accountNumber))}</code>`;
+    `Số tài khoản: <code>${escapeHtml(maskAccountNumber(d.accountNumber))}</code>\n` +
+    `Mã QR: ${d.qrBuffer ? "✅ có (sẽ lưu kèm)" : "— không có"}`;
   const kb = new InlineKeyboard().text("✅ LƯU", "ops:account:add:confirm").row().text("❌ HỦY", "ops:account:cancel");
   await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb });
 }
@@ -161,12 +230,20 @@ export async function confirmAccountAdd(ctx: BotContext): Promise<void> {
   const d = wizard.data;
   try {
     const account = await PaymentAccountService.addAccount(
-      { currency: d.currency, bankName: d.bankName, accountName: d.accountName, accountNumber: d.accountNumber, tag: "default" },
+      {
+        currency: d.currency,
+        bankName: d.bankName,
+        accountName: d.accountName,
+        accountNumber: d.accountNumber,
+        tag: "default",
+        ...(d.qrBuffer ? { qrFileBuffer: Buffer.from(d.qrBuffer), qrFileName: `qr_${d.currency}_${d.accountNumber}.png`, qrMimeType: "image/png" } : {})
+      },
       adminId
     );
     clearWizard(adminId);
     await ctx.reply(
-      `✅ <b>ĐÃ LƯU TÀI KHOẢN</b>\n\n${escapeHtml(account.bankName)} · ${escapeHtml(account.currency)} · 💳 ${escapeHtml(maskAccountNumber(account.accountNumber))}`,
+      `✅ <b>ĐÃ LƯU TÀI KHOẢN</b>\n\n${escapeHtml(account.bankName)} · ${escapeHtml(account.currency)} · 💳 ${escapeHtml(maskAccountNumber(account.accountNumber))}\n` +
+        (account.qrVersion > 1 || d.qrBuffer ? `🖼 Phiên bản QR: v${account.qrVersion}` : ""),
       { parse_mode: "HTML" }
     );
   } catch (err: any) {
@@ -178,6 +255,85 @@ export async function cancelAccountWizard(ctx: BotContext): Promise<void> {
   await ctx.answerCallbackQuery();
   clearWizard(String(ctx.from?.id || ""));
   await ctx.reply("Đã hủy thao tác tài khoản.").catch(() => {});
+}
+
+// ---------------------------------------------------------------------------
+// QR update wizard (scoped to the SELECTED SYSTEM receiving account)
+// ---------------------------------------------------------------------------
+
+/** Start "Cập nhật QR" for exactly one selected account. */
+export async function startAccountQrUpdate(ctx: BotContext, accountId: string): Promise<void> {
+  await ctx.answerCallbackQuery();
+  if (!(await requirePermission(ctx, "payment_account.edit"))) return;
+  if (ctx.chat?.type !== "private") {
+    await ctx.answerCallbackQuery({ text: "⛔ Chỉ thực hiện trong chat riêng với bot.", show_alert: true }).catch(() => {});
+    return;
+  }
+  const account = await PaymentAccountService.getAccountById(accountId);
+  if (!account) {
+    await ctx.reply("❌ Không tìm thấy tài khoản.").catch(() => {});
+    return;
+  }
+  startWizard(String(ctx.from?.id || ""), "account_qr", { accountId });
+  await ctx.reply(
+    `🖼 <b>CẬP NHẬT QR — ${escapeHtml(account.bankName)} · ${escapeHtml(account.currency)}</b>\n\n` +
+      `Gửi ảnh QR mới. QR cũ được giữ lại dưới dạng phiên bản lịch sử (không xóa bằng chứng cũ).\n\n` +
+      `Gửi /cancel để hủy.`,
+    { parse_mode: "HTML" }
+  );
+}
+
+/**
+ * Consumes the next Admin photo while the account_qr wizard is active. The
+ * update is bound to the accountId captured at wizard start — the selected
+ * SYSTEM receiving account — and goes through the authoritative
+ * PaymentAccountService.updateQrCode (versioned storage, audit-logged).
+ * Historical Order account snapshots are NOT touched.
+ */
+export async function handleAccountQrUpdateMedia(ctx: BotContext): Promise<boolean> {
+  const adminId = String(ctx.from?.id || "");
+  const session = getAdminSession(adminId);
+  const wizard = session.wizard;
+  if (!wizard || wizard.kind !== "account_qr") return false;
+
+  const photo = ctx.message?.photo?.length ? ctx.message.photo[ctx.message.photo.length - 1] : undefined;
+  if (!photo) {
+    await ctx.reply("📷 Vui lòng gửi ảnh QR, hoặc gửi /cancel để hủy.").catch(() => {});
+    return true;
+  }
+  try {
+    const file = await ctx.api.getFile(photo.file_id);
+    const url = `https://api.telegram.org/file/bot${env.TELEGRAM_BOT_TOKEN}/${file.file_path}`;
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`Tải tệp thất bại (HTTP ${res.status})`);
+    const buffer = Buffer.from(await res.arrayBuffer());
+    if (!buffer || buffer.length === 0) throw new Error("Ảnh trống hoặc không đọc được");
+
+    const updated = await PaymentAccountService.updateQrCode({
+      accountId: String(wizard.data.accountId),
+      qrFileBuffer: buffer,
+      qrFileName: `qr_${updatedAccountSuffix(wizard.data.accountId)}_${Date.now()}.png`,
+      qrMimeType: "image/png",
+      actorId: adminId
+    });
+    clearWizard(adminId);
+    await ctx.reply(
+      `✅ <b>ĐÃ CẬP NHẬT QR</b>\n\n` +
+        `• Tài khoản: <b>${escapeHtml(updated.bankName)} · ${escapeHtml(updated.currency)}</b>\n` +
+        `• Phiên bản QR mới: <b>v${updated.qrVersion}</b>\n` +
+        `• SHA-256: <code>${escapeHtml(String(updated.qrSha256 || ""))}</code>\n\n` +
+        `Các đơn hàng hiện có vẫn giữ snapshot tài khoản/QR tại thời điểm tạo (không bị đổi).`,
+      { parse_mode: "HTML" }
+    );
+  } catch (err: any) {
+    await ctx.reply(`❌ Cập nhật QR thất bại: ${escapeHtml(err?.message || "lỗi không xác định")}`, { parse_mode: "HTML" }).catch(() => {});
+  }
+  return true;
+}
+
+function updatedAccountSuffix(accountId: unknown): string {
+  const s = String(accountId || "");
+  return s.slice(-8) || "acc";
 }
 
 // ---------------------------------------------------------------------------
@@ -327,7 +483,10 @@ adminAccountsHandler.callbackQuery("ops:accounts", (ctx) => showAccountsList(ctx
 adminAccountsHandler.callbackQuery(/^ops:account:detail:(.+)$/, (ctx) => showAccountDetail(ctx, ctx.match?.[1] || ""));
 adminAccountsHandler.callbackQuery("ops:account:add", (ctx) => startAccountAdd(ctx));
 adminAccountsHandler.callbackQuery("ops:account:add:confirm", (ctx) => confirmAccountAdd(ctx));
+adminAccountsHandler.callbackQuery("ops:account:add:qr", (ctx) => startAccountAddQr(ctx));
+adminAccountsHandler.callbackQuery("ops:account:add:skipqr", (ctx) => skipAccountAddQr(ctx));
 adminAccountsHandler.callbackQuery("ops:account:cancel", (ctx) => cancelAccountWizard(ctx));
+adminAccountsHandler.callbackQuery(/^ops:account:qr:(.+)$/, (ctx) => startAccountQrUpdate(ctx, ctx.match?.[1] || ""));
 adminAccountsHandler.callbackQuery(/^ops:account:default:preview:(.+)$/, (ctx) => previewSetDefault(ctx, ctx.match?.[1] || ""));
 adminAccountsHandler.callbackQuery(/^ops:account:default:confirm:(.+)$/, (ctx) => confirmSetDefault(ctx, ctx.match?.[1] || ""));
 adminAccountsHandler.callbackQuery(/^ops:account:priority:(.+)$/, (ctx) => startPriorityEdit(ctx, ctx.match?.[1] || ""));

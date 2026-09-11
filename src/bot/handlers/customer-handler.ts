@@ -11,19 +11,33 @@ import { ConversationalAIService } from "../../modules/ai/customer-ai-service.js
 import { FileService } from "../../modules/files/file-service.js";
 import { RuntimeConfigService } from "../../modules/system-config/runtime-config-service.js";
 import { MoneyService } from "../../modules/money/money-service.js";
-import { sendToStaff, sendToAdminNotificationChat, copyMessageToStaff, copyMessageToChat, notifyEligibleStaff, notifyOrderCreated, notifyBillReceived } from "../notifications.js";
+import { sendToStaff, sendToAdminNotificationChat, copyMessageToStaff, copyMessageToChat, notifyEligibleStaff, notifyOrderCreated, notifyBillReceived, sendToCustomer, notifyPayoutReady, shouldNotifyPayoutReady } from "../notifications.js";
 import { SystemConfigService } from "../../modules/system-config/system-config-service.js";
+import { generateTransferMemo } from "../../modules/orders/transfer-memo.js";
+import { parsePayoutDestinationText, parsePayoutDestinationPipe, parsePayoutDestinationWithAi, decodePayoutQrImage } from "../../modules/orders/payout-destination.js";
+import { getPayoutInputSession, setPayoutInputSession, updatePayoutInputSession, clearPayoutInputSession } from "../state/customer-session.js";
+
+/** Mask a payout account number for customer-facing previews (**** + last 4). */
+function maskPayoutAccount(accountNumber: string): string {
+  const n = String(accountNumber || "");
+  if (n.length <= 4) return "****";
+  return `****${n.slice(-4)}`;
+}
 import {
   getCustomerMenuKeyboard,
-  getBankWizardKeyboard,
   getLanguageSelectorKeyboard,
-  getSupportModeKeyboard,
   getCustomerReplyKeyboard,
   renderCustomerWelcomeText,
   renderActiveOrderText,
   renderQuoteCard,
-  renderSupportActiveText
+  renderSupportActiveText,
+  getActiveOrderActionKeyboard
 } from "../menus/customer-menu.js";
+import { resolveEvidenceMime, logEvidenceDiagnostics } from "../../modules/files/media-validation.js";
+import {
+  notifyOrderCancelledByCustomer,
+  notifyLateBillOnCancelledOrder
+} from "../notifications.js";
 import {
   LOCALE_LABELS,
   SupportedLocale,
@@ -119,11 +133,20 @@ export async function showCustomerStart(ctx: BotContext) {
   // 1. Active order -> show/resume order status.
   const activeOrder = await OrderService.getLatestActiveOrderForCustomer(customer.id);
   if (activeOrder) {
-    const orderKb = getCustomerMenuKeyboard(locale);
-    if (!activeOrder.payoutBankSnapshot) {
+    // Requirement N: for an active unpaid order show 💳 transfer info /
+    // 📷 send bill / 💬 support / ❌ cancel. The cancel action disappears
+    // automatically once the order is no longer WAITING_PAYMENT.
+    const orderKb = getActiveOrderActionKeyboard(activeOrder as any, locale);
+    // Payout destination is requested ONLY after the incoming payment is
+    // verified (WAITING_PAYOUT) and only while no confirmed destination
+    // exists. Never before verification.
+    if (
+      activeOrder.status === "WAITING_PAYOUT" &&
+      !OrderService.isPayoutReady(activeOrder as any)
+    ) {
       orderKb.row().text(
         t(locale, "order.bank_btn", { currency: activeOrder.targetCurrency }),
-        `customer:bank:wiz:${activeOrder.targetCurrency}`
+        `customer:payout:choose:${activeOrder.id}`
       );
     }
     await ctx.reply(await renderActiveOrderText(activeOrder, locale), {
@@ -167,82 +190,189 @@ export async function showCustomerStart(ctx: BotContext) {
 
 // /help command
 customerHandler.command("help", async (ctx) => {
-  await ctx.reply(
-    `📖 <b>HƯỚNG DẪN DỊCH VỤ ĐỔI TIỀN</b>\n\n` +
-      `• Nhắn tin tự nhiên, ví dụ: <i>"100 đĂ´"</i>, <i>"10 triệu lấy đĂ´"</i>, <i>"đổi VND lấy 100 đĂ´"</i> để nhận báo giá tức thời.\n` +
-      `• Tài khoản nhận tiền nhập ngay trong luồng đơn hàng (sau khi gửi biên lai), hoặc nhắn tin theo mẫu:\n` +
-      `  <i>Ví dụ:</i> <code>VND | Vietcombank | NGUYEN VAN A | 1012345678</code>\n` +
-      `. Xem dơn đĂ£ tạo: <code>/orders</code>\n` +
-      `• Hủy đơn đang chờ: <code>/cancel</code>\n` +
-      `• Để gặp nhân viên hỗ trợ trực tiếp, vui lòng nhấn nút <b>💬 Hỗ trợ</b> trong menu.`,
-    { parse_mode: "HTML", reply_markup: getCustomerMenuKeyboard() }
-  );
+  const telegramId = String(ctx.from?.id || "");
+  const customer = await CustomerService.getOrCreateCustomer({ telegramId });
+  const locale = locOf(customer);
+  await ctx.reply(t(locale, "help.body"), {
+    parse_mode: "HTML",
+    reply_markup: getCustomerMenuKeyboard(locale)
+  });
 });
 
 // /orders command (Postgres direct with pagination)
 customerHandler.command("orders", async (ctx) => {
   const telegramId = String(ctx.from?.id || "");
   const customer = await CustomerService.getOrCreateCustomer({ telegramId });
+  const locale = locOf(customer);
   const myOrders = await OrderService.getOrdersForCustomer(customer.id, 10);
 
   if (myOrders.length === 0) {
-    return ctx.reply("📦 Bạn chưa có đơn hàng nào trong hệ thống.", {
-      reply_markup: getCustomerMenuKeyboard()
+    return ctx.reply(t(locale, "order.list_empty"), {
+      reply_markup: getCustomerMenuKeyboard(locale)
     });
   }
 
-  let msg = `📦 <b>DANH SÁCH ĐƠN HÀNG CỦA BẠN:</b>\n\n`;
+  let msg = `${t(locale, "order.list_title")}\n\n`;
   for (const o of myOrders.slice(0, 5)) {
     const srcAmt = MoneyService.formatAmount(o.sourceAmount, o.sourceCurrency);
     const tgtAmt = MoneyService.formatAmount(o.targetAmount, o.targetCurrency);
     msg +=
-      `. Dơn <b>${o.id}</b>\n` +
-      `  Dổi: <b>${srcAmt} ${o.sourceCurrency}</b> ➔ <b>${tgtAmt} ${o.targetCurrency}</b>\n` +
-      `  Trạng thái: <code>${o.status}</code>\n` +
-      `  Ngày: ${new Date(o.createdAt).toLocaleString("vi-VN")}\n\n`;
+      `• ${t(locale, "order.id", { id: o.id })}\n` +
+      `${t(locale, "order.exchange", { src: `${srcAmt} ${o.sourceCurrency}`, tgt: `${tgtAmt} ${o.targetCurrency}` })}\n` +
+      `${t(locale, "order.status", { status: t(locale, `status.${o.status}`) })}\n` +
+      `${t(locale, "order.date", { date: new Date(o.createdAt).toLocaleString("vi-VN") })}\n\n`;
   }
 
-  await ctx.reply(msg, { parse_mode: "HTML", reply_markup: getCustomerMenuKeyboard() });
+  await ctx.reply(msg, { parse_mode: "HTML", reply_markup: getCustomerMenuKeyboard(locale) });
 });
 
-// /cancel command
+// ===========================================================================
+// CUSTOMER ORDER CANCELLATION (requirement A) — two-step, localized, safe.
+// Tap ❌ Huỷ đơn → warning (if money already transferred: DO NOT cancel, send
+// bill / contact support) → ✅ Confirm → authoritative order RELOADED from DB
+// → cancel only if still eligible. The first tap NEVER mutates anything.
+// ===========================================================================
+
+/** Shared eligibility → localized message helper. Returns null when allowed. */
+function customerCancelBlockedText(
+  order: any,
+  locale: SupportedLocale
+): string | null {
+  const decision = OrderService.canCustomerCancel(order);
+  if (decision.allowed) return null;
+  if (decision.code === "ALREADY_CANCELLED") {
+    return t(locale, "order.cancel_already", { id: order.id });
+  }
+  if (decision.code === "BILL_EXISTS") {
+    return t(locale, "order.cancel_blocked_bill");
+  }
+  return t(locale, "order.cancel_blocked_status", {
+    id: order.id,
+    status: t(locale, `status.${order.status}`)
+  });
+}
+
+/** Step 1: /cancel or ❌ Huỷ đơn button → warning preview (NO mutation). */
+async function showCustomerCancelWarning(ctx: BotContext, orderId: string): Promise<void> {
+  const telegramId = String(ctx.from?.id || "");
+  const customer = await CustomerService.getOrCreateCustomer({ telegramId });
+  const locale = locOf(customer);
+  const order = await OrderService.getOrder(orderId);
+
+  if (!order || order.customerId !== customer.id) {
+    return void ctx.reply(t(locale, "order.cancel_none"));
+  }
+
+  const blocked = customerCancelBlockedText(order, locale);
+  if (blocked) {
+    // BILL_EXISTS / confirmed payment / completed / cancelled → no cancel UI.
+    return void ctx.reply(blocked, { parse_mode: "HTML", reply_markup: getCustomerMenuKeyboard(locale) });
+  }
+
+  const amount = `${MoneyService.formatAmount(order.sourceAmount, order.sourceCurrency)} ${order.sourceCurrency}`;
+  const kb = new InlineKeyboard()
+    .text(t(locale, "order.cancel_confirm_btn"), `customer:order:cancel:confirm:${order.id}`)
+    .text(t(locale, "order.cancel_keep_btn"), `customer:order:keep:${order.id}`);
+
+  await ctx.reply(
+    `${t(locale, "order.cancel_warn_title")}\n\n${t(locale, "order.cancel_warn_body", { id: order.id, amount })}`,
+    { parse_mode: "HTML", reply_markup: kb }
+  );
+}
+
 customerHandler.command("cancel", async (ctx) => {
   const telegramId = String(ctx.from?.id || "");
   const customer = await CustomerService.getOrCreateCustomer({ telegramId });
   const activeOrder = await OrderService.getLatestActiveOrderForCustomer(customer.id);
+  const locale = locOf(customer);
   if (!activeOrder) {
-    return ctx.reply("Bạn không có đơn hàng nào đang chờ để hủy.");
+    return ctx.reply(t(locale, "order.cancel_none"));
   }
+  await showCustomerCancelWarning(ctx, activeOrder.id);
+});
+
+customerHandler.callbackQuery(/^customer:order:cancel:([a-zA-Z0-9_-]+)$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  await showCustomerCancelWarning(ctx, ctx.match?.[1] || "");
+});
+
+/** Keep button — pure navigation, never mutates the order. */
+customerHandler.callbackQuery(/^customer:order:keep:([a-zA-Z0-9_-]+)$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const orderId = ctx.match?.[1] || "";
+  const locale = locOf(await CustomerService.getOrCreateCustomer({ telegramId: String(ctx.from?.id || "") }));
+  await ctx.reply(t(locale, "order.keep_note", { id: orderId }), { parse_mode: "HTML" }).catch(() => {});
+});
+
+/** Step 2: final confirm — reload authoritative state, cancel only if eligible. */
+customerHandler.callbackQuery(/^customer:order:cancel:confirm:([a-zA-Z0-9_-]+)$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const orderId = ctx.match?.[1] || "";
+  const telegramId = String(ctx.from?.id || "");
+  const customer = await CustomerService.getOrCreateCustomer({ telegramId });
+  const locale = locOf(customer);
+
+  // Reload the AUTHORITATIVE order right before mutating (stale callbacks must
+  // not cancel an order that changed since the warning was shown).
+  const order = await OrderService.getOrder(orderId);
+  if (!order || order.customerId !== customer.id) {
+    return void ctx.reply(t(locale, "order.cancel_none"));
+  }
+
+  if (order.status === "CANCELLED") {
+    return void ctx.reply(t(locale, "order.cancel_already", { id: order.id }), { parse_mode: "HTML" });
+  }
+
+  const blocked = customerCancelBlockedText(order, locale);
+  if (blocked) {
+    return void ctx.reply(blocked, { parse_mode: "HTML", reply_markup: getCustomerMenuKeyboard(locale) });
+  }
+
   try {
-    await OrderService.cancelOrder(activeOrder.id, customer.id, "CUSTOMER", "Khách hàng tự hủy qua bot");
-    await ctx.reply(`✅ ĐĂ£ hủy đơn hàng <code>${activeOrder.id}</code> thành công.`, { parse_mode: "HTML" });
+    // OrderService.cancelOrder re-checks the centralized rules inside the
+    // transaction — customer flow, admin flow and scheduler share ONE rule set.
+    await OrderService.cancelOrder(
+      orderId,
+      customer.id,
+      "CUSTOMER",
+      "CUSTOMER_CANCELLED",
+      { source: "CUSTOMER_CANCELLED" }
+    );
+    await ctx.reply(t(locale, "order.cancel_success", { id: order.id }), {
+      parse_mode: "HTML",
+      reply_markup: getCustomerMenuKeyboard(locale)
+    });
+    // Admin notification chat (Vietnamese) — audit already recorded in service.
+    const fresh = await OrderService.getOrder(orderId);
+    if (fresh) await notifyOrderCancelledByCustomer(fresh);
   } catch (err: any) {
-    await ctx.reply(`❌ Không thể hủy đơn: ${err.message}`);
+    if (String(err?.message || "").includes("BILL_EXISTS")) {
+      await ctx.reply(t(locale, "order.cancel_blocked_bill"), { parse_mode: "HTML" });
+      return;
+    }
+    await ctx.reply(t(locale, "order.cancel_error", { error: err.message }), { parse_mode: "HTML" });
   }
 });
 
-// /bank command (supports pipe syntax or button wizard)
+// /bank command (supports pipe syntax or button wizard).
+// NOTE: this only stores the customer's saved default payout account
+// (CustomerPayoutBank). It is NOT attached to any Order — per the payout
+// lifecycle, the per-order destination is requested only after incoming
+// payment verification.
 customerHandler.command("bank", async (ctx) => {
+  const locale = locOf(await CustomerService.getOrCreateCustomer({ telegramId: String(ctx.from?.id || "") }));
   const text = ctx.match?.trim();
   if (!text) {
     const kb = new InlineKeyboard()
       .text("🇻🇳 VND", "customer:bank:wiz:VND")
       .text("🇺🇸 USD", "customer:bank:wiz:USD");
 
-    return ctx.reply(
-      `🏦 <b>CÀI ĐẶT TÀI KHOẢN NHẬN TIỀN</b>\n\n` +
-        `Chọn loại tiền tệ bạn muốn nhận, hoặc nhập nhanh bằng cú pháp:\n` +
-        `<code>/bank TIỀN_TỆ|Tên Ngân Hàng|Tên Chủ TK|Số TK</code>\n\n` +
-        `<i>Ví dụ:</i> <code>/bank VND|Vietcombank|NGUYEN VAN A|1012345678</code>`,
-      { parse_mode: "HTML", reply_markup: kb }
-    );
+    return ctx.reply(t(locale, "bank.currency_choice"), { parse_mode: "HTML", reply_markup: kb });
   }
 
   const parts = text.split("|").map((p) => p.trim());
   if (parts.length < 4) {
-    return ctx.reply("Thiếu thông tin. Định dạng yêu cầu: <code>TIỀN_TỆ|Tên Ngân Hàng|Tên Chủ TK|Số TK</code>", {
-      parse_mode: "HTML"
-    });
+    return ctx.reply(t(locale, "bank.missing_info"), { parse_mode: "HTML" });
   }
 
   const [currency, bankName, accountName, accountNumber] = parts as [string, string, string, string];
@@ -258,11 +388,11 @@ customerHandler.command("bank", async (ctx) => {
   });
 
   await ctx.reply(
-    `✅ <b>ĐĂ£ lưu tài khoản nhận tiền ${currency.toUpperCase()}:</b>\n` +
-      `• Ngân hàng: <b>${bankName}</b>\n` +
-      `• Chủ tài khoản: <b>${accountName}</b>\n` +
-      `• Số tài khoản: <code>${accountNumber}</code>`,
-    { parse_mode: "HTML", reply_markup: getCustomerMenuKeyboard() }
+    `${t(locale, "bank.saved_title", { currency: currency.toUpperCase() })}\n` +
+      `${t(locale, "order.pay_bank", { bank: bankName })}\n` +
+      `${t(locale, "order.pay_name", { name: accountName })}\n` +
+      `${t(locale, "order.pay_number", { number: accountNumber })}`,
+    { parse_mode: "HTML", reply_markup: getCustomerMenuKeyboard(locale) }
   );
 });
 
@@ -345,46 +475,46 @@ customerHandler.callbackQuery("customer:menu:orders", async (ctx) => {
   await ctx.answerCallbackQuery();
   const telegramId = String(ctx.from?.id || "");
   const customer = await CustomerService.getOrCreateCustomer({ telegramId });
+  const locale = locOf(customer);
   const myOrders = await OrderService.getOrdersForCustomer(customer.id, 10);
 
   if (myOrders.length === 0) {
-    return ctx.reply(t(locOf(customer), "order.list_empty"), { reply_markup: getCustomerMenuKeyboard(locOf(customer)) });
+    return ctx.reply(t(locale, "order.list_empty"), { reply_markup: getCustomerMenuKeyboard(locale) });
   }
 
-  let msg = `📦 <b>DANH SÁCH ĐƠN HÀNG GẦN ĐÂY:</b>\n\n`;
+  let msg = `${t(locale, "order.list_recent_title")}\n\n`;
   for (const o of myOrders.slice(0, 5)) {
     const srcAmt = MoneyService.formatAmount(o.sourceAmount, o.sourceCurrency);
     const tgtAmt = MoneyService.formatAmount(o.targetAmount, o.targetCurrency);
     msg +=
-      `• Đơn <b>${o.id}</b>\n` +
-      `  ${srcAmt} ${o.sourceCurrency} ➔ ${tgtAmt} ${o.targetCurrency}\n` +
-      `  Trạng thái: <code>${o.status}</code>\n\n`;
+      `• ${t(locale, "order.id", { id: o.id })}\n` +
+      `${t(locale, "order.exchange", { src: `${srcAmt} ${o.sourceCurrency}`, tgt: `${tgtAmt} ${o.targetCurrency}` })}\n` +
+      `${t(locale, "order.status", { status: t(locale, `status.${o.status}`) })}\n\n`;
   }
-  await ctx.reply(msg, { parse_mode: "HTML" });
+  await ctx.reply(msg, { parse_mode: "HTML", reply_markup: getCustomerMenuKeyboard(locale) });
 });
 
 customerHandler.callbackQuery("customer:menu:bank", async (ctx) => {
   await ctx.answerCallbackQuery();
+  const telegramId = String(ctx.from?.id || "");
+  const customer = await CustomerService.getOrCreateCustomer({ telegramId });
+  const locale = locOf(customer);
   const kb = new InlineKeyboard()
     .text("🇻🇳 VND", "customer:bank:wiz:VND")
     .text("🇺🇸 USD", "customer:bank:wiz:USD");
 
-  await ctx.reply(
-    `🏦 <b>THIẾT LẬP TÀI KHOẢN NGÂN HÀNG NHẬN TIỀN</b>\n\n` +
-      `Vui lòng chọn loại tiền tệ bạn muốn nhận:`,
-    { parse_mode: "HTML", reply_markup: kb }
-  );
+  await ctx.reply(t(locale, "bank.currency_choice"), { parse_mode: "HTML", reply_markup: kb });
 });
 
 customerHandler.callbackQuery(/^customer:bank:wiz:(VND|USD)$/, async (ctx) => {
   await ctx.answerCallbackQuery();
   const currency = ctx.match ? ctx.match[1] : "VND";
+  const telegramId = String(ctx.from?.id || "");
+  const customer = await CustomerService.getOrCreateCustomer({ telegramId });
+  const locale = locOf(customer);
   await ctx.reply(
-    `🏦 <b>CÀI ĐẶT TÀI KHOẢN NHẬN ${currency}</b>\n\n` +
-      `Anh/chị chỉ cần nhắn tin theo mẫu sau (các phần cách nhau bằng dấu |):\n` +
-      `<code>${currency} | Tên Ngân Hàng | Tên Chủ TK | Số TK</code>\n\n` +
-      `<i>Ví dụ:</i>\n` +
-      `<code>${currency} | Vietcombank | NGUYEN VAN A | 0123456789</code>`,
+    `${t(locale, "bank.wiz_title", { currency })}\n\n` +
+      t(locale, "bank.wiz_example", { currency }),
     { parse_mode: "HTML" }
   );
 });
@@ -417,6 +547,68 @@ customerHandler.callbackQuery("customer:menu:support", async (ctx) => {
   await notifyEligibleStaff(notifyText, { parse_mode: "HTML", reply_markup: notifyKb });
 });
 
+// --- 💳 Transfer info + 📷 bill instruction callbacks (requirement N) ---
+
+/** 💳 View transfer details for an active unpaid order (localized re-render). */
+customerHandler.callbackQuery(/^customer:order:payinfo:([a-zA-Z0-9_-]+)$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const orderId = ctx.match?.[1] || "";
+  const telegramId = String(ctx.from?.id || "");
+  const customer = await CustomerService.getOrCreateCustomer({ telegramId });
+  const locale = locOf(customer);
+  const order = await OrderService.getOrder(orderId);
+
+  if (!order || order.customerId !== customer.id) {
+    return void ctx.reply(t(locale, "order.cancel_none"));
+  }
+  if (order.status !== "WAITING_PAYMENT") {
+    return void ctx.reply(t(locale, "order.cancel_blocked_status", {
+      id: order.id,
+      status: t(locale, `status.${order.status}`)
+    }), { parse_mode: "HTML" });
+  }
+
+  const recv = order.receivingAccountSnapshot as any;
+  const memo = generateTransferMemo(SystemConfigService.getTransferMemoTemplate(), {
+    orderId: order.id,
+    username: customer.username,
+    telegramId: customer.telegramId
+  });
+  const amount = MoneyService.formatAmount(order.sourceAmount, order.sourceCurrency);
+
+  await ctx.reply(
+    `${t(locale, "order.payinfo_hint", { id: order.id })}\n\n` +
+      `${t(locale, "order.transfer_amount", { amount, currency: order.sourceCurrency })}\n` +
+      `${t(locale, "order.pay_bank", { bank: recv?.bankName || "N/A" })}\n` +
+      `${t(locale, "order.pay_number", { number: recv?.accountNumber || "N/A" })}\n` +
+      `${t(locale, "order.pay_name", { name: recv?.accountName || "N/A" })}\n` +
+      `${t(locale, "order.pay_memo", { memo })}\n` +
+      `${t(locale, "order.pay_memo_hint")}`,
+    {
+      parse_mode: "HTML",
+      reply_markup: getActiveOrderActionKeyboard(order as any, locale)
+    }
+  );
+});
+
+/** 📷 Send bill — localized instruction (Telegram UX cannot open a file picker). */
+customerHandler.callbackQuery(/^customer:bill:upload:([a-zA-Z0-9_-]+)$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const orderId = ctx.match?.[1] || "";
+  const telegramId = String(ctx.from?.id || "");
+  const customer = await CustomerService.getOrCreateCustomer({ telegramId });
+  const locale = locOf(customer);
+  const order = await OrderService.getOrder(orderId);
+
+  if (!order || order.customerId !== customer.id) {
+    return void ctx.reply(t(locale, "bill.none"));
+  }
+  if (order.status !== "WAITING_PAYMENT") {
+    return void ctx.reply(t(locale, "bill.not_eligible"), { parse_mode: "HTML" });
+  }
+  await ctx.reply(t(locale, "order.bill_instruction", { id: order.id }), { parse_mode: "HTML" });
+});
+
 // Quote confirmation callback (persisted Quote in DB)
 customerHandler.callbackQuery(/^(?:customer:quote:confirm:|confirm_quote:)(.+)$/, async (ctx) => {
   await ctx.answerCallbackQuery();
@@ -432,36 +624,38 @@ customerHandler.callbackQuery(/^(?:customer:quote:confirm:|confirm_quote:)(.+)$/
     const order = await OrderService.createOrderFromQuote(customer.id, confirmedQuote);
 
     const receivingSnapshot = order.receivingAccountSnapshot as any;
-    const payoutSnapshot = order.payoutBankSnapshot as any;
+    const locale = locOf(customer);
     const formattedSrc = MoneyService.formatAmount(confirmedQuote.sourceAmount, confirmedQuote.sourceCurrency);
 
-    let msg =
-      `🎉 <b>ĐƠN HÀNG ĐÃ ĐƯỢC TẠO THÀNH CÔNG!</b>\n` +
-      `Mã đơn: <code>${order.id}</code>\n\n` +
-      `💵 Quý khách vui lòng chuyển đĂºng số tiền: <b>${formattedSrc} ${confirmedQuote.sourceCurrency}</b>\n` +
-      `🏦 Đến tài khoản chỉ định:\n` +
-      `• Ngân hàng: <b>${receivingSnapshot?.bankName}</b>\n` +
-      `• Số tài khoản: <code>${receivingSnapshot?.accountNumber}</code>\n` +
-      `• Tên tài khoản: <b>${receivingSnapshot?.accountName}</b>\n` +
-      `• Nội dung chuyển tiền: <code>${order.id}</code>\n\n` +
-      `📸 <i>Sau khi chuyển tiền, quý khách chỉ cần chụp và gửi ảnh biên lai (bill) vào đĂ¢y.</i>`;
-
-    if (!payoutSnapshot) {
-      msg +=
-        `\n\n💸 <i>Đơn hàng chưa có tài khoản nhận <b>${order.targetCurrency}</b>. ` +
-        `Anh/chị có thể nhập ngay bằng nút bên dưới, hoặc để sau khi gửi biên lai.</i>`;
-    }
-
-    await ctx.reply(msg, {
-      parse_mode: "HTML",
-      ...(payoutSnapshot ? {} : { reply_markup: getBankWizardKeyboard(order.targetCurrency) })
+    // Deterministic Admin-configured transfer reference (memo). Never AI-
+    // generated, never contains bank/account data. The customer must copy
+    // this EXACT memo into the transfer note.
+    const memo = generateTransferMemo(SystemConfigService.getTransferMemoTemplate(), {
+      orderId: order.id,
+      username: customer.username,
+      telegramId: customer.telegramId
     });
+
+    const msg =
+      `${t(locale, "order.created_title")}\n` +
+      `${t(locale, "order.id", { id: order.id })}\n\n` +
+      `${t(locale, "order.transfer_amount", { amount: formattedSrc, currency: confirmedQuote.sourceCurrency })}\n` +
+      `${t(locale, "order.pay_to")}\n` +
+      `${t(locale, "order.pay_bank", { bank: receivingSnapshot?.bankName || "N/A" })}\n` +
+      `${t(locale, "order.pay_number", { number: receivingSnapshot?.accountNumber || "N/A" })}\n` +
+      `${t(locale, "order.pay_name", { name: receivingSnapshot?.accountName || "N/A" })}\n` +
+      `${t(locale, "order.pay_memo", { memo })}\n` +
+      `${t(locale, "order.pay_memo_hint")}\n\n` +
+      `${t(locale, "order.pay_bill_hint")}\n\n` +
+      t(locale, "order.pay_later_note", { currency: order.targetCurrency });
+
+    await ctx.reply(msg, { parse_mode: "HTML" });
 
     if (receivingSnapshot?.qrFilePath) {
       const qrBuffer = await FileService.getFile(receivingSnapshot.qrFilePath);
       if (qrBuffer) {
         await ctx.replyWithPhoto(new InputFile(qrBuffer), {
-          caption: `Mã QR thanh toán cho đơn ${order.id}`
+          caption: t(locale, "order.pay_qr_caption", { id: order.id })
         });
       }
     }
@@ -469,20 +663,38 @@ customerHandler.callbackQuery(/^(?:customer:quote:confirm:|confirm_quote:)(.+)$/
     // Notify admins (order already durably created + audited above).
     await notifyOrderCreated(order, customer);
   } catch (err: any) {
-    // Friendly error when the DESK receiving account is missing (system
-    // payment account is operator-side config, not a customer problem).
+    // FINANCIAL SAFETY / LOCALIZATION FIX: an expired quote must never leak
+    // the raw Vietnamese service exception ("Báo giá đã hết hạn...") into
+    // en/km/zh flows. Expiry gets a fully localized customer message; other
+    // known service errors keep their existing handling.
     const errText = String(err?.message || "");
-    if (errText.includes("Không tìm thấy tài khoản nhận")) {
-      await ctx.reply(
-        `⚠️ <b>Hệ thống đang cập nhật tài khoản thanh toán của quầy.</b>\n` +
-          `Vui lòng thử lại sau ít phút, hoặc bấm <b>💬 Hỗ trợ</b> để nhân viên hỗ trợ trực tiếp.`,
-        { parse_mode: "HTML", reply_markup: getCustomerMenuKeyboard() }
-      );
+    if (/hết hạn|expired/i.test(errText)) {
+      const locale = locOf(customer);
+      await ctx.reply(t(locale, "quote.expired_notice"), {
+        parse_mode: "HTML",
+        reply_markup: getCustomerMenuKeyboard(locale)
+      });
       return;
     }
-    await ctx.reply(`❌ Lỗi tạo đơn: ${err.message}`);
+    // Friendly error when the DESK receiving account is missing (system
+    // payment account is operator-side config, not a customer problem).
+    if (errText.includes("Không tìm thấy tài khoản nhận")) {
+      const locale = locOf(customer);
+      await ctx.reply(t(locale, "order.missing_desk_account", { currency: confirmedQuoteCurrency(err) }), {
+        parse_mode: "HTML",
+        reply_markup: getCustomerMenuKeyboard(locale)
+      });
+      return;
+    }
+    await ctx.reply(t(locOf(customer), "order.create_error", { error: err.message }));
   }
 });
+
+/** Best-effort source currency for the missing-desk-account message. */
+function confirmedQuoteCurrency(err: any): string {
+  const m = String(err?.message || "").match(/đồng ([A-Z]{3})/);
+  return m ? m[1] : "";
+}
 
 // Attach bill to explicitly selected order
 customerHandler.callbackQuery(/^customer:bill:attach:([a-zA-Z0-9_-]+):(.+)$/, async (ctx) => {
@@ -540,11 +752,13 @@ async function handleReservedCustomerControl(
       if (myOrders.length === 0) {
         await ctx.reply(t(locale, "order.list_empty"), { parse_mode: "HTML", reply_markup: getCustomerReplyKeyboard(locale, inHuman) });
       } else {
-        let msg = `📦 <b>DANH SÁCH ĐƠN HÀNG GẦN ĐÂY:</b>\n\n`;
+        let msg = `${t(locale, "order.list_recent_title")}\n\n`;
         for (const o of myOrders.slice(0, 5)) {
           const srcAmt = MoneyService.formatAmount(o.sourceAmount, o.sourceCurrency);
           const tgtAmt = MoneyService.formatAmount(o.targetAmount, o.targetCurrency);
-          msg += `• Đơn <b>${o.id.slice(-6)}</b>\n  ${srcAmt} ${o.sourceCurrency} ➔ ${tgtAmt} ${o.targetCurrency}\n  Trạng thái: <code>${o.status}</code>\n\n`;
+          msg +=
+            `${t(locale, "order.exchange", { src: `${srcAmt} ${o.sourceCurrency}`, tgt: `${tgtAmt} ${o.targetCurrency}` })}\n` +
+            `${t(locale, "order.status", { status: t(locale, `status.${o.status}`) })}\n\n`;
         }
         await ctx.reply(msg, { parse_mode: "HTML", reply_markup: getCustomerReplyKeyboard(locale, inHuman) });
       }
@@ -642,7 +856,18 @@ export async function handleCustomerTextMessage(ctx: BotContext, text: string) {
     };
   }
 
-  // 0. Conversational receiving-account capture (no slash command required):
+  // 0a. Customer payout-destination input (state-aware). The active input
+  // session BINDS this text to ONE explicit Order; without a session the text
+  // is NEVER treated as payout data. Nothing is persisted without explicit
+  // ✅ confirmation on a preview.
+  const payoutSession = getPayoutInputSession(telegramId);
+  if (payoutSession && conv.mode !== "HUMAN") {
+    const handled = await handlePayoutTextInput(ctx, customer, payoutSession, text);
+    if (handled) return;
+  }
+
+  // 0b. Conversational saved-default-account capture (customer-initiated;
+  // stores CustomerPayoutBank only — it is NOT attached to any Order):
   // "VND | Vietcombank | NGUYEN VAN A | 0123456789"
   const bankCapture = text.match(/^(VND|USD)\s*\|\s*([^|]+)\s*\|\s*([^|]+)\s*\|\s*([^|]+)$/i);
   if (bankCapture) {
@@ -653,6 +878,7 @@ export async function handleCustomerTextMessage(ctx: BotContext, text: string) {
       string,
       string
     ];
+    const locale = locOf(customer);
     await CustomerService.setPayoutBank({
       customerId: customer.id,
       currency: currency.toUpperCase(),
@@ -661,11 +887,11 @@ export async function handleCustomerTextMessage(ctx: BotContext, text: string) {
       accountNumber: accountNumber.trim()
     });
     await ctx.reply(
-      `✅ <b>ĐĂ£ lưu tài khoản nhận tiền ${currency.toUpperCase()}:</b>\n` +
-        `• Ngân hàng: <b>${bankName.trim()}</b>\n` +
-        `• Chủ tài khoản: <b>${accountName.trim()}</b>\n` +
-        `. Số tài khoản: <code>${accountNumber.trim()}</code>`,
-      { parse_mode: "HTML", reply_markup: getCustomerMenuKeyboard() }
+      `${t(locale, "bank.saved_title", { currency: currency.toUpperCase() })}\n` +
+        `${t(locale, "order.pay_bank", { bank: bankName.trim() })}\n` +
+        `${t(locale, "order.pay_name", { name: accountName.trim() })}\n` +
+        `${t(locale, "order.pay_number", { number: accountNumber.trim() })}`,
+      { parse_mode: "HTML", reply_markup: getCustomerMenuKeyboard(locale) }
     );
     return;
   }
@@ -732,21 +958,49 @@ export async function handleCustomerTextMessage(ctx: BotContext, text: string) {
     return;
   }
 
-  await ctx.reply(
-    `Xin chào! Quý khách có thể nhắn tin yêu cầu đổi tiền, ví dụ: <i>'dổi 500 USD sang VND'</i> hoặc nhấn <b>💬 Hỗ trợ</b> để gặp nhân viên tư vấn.`,
-    { parse_mode: "HTML", reply_markup: getCustomerMenuKeyboard() }
-  );
+  await ctx.reply(t(locOf(customer), "customer.fallback"), {
+    parse_mode: "HTML",
+    reply_markup: getCustomerMenuKeyboard(locOf(customer))
+  });
 }
 
 // Hardened Telegram File Downloader & Bill Processor
-async function processBillUpload(ctx: BotContext, orderId: string, fileId: string, telegramId: string) {
+//
+// ROOT CAUSE FIX (requirement F): the previous implementation derived the
+// MIME type ONLY from the Telegram file-server `Content-Type` response header,
+// which is frequently `application/octet-stream` for valid images (especially
+// `document` uploads and photos without an original filename). That rejected
+// perfectly valid customer bills with "Định dạng tệp không được hỗ trợ".
+// MIME is now resolved safely: Telegram metadata → magic-byte sniffing →
+// file extension → download header (see media-validation.ts). A Telegram
+// compressed `photo` has NO filename — that alone is never a rejection reason.
+async function processBillUpload(
+  ctx: BotContext,
+  orderId: string,
+  fileId: string,
+  telegramId: string,
+  media?: { type: "photo" | "document"; telegramMime?: string | null; fileName?: string | null }
+) {
   const maxBytes = (env.MAX_UPLOAD_MB || 15) * 1024 * 1024;
-  const allowedMimes = ["image/jpeg", "image/png", "image/webp", "application/pdf"];
+  const mediaType = media?.type || (ctx.message?.document ? "document" : "photo");
+  const customer = await CustomerService.getOrCreateCustomer({ telegramId });
+  const locale = locOf(customer);
+
+  // FINANCIAL SAFETY (audit fix): the target Order must belong to THIS
+  // customer. The orderId always comes from an explicit bound selection
+  // (single eligible order or the customer's own picker buttons) — a random
+  // photo can never be attached to an arbitrary/cross-customer Order.
+  const target = await OrderService.getOrder(orderId);
+  if (!target || target.customerId !== customer.id) {
+    await ctx.reply(t(locale, "bill.none"));
+    return;
+  }
 
   const file = await ctx.api.getFile(fileId);
 
   if (file.file_size && file.file_size > maxBytes) {
-    return ctx.reply(`❌ Kích thước tệp vượt quá giới hạn cho phép (${env.MAX_UPLOAD_MB}MB). Vui lòng gửi ảnh nhẹ hơn.`);
+    await ctx.reply(t(locale, "bill.too_large", { limit: String(env.MAX_UPLOAD_MB || 15) }));
+    return;
   }
 
   const botToken = env.TELEGRAM_BOT_TOKEN;
@@ -754,36 +1008,73 @@ async function processBillUpload(ctx: BotContext, orderId: string, fileId: strin
   const res = await fetch(url);
 
   if (!res.ok) {
-    throw new Error(`Tải tệp từ Telegram thất bại (HTTP ${res.status})`);
-  }
-
-  const mimeType = res.headers.get("content-type") || "image/jpeg";
-  if (!allowedMimes.includes(mimeType) && !mimeType.startsWith("image/")) {
-    return ctx.reply("❌ Định dạng tệp không được hỗ trợ. Vui lòng gửi ảnh chụp rõ nét (JPG, PNG, WebP) hoặc PDF.");
+    logEvidenceDiagnostics(logger, {
+      event: "bill_download_error", orderRef: orderId.slice(-6), mediaType,
+      mimeType: "unknown", bytes: 0, reason: "EMPTY_FILE"
+    });
+    await ctx.reply(t(locale, "bill.download_failed"));
+    return;
   }
 
   const buffer = Buffer.from(await res.arrayBuffer());
+  if (buffer.length === 0) {
+    await ctx.reply(t(locale, "bill.download_failed"));
+    return;
+  }
   if (buffer.length > maxBytes) {
-    return ctx.reply(`❌ Kích thước tệp thực tế vượt quá giới hạn ${env.MAX_UPLOAD_MB}MB.`);
+    logEvidenceDiagnostics(logger, {
+      event: "bill_rejected", orderRef: orderId.slice(-6), mediaType,
+      mimeType: "unknown", bytes: buffer.length, reason: "UNSUPPORTED_TYPE"
+    });
+    await ctx.reply(t(locale, "bill.too_large", { limit: String(env.MAX_UPLOAD_MB || 15) }));
+    return;
   }
 
-  const safeExt = mimeType === "application/pdf" ? "pdf" : mimeType === "image/png" ? "png" : "jpg";
+  // Safe MIME resolution — never requires a filename, never trusts the
+  // download Content-Type alone, never involves OCR/AI success.
+  const resolved = resolveEvidenceMime({
+    telegramMime: media?.telegramMime || (ctx.message as any)?.document?.mime_type,
+    fileNameOrPath: media?.fileName || file.file_path,
+    responseMime: res.headers.get("content-type"),
+    buffer
+  });
+
+  logEvidenceDiagnostics(logger, {
+    event: resolved.accepted ? "bill_accepted" : "bill_rejected",
+    orderRef: orderId.slice(-6), mediaType,
+    mimeType: resolved.mimeType, bytes: buffer.length, reason: resolved.reason
+  });
+
+  if (!resolved.accepted) {
+    await ctx.reply(t(locale, "bill.unsupported"));
+    return;
+  }
+
+  const safeExt =
+    resolved.mimeType === "application/pdf" ? "pdf" :
+    resolved.mimeType === "image/png" ? "png" :
+    resolved.mimeType === "image/webp" ? "webp" :
+    resolved.mimeType === "image/gif" ? "gif" : "jpg";
   const sanitizedFileName = `bill_${orderId}_${Date.now()}.${safeExt}`;
 
-  const result: any = await OrderService.submitCustomerBill(
-    orderId,
-    buffer,
-    sanitizedFileName,
-    mimeType,
-    telegramId
-  );
+  let result: any;
+  try {
+    result = await OrderService.submitCustomerBill(
+      orderId,
+      buffer,
+      sanitizedFileName,
+      resolved.mimeType,
+      telegramId
+    );
+  } catch (err: any) {
+    // Order in a non-billable state (e.g. confirmed payment) — safe message,
+    // never a raw Vietnamese service error in a localized flow.
+    await ctx.reply(t(locale, "bill.not_eligible"), { parse_mode: "HTML" });
+    return;
+  }
 
   if (result.status === "SUSPICIOUS") {
-    await ctx.reply(
-      `⚠️ <b>Hệ thống phát hiện biên lai có dấu hiệu cần kiểm tra thêm.</b>\n` +
-        `Đơn hàng <code>${orderId}</code> đĂ£ được chuyển sang chế độ bảo mật để quản trị viên kiểm tra trực tiếp.`,
-      { parse_mode: "HTML" }
-    );
+    await ctx.reply(t(locale, "bill.suspicious", { id: orderId }), { parse_mode: "HTML" });
 
     await sendToAdminNotificationChat(
       `🚨 <b>CẢNH BÁO BẢO MẬT: BIÊN LAI TRÙNG LẶP / BẤT THƯỜNG</b>\n` +
@@ -797,42 +1088,543 @@ async function processBillUpload(ctx: BotContext, orderId: string, fileId: strin
       }
     );
   } else if (result.status === "MANUAL_REVIEW") {
-    await ctx.reply(
-      `ℹ️ <b>ĐĂ£ nhận biên lai bổ sung cho đơn ${orderId}.</b>\n` +
-        `Dơn hàng đĂ£ được ghi nhận đầy đủ bằng chứng và chuyển Admin kiểm duyệt thủ công.`,
-      { parse_mode: "HTML" }
-    );
+    await ctx.reply(t(locale, "bill.manual_review", { id: orderId }), { parse_mode: "HTML" });
     const additionalBillOrder = await OrderService.getOrder(orderId);
     if (additionalBillOrder) {
       await notifyBillReceived(additionalBillOrder);
     }
-  } else {
-    await ctx.reply(
-      `✅ <b>ĐĂ£ nhận được biên lai thanh toán cho đơn ${orderId}.</b>\n\n` +
-        `dY"' Theo quy dịnh tài chính an toàn, Admin sẽ trực tiếp kiểm tra biến động tài khoản thực tế và xác nhận trong giây lát. Xin cảm ơn quý khách!`,
-      { parse_mode: "HTML" }
-    );
-
-    // Phase A: after the bill is accepted, proactively collect the payout
-    // account using the target currency already known from the Order.
-    try {
-      const billedOrder = await OrderService.getOrder(orderId);
-      if (billedOrder && !billedOrder.payoutBankSnapshot) {
-        await ctx.reply(
-          `💸 <b>BƯỚC TIẾP THEO — TÀI KHOẢN NHẬN TIỀN</b>\n\n` +
-            `Đơn <code>${orderId}</code> sẽ chi ra <b>${MoneyService.formatAmount(billedOrder.targetAmount, billedOrder.targetCurrency)} ${billedOrder.targetCurrency}</b>.\n` +
-            `Anh/chị nhập tài khoản nhận tiền ngay để khi Admin giải ngân, tiền về tức thì:`,
-          { parse_mode: "HTML", reply_markup: getBankWizardKeyboard(billedOrder.targetCurrency) }
-        );
-      }
-    } catch (promptErr) {
-      logger.warn({ err: promptErr, orderId }, "Failed to send payout-details prompt after bill");
+  } else if (result.status === "LATE_BILL_CANCELLED") {
+    // Late bill after auto-cancel (requirement E): acknowledge locally, the
+    // evidence is already stored — route to manual review, never reopen.
+    await ctx.reply(t(locale, "bill.late_cancelled_customer", { id: orderId }), { parse_mode: "HTML" });
+    const lateOrder = await OrderService.getOrder(orderId);
+    if (lateOrder) {
+      await notifyLateBillOnCancelledOrder(lateOrder);
     }
+  } else {
+    // Per the payout lifecycle: the payout destination is requested ONLY
+    // after Admin verifies the incoming payment. Here we acknowledge the
+    // bill and explain what happens next — we do NOT ask for payout info.
+    await ctx.reply(t(locale, "bill.wait_verify", { id: orderId }), { parse_mode: "HTML" });
 
     const billedOrderForNotify = await OrderService.getOrder(orderId);
     if (billedOrderForNotify) {
       await notifyBillReceived(billedOrderForNotify);
     }
+  }
+}
+
+// ===========================================================================
+// CUSTOMER PAYOUT DESTINATION (only AFTER incoming payment verification)
+// ===========================================================================
+//
+// Lifecycle rule: the payout destination is requested ONLY when the order is
+// in WAITING_PAYOUT (Admin verified the incoming payment) and has no valid
+// destination yet. WAITING_PAYOUT + no destination = waiting for customer
+// payout info; WAITING_PAYOUT + valid destination = payout-ready.
+//
+// State binding (security): input text / QR photos are bound to ONE explicit
+// Order via the per-customer session. Nothing global is shared between
+// customers; multiple eligible orders require explicit selection.
+
+/** All of THIS customer's own WAITING_PAYOUT orders without a valid destination. */
+async function getEligiblePayoutOrdersForCustomer(customerId: string): Promise<any[]> {
+  const orders = await OrderService.getOrdersForCustomer(customerId, 20);
+  return orders.filter(
+    (o: any) => o.status === "WAITING_PAYOUT" && !OrderService.isPayoutReady(o as any)
+  );
+}
+
+/** Human label for a destination snapshot: "🏦 VCB ••••6789 — NGUYEN VAN A". */
+function destinationLabel(dest: any): string {
+  if (dest?.type === "qr") return "📷 QR";
+  const bank = String(dest?.bankName || "").toUpperCase();
+  return `🏦 ${bank} ${maskPayoutAccount(dest?.accountNumber || "")} — ${dest?.accountName || ""}`.trim();
+}
+
+/** Localized confirmation preview for a payout destination (never auto-persisted). */
+function renderPayoutDestinationPreview(
+  dest: { type: "text" | "qr"; [k: string]: any },
+  locale: SupportedLocale
+): string {
+  let msg = `${t(locale, "payout.preview_title")}\n`;
+  if (dest.type === "qr") {
+    msg += `${t(locale, "payout.preview_qr")}\n`;
+  } else {
+    msg +=
+      `${t(locale, "payout.preview_bank", { bank: dest.bankName })}\n` +
+      `${t(locale, "payout.preview_account", { number: maskPayoutAccount(dest.accountNumber) })}\n` +
+      `${t(locale, "payout.preview_holder", { name: dest.accountName })}\n`;
+  }
+  msg += `\n${t(locale, "payout.confirm_hint")}`;
+  return msg;
+}
+
+/** Keyboard for the destination confirmation preview. */
+function payoutPreviewKeyboard(orderId: string, locale: SupportedLocale): InlineKeyboard {
+  return new InlineKeyboard()
+    .text(t(locale, "payout.confirm_btn"), `customer:payout:confirm:${orderId}`)
+    .text(t(locale, "payout.edit_btn"), `customer:payout:edit:${orderId}`)
+    .row()
+    .text(t(locale, "payout.support_btn"), `customer:payout:support:${orderId}`);
+}
+
+/** Chooser: recent destinations + new text + new QR + support, bound to ONE order. */
+async function buildPayoutChooser(
+  order: any,
+  customer: { id: string; username?: string | null; telegramId?: string | null },
+  locale: SupportedLocale
+): Promise<{ text: string; kb: InlineKeyboard }> {
+  const recent = await OrderService.getRecentPayoutDestinations(customer.id, 3);
+  const kb = new InlineKeyboard();
+  const lines = [
+    t(locale, "payout.awaiting_info", { id: order.id, currency: order.targetCurrency }),
+    ""
+  ];
+
+  if (recent.length === 0) {
+    lines.push(t(locale, "payout.no_recent"));
+  } else {
+    lines.push(t(locale, "payout.recent_header"));
+    let idx = 0;
+    for (const dest of recent) {
+      const label = destinationLabel(dest);
+      lines.push(label);
+      kb.text(label.length > 60 ? label.slice(0, 60) : label, `customer:payout:use:${order.id}:${idx}`).row();
+      idx++;
+    }
+  }
+
+  kb.text(t(locale, "payout.new_text"), `customer:payout:newtext:${order.id}`)
+    .text(t(locale, "payout.new_qr"), `customer:payout:newqr:${order.id}`)
+    .row()
+    .text(t(locale, "payout.support_btn"), `customer:payout:support:${order.id}`);
+
+  return { text: `${t(locale, "payout.choose_title")}\n\n${lines.join("\n")}`, kb };
+}
+
+/**
+ * Send the localized payout-destination prompt for a verified order.
+ * Used by Admin actions (payment verification / nudge) via notifications bot.
+ * If the customer has MULTIPLE eligible orders, they must explicitly pick one.
+ */
+export async function sendPayoutDestinationPromptToCustomer(
+  customerTelegramId: string,
+  orderId: string
+): Promise<boolean> {
+  const order = await OrderService.getOrder(orderId);
+  if (!order || order.status !== "WAITING_PAYOUT" || OrderService.isPayoutReady(order as any)) {
+    return false;
+  }
+  const customer = order.customer;
+  if (!customer || String(customer.telegramId) !== String(customerTelegramId)) return false;
+  const locale = locOf(customer);
+
+  // Multiple eligible orders → require explicit selection first.
+  const eligible = await getEligiblePayoutOrdersForCustomer(customer.id);
+  let text: string;
+  let kb: InlineKeyboard;
+  if (eligible.length > 1) {
+    kb = new InlineKeyboard();
+    const lines = [t(locale, "payout.choose_title"), "", t(locale, "bill.multi_hint")];
+    for (const o of eligible.slice(0, 5)) {
+      const amount = `${MoneyService.formatAmount(o.targetAmount, o.targetCurrency)} ${o.targetCurrency}`;
+      lines.push(`📦 #${o.id.slice(-6)} · ${amount}`);
+      kb.text(`📦 #${o.id.slice(-6)} (${amount})`, `customer:payout:choose:${o.id}`).row();
+    }
+    text = lines.join("\n");
+  } else {
+    const chooser = await buildPayoutChooser(order, customer, locale);
+    text = chooser.text;
+    kb = chooser.kb;
+  }
+
+  const sent = await sendToCustomer(customerTelegramId, text, { parse_mode: "HTML", reply_markup: kb });
+  return Boolean(sent);
+}
+
+/** Entry callback: render the chooser for an explicitly selected order. */
+customerHandler.callbackQuery(/^customer:payout:choose:([a-zA-Z0-9_-]+)$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const orderId = ctx.match ? ctx.match[1] : "";
+  const telegramId = String(ctx.from?.id || "");
+  const customer = await CustomerService.getOrCreateCustomer({ telegramId });
+  const order = await OrderService.getOrder(orderId);
+  const locale = locOf(customer);
+
+  if (!order || order.customerId !== customer.id) {
+    return ctx.reply(t(locale, "payout.no_eligible"));
+  }
+  if (order.status !== "WAITING_PAYOUT") {
+    return ctx.reply(t(locale, "payout.not_ready"));
+  }
+  if (OrderService.isPayoutReady(order as any)) {
+    // Already has a confirmed destination — nothing to choose.
+    return ctx.reply(t(locale, "payout.saved", { id: order.id }), { parse_mode: "HTML" });
+  }
+
+  const chooser = await buildPayoutChooser(order, customer, locale);
+  await ctx.reply(chooser.text, { parse_mode: "HTML", reply_markup: chooser.kb });
+});
+
+/** Select a recent (historical, COMPLETED-order) destination → confirmation preview. */
+customerHandler.callbackQuery(/^customer:payout:use:([a-zA-Z0-9_-]+):(\d+)$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const orderId = ctx.match ? ctx.match[1] : "";
+  const idx = Number(ctx.match ? ctx.match[2] : "-1");
+  const telegramId = String(ctx.from?.id || "");
+  const customer = await CustomerService.getOrCreateCustomer({ telegramId });
+  const locale = locOf(customer);
+  const order = await OrderService.getOrder(orderId);
+
+  if (!order || order.customerId !== customer.id || order.status !== "WAITING_PAYOUT" || OrderService.isPayoutReady(order as any)) {
+    return ctx.reply(t(locale, "payout.not_ready"));
+  }
+
+  const recent = await OrderService.getRecentPayoutDestinations(customer.id, 3);
+  const dest = recent[idx];
+  if (!dest) return ctx.reply(t(locale, "payout.session_expired"));
+
+  // Snapshot the EXACT historical destination into the CURRENT order only
+  // after the customer confirms — historical orders are never mutated.
+  if (dest.type === "qr") {
+    updatePayoutInputSession(telegramId, {
+      orderId,
+      kind: "qr",
+      pendingPreview: {
+        type: "qr",
+        qrFileId: dest.qrFileId || "",
+        qrFilePath: dest.qrFilePath || "",
+        qrSha256: dest.qrSha256,
+        mimeType: dest.mimeType || "image/png"
+      }
+    });
+  } else {
+    updatePayoutInputSession(telegramId, {
+      orderId,
+      kind: "text",
+      pendingPreview: {
+        type: "text",
+        currency: dest.currency || order.targetCurrency,
+        bankName: dest.bankName || "",
+        accountNumber: dest.accountNumber || "",
+        accountName: dest.accountName || ""
+      }
+    });
+  }
+
+  await ctx.reply(renderPayoutDestinationPreview(dest as any, locale), {
+    parse_mode: "HTML",
+    reply_markup: payoutPreviewKeyboard(orderId, locale)
+  });
+});
+
+/** Customer chose "new text" → bind session to this order and prompt. */
+customerHandler.callbackQuery(/^customer:payout:newtext:([a-zA-Z0-9_-]+)$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const orderId = ctx.match ? ctx.match[1] : "";
+  const telegramId = String(ctx.from?.id || "");
+  const customer = await CustomerService.getOrCreateCustomer({ telegramId });
+  const locale = locOf(customer);
+  const order = await OrderService.getOrder(orderId);
+
+  if (!order || order.customerId !== customer.id || order.status !== "WAITING_PAYOUT" || OrderService.isPayoutReady(order as any)) {
+    return ctx.reply(t(locale, "payout.not_ready"));
+  }
+
+  setPayoutInputSession(telegramId, { orderId, kind: "text" });
+  await ctx.reply(t(locale, "payout.text_input_hint"), { parse_mode: "HTML" });
+});
+
+/** Customer chose "new QR" → bind session to this order and prompt for photo. */
+customerHandler.callbackQuery(/^customer:payout:newqr:([a-zA-Z0-9_-]+)$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const orderId = ctx.match ? ctx.match[1] : "";
+  const telegramId = String(ctx.from?.id || "");
+  const customer = await CustomerService.getOrCreateCustomer({ telegramId });
+  const locale = locOf(customer);
+  const order = await OrderService.getOrder(orderId);
+
+  if (!order || order.customerId !== customer.id || order.status !== "WAITING_PAYOUT" || OrderService.isPayoutReady(order as any)) {
+    return ctx.reply(t(locale, "payout.not_ready"));
+  }
+
+  setPayoutInputSession(telegramId, { orderId, kind: "qr" });
+  await ctx.reply(t(locale, "payout.qr_input_hint"), { parse_mode: "HTML" });
+});
+
+/** FINAL step: only customer confirmation persists the destination. */
+customerHandler.callbackQuery(/^customer:payout:confirm:([a-zA-Z0-9_-]+)$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const orderId = ctx.match ? ctx.match[1] : "";
+  const telegramId = String(ctx.from?.id || "");
+  const customer = await CustomerService.getOrCreateCustomer({ telegramId });
+  const locale = locOf(customer);
+
+  const session = getPayoutInputSession(telegramId);
+  if (!session || session.orderId !== orderId || !session.pendingPreview) {
+    return ctx.reply(t(locale, "payout.session_expired"));
+  }
+
+  const order = await OrderService.getOrder(orderId);
+  if (!order || order.customerId !== customer.id || order.status !== "WAITING_PAYOUT") {
+    clearPayoutInputSession(telegramId);
+    return ctx.reply(t(locale, "payout.not_ready"));
+  }
+  if (OrderService.isPayoutReady(order as any)) {
+    clearPayoutInputSession(telegramId);
+    return ctx.reply(t(locale, "payout.saved", { id: order.id }), { parse_mode: "HTML" });
+  }
+
+  try {
+    const updated = await OrderService.attachPayoutDestination(orderId, customer.id, session.pendingPreview as any);
+    clearPayoutInputSession(telegramId);
+
+    if (session.pendingPreview.type === "qr") {
+      await ctx.reply(t(locale, "payout.qr_attached", { id: orderId }), { parse_mode: "HTML" });
+    } else {
+      await ctx.reply(t(locale, "payout.saved", { id: orderId }), { parse_mode: "HTML" });
+    }
+
+    // NOW the order is truly payout-ready → admin notification (event-driven).
+    if (shouldNotifyPayoutReady(updated)) {
+      await notifyPayoutReady(updated);
+    }
+  } catch (err: any) {
+    await ctx.reply(t(locale, "error.generic"));
+    logger.warn({ err, orderId }, "Failed to attach payout destination");
+  }
+});
+
+/** Edit → re-enter text input (session kept, preview cleared). */
+customerHandler.callbackQuery(/^customer:payout:edit:([a-zA-Z0-9_-]+)$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const orderId = ctx.match ? ctx.match[1] : "";
+  const telegramId = String(ctx.from?.id || "");
+  const customer = await CustomerService.getOrCreateCustomer({ telegramId });
+  const locale = locOf(customer);
+  const session = getPayoutInputSession(telegramId);
+  if (!session || session.orderId !== orderId) {
+    return ctx.reply(t(locale, "payout.session_expired"));
+  }
+  updatePayoutInputSession(telegramId, { kind: "text", pendingPreview: null });
+  await ctx.reply(t(locale, "payout.text_input_hint"), { parse_mode: "HTML" });
+});
+
+/** Cancel destination input → drop session, back to chooser. */
+customerHandler.callbackQuery(/^customer:payout:cancel:([a-zA-Z0-9_-]+)$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const orderId = ctx.match ? ctx.match[1] : "";
+  const telegramId = String(ctx.from?.id || "");
+  clearPayoutInputSession(telegramId);
+  await sendPayoutDestinationPromptToCustomerCtx(ctx, orderId);
+});
+
+/** 💬 Support from within the payout flow (any stage). */
+customerHandler.callbackQuery(/^customer:payout:support:([a-zA-Z0-9_-]+)$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const telegramId = String(ctx.from?.id || "");
+  const customer = await CustomerService.getOrCreateCustomer({ telegramId });
+  const locale = locOf(customer);
+
+  await ConversationService.getOrCreateConversation(customer.id);
+  await ConversationService.addMessage({
+    customerId: customer.id,
+    senderType: "CUSTOMER",
+    content: "[YÊU CẦU GẶP CSKH TRỰC TIẾP]"
+  });
+  await ctx.reply(t(locale, "support.requested"), { parse_mode: "HTML", reply_markup: getCustomerReplyKeyboard(locale, true) });
+
+  const notifyText =
+    `🛎 <b>YÊU CẦU HỖ TRỢ TỪ KHÁCH HÀNG (luồng nhận tiền):</b>\n` +
+    `• Khách: <b>${customer.fullName || customer.username || customer.telegramId}</b> (ID: <code>${customer.id}</code>)\n` +
+    `• Telegram ID: <code>${customer.telegramId}</code>`;
+  const notifyKb = new InlineKeyboard()
+    .text("👀 Xem khách", `cskh:preview:${customer.id}`)
+    .text("🙋 Nhận khách", `cskh:ticket:claim:${customer.id}`);
+  await sendToAdminNotificationChat(notifyText, { parse_mode: "HTML", reply_markup: notifyKb });
+  await notifyEligibleStaff(notifyText, { parse_mode: "HTML", reply_markup: notifyKb });
+});
+
+/** ctx-bound variant of the destination prompt (chooser re-render). */
+async function sendPayoutDestinationPromptToCustomerCtx(
+  ctx: BotContext,
+  orderId: string
+): Promise<void> {
+  const telegramId = String(ctx.from?.id || "");
+  const customer = await CustomerService.getOrCreateCustomer({ telegramId });
+  const order = await OrderService.getOrder(orderId);
+  const locale = locOf(customer);
+  if (!order || order.customerId !== customer.id || order.status !== "WAITING_PAYOUT" || OrderService.isPayoutReady(order as any)) {
+    await ctx.reply(t(locale, "payout.not_ready"));
+    return;
+  }
+  const chooser = await buildPayoutChooser(order, customer, locale);
+  await ctx.reply(chooser.text, { parse_mode: "HTML", reply_markup: chooser.kb });
+}
+
+/**
+ * State-aware payout TEXT input. Returns true when the message was consumed
+ * as payout-destination data. Deterministic parser first; AI only as strict
+ * structured-extraction fallback; ALWAYS a confirmation preview; persistence
+ * happens ONLY on the explicit ✅ Confirm callback.
+ */
+async function handlePayoutTextInput(
+  ctx: BotContext,
+  customer: { id: string; telegramId: string; language?: string | null },
+  session: { orderId: string; kind: string },
+  text: string
+): Promise<boolean> {
+  const telegramId = String(customer.telegramId);
+  const locale = locOf(customer);
+
+  // Re-validate binding: the order must still belong to this customer, still
+  // be in WAITING_PAYOUT and still lack a destination. Stale messages must
+  // never overwrite payout details.
+  const order = await OrderService.getOrder(session.orderId);
+  if (!order || order.customerId !== customer.id || order.status !== "WAITING_PAYOUT" || OrderService.isPayoutReady(order as any)) {
+    clearPayoutInputSession(telegramId);
+    await ctx.reply(t(locale, "payout.not_ready"));
+    return true;
+  }
+
+  // 1. Deterministic parsers first (free-form + pipe syntax).
+  let parsed = parsePayoutDestinationText(text) || parsePayoutDestinationPipe(text);
+
+  // 2. AI structured-extraction fallback ONLY (never invents, never confirms).
+  if (!parsed) {
+    try {
+      parsed = await parsePayoutDestinationWithAi(text, (prompt, sys) =>
+        AiProvider.executeTextPrompt(prompt, sys)
+      );
+    } catch (err) {
+      logger.warn({ err, customerId: customer.id }, "Payout AI extraction fallback failed");
+      parsed = null;
+    }
+  }
+
+  if (!parsed) {
+    await ctx.reply(t(locale, "payout.invalid"), { parse_mode: "HTML" });
+    return true;
+  }
+
+  updatePayoutInputSession(telegramId, {
+    orderId: session.orderId,
+    kind: "text",
+    pendingPreview: {
+      type: "text",
+      currency: order.targetCurrency,
+      bankName: parsed.bankName,
+      accountNumber: parsed.accountNumber,
+      accountName: parsed.accountName
+    }
+  });
+
+  await ctx.reply(renderPayoutDestinationPreview(parsed as any, locale), {
+    parse_mode: "HTML",
+    reply_markup: payoutPreviewKeyboard(session.orderId, locale)
+  });
+  return true;
+}
+
+/**
+ * State-aware payout QR upload. Deterministic decoding is unavailable, so the
+ * ORIGINAL QR image is kept as the authoritative payout destination (no AI
+ * fabrication). Attached only when the session binds it to an eligible order.
+ */
+async function handlePayoutQrUpload(
+  ctx: BotContext,
+  customer: { id: string; telegramId: string; language?: string | null },
+  session: { orderId: string; kind: string }
+): Promise<void> {
+  const telegramId = String(customer.telegramId);
+  const locale = locOf(customer);
+
+  const order = await OrderService.getOrder(session.orderId);
+  if (!order || order.customerId !== customer.id || order.status !== "WAITING_PAYOUT" || OrderService.isPayoutReady(order as any)) {
+    clearPayoutInputSession(telegramId);
+    await ctx.reply(t(locale, "payout.not_ready"));
+    return;
+  }
+
+  // Requirement I: while the customer is EXPLICITLY in a payout-QR session,
+  // both Telegram photos AND image documents are treated as payout QR. The
+  // message is consumed here and can never fall through to bill handling.
+  // A non-image document is rejected (stays in session) — never routed as bill.
+  const photo = ctx.message?.photo?.length ? ctx.message.photo[ctx.message.photo.length - 1] : undefined;
+  const document = (ctx.message as any)?.document as any;
+  if (!photo && !document) return;
+
+  // Reject obviously unsafe document types early (metadata only — safe check).
+  if (!photo && document?.mime_type) {
+    const declared = String(document.mime_type).toLowerCase();
+    const safeImage = declared.startsWith("image/") || declared === "application/pdf";
+    if (!safeImage) {
+      await ctx.reply(t(locale, "payout.qr_invalid"), { parse_mode: "HTML" });
+      return;
+    }
+  }
+
+  try {
+    const fileId = photo ? photo.file_id : document.file_id;
+    const file = await ctx.api.getFile(fileId);
+    const url = `https://api.telegram.org/file/bot${env.TELEGRAM_BOT_TOKEN}/${file.file_path}`;
+    const res = await fetch(url);
+    const buffer = Buffer.from(await res.arrayBuffer());
+    if (!buffer || buffer.length === 0) {
+      await ctx.reply(t(locale, "payout.qr_invalid"), { parse_mode: "HTML" });
+      return;
+    }
+
+    // Safe MIME resolution (magic bytes first) — a payout QR image document
+    // with an unreliable Content-Type is still accepted, while a dangerous
+    // payload (non-image) is rejected and never stored as a destination.
+    const resolved = resolveEvidenceMime({
+      telegramMime: document?.mime_type || null,
+      fileNameOrPath: document?.file_name || file.file_path,
+      responseMime: res.headers.get("content-type"),
+      buffer
+    });
+    if (!resolved.accepted || resolved.mimeType === "application/pdf") {
+      logEvidenceDiagnostics(logger, {
+        event: "payout_qr_rejected", orderRef: order.id.slice(-6),
+        mediaType: photo ? "photo" : "document", mimeType: resolved.mimeType,
+        bytes: buffer.length, reason: resolved.reason
+      });
+      await ctx.reply(t(locale, "payout.qr_invalid"), { parse_mode: "HTML" });
+      return;
+    }
+
+    const mimeType = resolved.mimeType;
+    const evidence = await FileService.saveEvidenceFile(
+      buffer,
+      `payout_qr_${order.id}_${Date.now()}.${mimeType === "image/png" ? "png" : mimeType === "image/webp" ? "webp" : "jpg"}`,
+      "QR",
+      mimeType,
+      order.id
+    );
+
+    // Deterministic decode attempt — unavailable in this dependency set, so
+    // the stored QR image remains the authoritative destination (never AI-
+    // fabricated details).
+    decodePayoutQrImage(buffer);
+
+    const updated = await OrderService.attachPayoutDestination(order.id, customer.id, {
+      type: "qr",
+      qrFileId: evidence.id,
+      qrFilePath: evidence.filePath,
+      qrSha256: evidence.sha256,
+      mimeType
+    });
+    clearPayoutInputSession(telegramId);
+
+    await ctx.reply(t(locale, "payout.qr_attached", { id: order.id }), { parse_mode: "HTML" });
+    if (shouldNotifyPayoutReady(updated)) {
+      await notifyPayoutReady(updated);
+    }
+  } catch (err: any) {
+    logger.warn({ err, orderId: order.id }, "Failed to attach payout QR destination");
+    await ctx.reply(t(locale, "payout.qr_invalid"), { parse_mode: "HTML" });
   }
 }
 
@@ -846,6 +1638,15 @@ export async function handleCustomerPhoto(ctx: BotContext) {
     return;
   }
 
+  // State-aware payout QR: an active payout-input session BINDS this photo to
+  // ONE explicit eligible Order. Without a session, a photo is never treated
+  // as a payout QR (arbitrary photos can never overwrite payout details).
+  const payoutSession = getPayoutInputSession(telegramId);
+  if (payoutSession && payoutSession.kind === "qr") {
+    await handlePayoutQrUpload(ctx, customer as any, payoutSession);
+    return;
+  }
+
   const locale = locOf(customer);
 
   // Safe Bill Target Selection: Query orders waiting for bill
@@ -855,21 +1656,36 @@ export async function handleCustomerPhoto(ctx: BotContext) {
     return ctx.reply(t(locale, "bill.none"));
   }
 
+  // Routing is based on customer + eligible Order + state + media type —
+  // never on media type alone (requirement I). A document carrying a safe
+  // image/PDF is bill evidence here; a payout-QR session would have captured
+  // it earlier, and without that session it can NEVER become payout data.
   let fileId: string | undefined;
+  let mediaType: "photo" | "document" = "photo";
   if (ctx.message?.photo && ctx.message.photo.length > 0) {
     const photo = ctx.message.photo[ctx.message.photo.length - 1];
-    if (photo) fileId = photo.file_id;
+    if (photo) {
+      fileId = photo.file_id;
+      mediaType = "photo";
+    }
   } else if (ctx.message?.document) {
     fileId = ctx.message.document.file_id;
+    mediaType = "document";
   }
 
   if (!fileId) return;
+
+  const mediaInfo = {
+    type: mediaType,
+    telegramMime: (ctx.message as any)?.document?.mime_type || null,
+    fileName: (ctx.message as any)?.document?.file_name || null
+  } as const;
 
   // If customer has exactly ONE eligible order, attach automatically
   if (awaitingOrders.length === 1) {
     const targetOrder = awaitingOrders[0];
     try {
-      await processBillUpload(ctx, targetOrder.id, fileId, telegramId);
+      await processBillUpload(ctx, targetOrder.id, fileId, telegramId, mediaInfo);
     } catch (err: any) {
       logger.error({ err }, "Error processing single customer bill");
       await ctx.reply(t(locale, "bill.error", { error: String(err?.message || err) }));
@@ -882,7 +1698,7 @@ export async function handleCustomerPhoto(ctx: BotContext) {
   for (const order of awaitingOrders.slice(0, 5)) {
     const srcAmt = MoneyService.formatAmount(order.sourceAmount, order.sourceCurrency);
     keyboard.text(
-      `📋 Đơn ${order.id.slice(-6)} (${srcAmt} ${order.sourceCurrency})`,
+      t(locale, "bill.order_btn", { id: order.id.slice(-6), amount: `${srcAmt} ${order.sourceCurrency}` }),
       `customer:bill:attach:${order.id}:${fileId}`
     ).row();
   }

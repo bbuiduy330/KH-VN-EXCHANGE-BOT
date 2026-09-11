@@ -9,8 +9,9 @@ import { AuditService } from "../../modules/audit/audit-service.js";
 import { LocalStorageService } from "../../modules/storage/local-storage-service.js";
 import { FileService } from "../../modules/files/file-service.js";
 import { env } from "../../config/env.js";
-import { sendToCustomer, sendToAdminNotificationChat, notifyPayoutReady, isPayoutReadyTransition } from "../notifications.js";
+import { sendToCustomer, sendToAdminNotificationChat, notifyPayoutReady, notifyAwaitingPayoutInfo, shouldNotifyPayoutReady } from "../notifications.js";
 import { showOperationsCenter } from "../admin/index.js";
+import { sendPayoutDestinationPromptToCustomer } from "./customer-handler.js";
 import { prisma } from "../../database/client.js";
 import { AiProvider } from "../../modules/ai/ai-provider.js";
 import { SystemConfigService } from "../../modules/system-config/system-config-service.js";
@@ -703,9 +704,10 @@ adminHandler.callbackQuery(/^(?:admin:pay:step2:|pay_step2:)(.+)$/, async (ctx) 
   try {
     const updated = await OrderService.confirmPaymentReceived(orderId, adminId);
 
-    // Notify customer
+    // Notify customer. Per the lifecycle: only tell the customer "money is on
+    // its way" when a confirmed payout destination already exists.
     const customer = await prisma.customer.findUnique({ where: { id: updated.customerId } });
-    if (customer) {
+    if (customer && OrderService.isPayoutReady(updated as any)) {
       await sendToCustomer(
         customer.telegramId,
         `✅ <b>XÁC NHẬN ĐÃ NHẬN TIỀN CHO ĐƠN ${updated.id}</b>\n\n` +
@@ -714,17 +716,26 @@ adminHandler.callbackQuery(/^(?:admin:pay:step2:|pay_step2:)(.+)$/, async (ctx) 
       );
     }
 
-    // Event-driven payout-ready notification — only after a real first
-    // transition into WAITING_PAYOUT.
-    if (isPayoutReadyTransition(updated?.status)) {
+    // Event-driven notifications — payout-ready ONLY when the order already
+    // has a valid destination; otherwise Admin sees 🟡 awaiting customer
+    // payout info and the customer is prompted to choose an account.
+    if (shouldNotifyPayoutReady(updated)) {
       await notifyPayoutReady({ ...updated, customer });
+    } else if (customer?.telegramId) {
+      await notifyAwaitingPayoutInfo({ ...updated, customer });
+      await sendPayoutDestinationPromptToCustomer(String(customer.telegramId), updated.id);
     }
 
     await ctx.reply(
-      `✅ <b>ĐÃ XÁC NHẬN NHẬN TIỀN THÀNH CÔNG</b>\n\n` +
-        `• Đơn: <code>${updated.id}</code> chuyển sang trạng thái <b>WAITING_PAYOUT</b>.\n` +
-        `• Cần chi trả: <b>${updated.targetAmount} ${updated.targetCurrency}</b>.\n` +
-        `<i>Vui lòng chuyển tiền cho khách và gửi ảnh bill kèm caption:</i> <code>/payout ${updated.id}</code>`,
+      shouldNotifyPayoutReady(updated)
+        ? `✅ <b>ĐÃ XÁC NHẬN NHẬN TIỀN THÀNH CÔNG</b>\n\n` +
+            `• Đơn: <code>${updated.id}</code> chuyển sang trạng thái <b>WAITING_PAYOUT</b>.\n` +
+            `• Cần chi trả: <b>${updated.targetAmount} ${updated.targetCurrency}</b>.\n` +
+            `<i>Vui lòng chuyển tiền cho khách và gửi ảnh bill kèm caption:</i> <code>/payout ${updated.id}</code>`
+        : `✅ <b>ĐÃ XÁC NHẬN NHẬN TIỀN</b>\n\n` +
+            `• Đơn: <code>${updated.id}</code> chuyển sang trạng thái <b>WAITING_PAYOUT</b>.\n` +
+            `• Cần chi trả: <b>${updated.targetAmount} ${updated.targetCurrency}</b>.\n` +
+            `🟡 <i>Khách CHƯA có tài khoản nhận — CHƯA payout được.</i> Yêu cầu đã gửi tới khách; khi khách xác nhận TK/QR, hệ thống sẽ báo 💸 Sẵn sàng payout.`,
       { parse_mode: "HTML" }
     );
   } catch (err: any) {
@@ -742,16 +753,16 @@ adminHandler.callbackQuery(/^(?:admin:payout:complete:|payout_complete:)(.+)$/, 
   if (!orderId) return;
   const adminId = String(ctx.from?.id || "");
 
-  // Pre-payout safety: the customer's receiving account is mandatory only
-  // BEFORE payout execution. Order creation no longer requires it (UX).
+  // Pre-payout safety: a confirmed payout destination is mandatory BEFORE
+  // payout execution. Order creation no longer requires it (UX).
   const targetOrder = await OrderService.getOrder(orderId);
-  if (targetOrder && !targetOrder.payoutBankSnapshot) {
+  if (targetOrder && !OrderService.isPayoutReady(targetOrder as any)) {
     const customerForBank = await prisma.customer.findUnique({ where: { id: targetOrder.customerId } });
     await ctx.reply(
       `⚠️ <b>CHƯA THỂ HOÀN TẤT ĐƠN HÀNG</b>\n\n` +
-        `Đơn <code>${orderId}</code> chưa có tài khoản nhận tiền của khách hàng.\n` +
-        `Vui lòng yêu cầu khách <b>${customerForBank?.fullName || customerForBank?.telegramId || targetOrder.customerId}</b> ` +
-        `gửi thông tin nhận tiền ${targetOrder.targetCurrency} qua menu <b>🏦 Tài khoản nhận tiền</b> trước khi giải ngân.`
+        `Đơn <code>${orderId}</code> chưa có tài khoản/QR nhận tiền đã xác nhận của khách.\n` +
+        `Vui lòng bấm <b>🔔 Nhắc khách gửi TK/QR</b> ở chi tiết đơn để yêu cầu khách ` +
+        `<b>${customerForBank?.fullName || customerForBank?.telegramId || targetOrder.customerId}</b> gửi thông tin nhận tiền ${targetOrder.targetCurrency} trước khi giải ngân.`
     );
     return;
   }

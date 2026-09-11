@@ -72,7 +72,7 @@ export async function showStaffDetail(ctx: BotContext, telegramId: string): Prom
     await ctx.reply("❌ Không tìm thấy nhân viên.").catch(() => {});
     return;
   }
-  const perms = (s.permissions || []).map((p) => PERMISSION_LABELS[p] || p).join(", ");
+  const perms = (s.permissions || []).map((p: string) => PERMISSION_LABELS[p] || p).join(", ");
   const lines = [
     `👤 <b>NHÂN VIÊN</b>`,
     "",

@@ -2,6 +2,8 @@ import { InlineKeyboard } from "grammy";
 import { Quote, Order, ExchangeRate } from "@prisma/client";
 import { QuoteService } from "../../modules/quotes/quote-service.js";
 import { MoneyService } from "../../modules/money/money-service.js";
+import { SystemConfigService } from "../../modules/system-config/system-config-service.js";
+import { generateTransferMemo } from "../../modules/orders/transfer-memo.js";
 import {
   DEFAULT_LOCALE,
   LOCALE_LABELS,
@@ -55,6 +57,31 @@ export function getBankWizardKeyboard(
     t(loc, "order.bank_btn", { currency }),
     `customer:bank:wiz:${currency}`
   );
+}
+
+/**
+ * Active-order customer action keyboard (requirement N).
+ * For an unpaid WAITING_PAYMENT order: 💳 transfer info, 📷 send bill,
+ * 💬 support and ❌ cancel. Once the order moves past WAITING_PAYMENT
+ * (bill sent / verified / payout flow) the cancel action disappears because
+ * cancellation is no longer safe; payout orders get their own chooser button
+ * added by the caller.
+ */
+export function getActiveOrderActionKeyboard(
+  order: { id: string; status: string },
+  locale: SupportedLocale | string = DEFAULT_LOCALE
+): InlineKeyboard {
+  const loc = resolveLocale(locale);
+  const kb = new InlineKeyboard();
+  if (order.status === "WAITING_PAYMENT") {
+    kb.text(t(loc, "order.payinfo_btn"), `customer:order:payinfo:${order.id}`);
+    kb.text(t(loc, "order.bill_btn"), `customer:bill:upload:${order.id}`);
+    kb.row().text(t(loc, "menu.support"), "customer:menu:support");
+    kb.row().text(t(loc, "order.cancel_btn"), `customer:order:cancel:${order.id}`);
+  } else {
+    kb.text(t(loc, "menu.support"), "customer:menu:support");
+  }
+  return kb;
 }
 
 /**
@@ -127,12 +154,21 @@ export async function renderActiveOrderText(
     } | null;
 
     if (recv?.accountNumber) {
+      // Deterministic Admin-configured transfer reference (never AI-generated).
+      const customer = (order as unknown as { customer?: { username?: string | null; telegramId?: string | null } }).customer;
+      const memo = generateTransferMemo(SystemConfigService.getTransferMemoTemplate(), {
+        orderId: order.id,
+        username: customer?.username,
+        telegramId: customer?.telegramId
+      });
       msg +=
         `\n${t(loc, "order.pay_title")}\n` +
         `${t(loc, "order.pay_bank", { bank: recv.bankName || "N/A" })}\n` +
         `${t(loc, "order.pay_name", { name: recv.accountName || "N/A" })}\n` +
         `${t(loc, "order.pay_number", { number: recv.accountNumber })}\n` +
-        `${t(loc, "order.pay_amount", { amount: `${srcAmt} ${order.sourceCurrency}` })}\n\n` +
+        `${t(loc, "order.pay_amount", { amount: `${srcAmt} ${order.sourceCurrency}` })}\n` +
+        `${t(loc, "order.pay_memo", { memo })}\n` +
+        `${t(loc, "order.pay_memo_hint")}\n\n` +
         t(loc, "order.pay_bill_hint");
     } else {
       msg += `\n${t(loc, "order.pay_wait")}`;
