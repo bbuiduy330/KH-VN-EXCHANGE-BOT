@@ -95,7 +95,7 @@ export async function showRateDetail(ctx: BotContext): Promise<void> {
   await replyOrEdit(ctx, renderRateDetailText(usdVnd), kb);
 }
 
-function rateEditPlaceholder(ctx: BotContext): Promise<void> {
+async function rateEditPlaceholder(ctx: BotContext): Promise<void> {
   ctx.answerCallbackQuery().catch(() => {});
   const text =
     `✏️ <b>CẬP NHẬT TỶ GIÁ (Phase 2)</b>\n\n` +
