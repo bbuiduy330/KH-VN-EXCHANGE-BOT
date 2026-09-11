@@ -508,7 +508,10 @@ customerHandler.callbackQuery("customer:menu:bank", async (ctx) => {
 
 customerHandler.callbackQuery(/^customer:bank:wiz:(VND|USD)$/, async (ctx) => {
   await ctx.answerCallbackQuery();
-  const currency = ctx.match ? ctx.match[1] : "VND";
+  // Strict-null fix (noUncheckedIndexedAccess): the regex only matches
+  // VND|USD, so narrowing on the literal is a proven-safe determination —
+  // anything absent/unexpected falls back to the default VND.
+  const currency = ctx.match?.[1] === "USD" ? "USD" : "VND";
   const telegramId = String(ctx.from?.id || "");
   const customer = await CustomerService.getOrCreateCustomer({ telegramId });
   const locale = locOf(customer);
@@ -693,7 +696,9 @@ customerHandler.callbackQuery(/^(?:customer:quote:confirm:|confirm_quote:)(.+)$/
 /** Best-effort source currency for the missing-desk-account message. */
 function confirmedQuoteCurrency(err: any): string {
   const m = String(err?.message || "").match(/đồng ([A-Z]{3})/);
-  return m ? m[1] : "";
+  // Strict-null fix: a capture group is string | undefined even on a match.
+  const code = m?.[1];
+  return code ?? "";
 }
 
 // Attach bill to explicitly selected order
@@ -1246,7 +1251,7 @@ export async function sendPayoutDestinationPromptToCustomer(
 /** Entry callback: render the chooser for an explicitly selected order. */
 customerHandler.callbackQuery(/^customer:payout:choose:([a-zA-Z0-9_-]+)$/, async (ctx) => {
   await ctx.answerCallbackQuery();
-  const orderId = ctx.match ? ctx.match[1] : "";
+  const orderId = ctx.match?.[1] ?? "";
   const telegramId = String(ctx.from?.id || "");
   const customer = await CustomerService.getOrCreateCustomer({ telegramId });
   const order = await OrderService.getOrder(orderId);
@@ -1270,8 +1275,8 @@ customerHandler.callbackQuery(/^customer:payout:choose:([a-zA-Z0-9_-]+)$/, async
 /** Select a recent (historical, COMPLETED-order) destination → confirmation preview. */
 customerHandler.callbackQuery(/^customer:payout:use:([a-zA-Z0-9_-]+):(\d+)$/, async (ctx) => {
   await ctx.answerCallbackQuery();
-  const orderId = ctx.match ? ctx.match[1] : "";
-  const idx = Number(ctx.match ? ctx.match[2] : "-1");
+  const orderId = ctx.match?.[1] ?? "";
+  const idx = Number(ctx.match?.[2] ?? "-1");
   const telegramId = String(ctx.from?.id || "");
   const customer = await CustomerService.getOrCreateCustomer({ telegramId });
   const locale = locOf(customer);
@@ -1322,7 +1327,7 @@ customerHandler.callbackQuery(/^customer:payout:use:([a-zA-Z0-9_-]+):(\d+)$/, as
 /** Customer chose "new text" → bind session to this order and prompt. */
 customerHandler.callbackQuery(/^customer:payout:newtext:([a-zA-Z0-9_-]+)$/, async (ctx) => {
   await ctx.answerCallbackQuery();
-  const orderId = ctx.match ? ctx.match[1] : "";
+  const orderId = ctx.match?.[1] ?? "";
   const telegramId = String(ctx.from?.id || "");
   const customer = await CustomerService.getOrCreateCustomer({ telegramId });
   const locale = locOf(customer);
@@ -1339,7 +1344,7 @@ customerHandler.callbackQuery(/^customer:payout:newtext:([a-zA-Z0-9_-]+)$/, asyn
 /** Customer chose "new QR" → bind session to this order and prompt for photo. */
 customerHandler.callbackQuery(/^customer:payout:newqr:([a-zA-Z0-9_-]+)$/, async (ctx) => {
   await ctx.answerCallbackQuery();
-  const orderId = ctx.match ? ctx.match[1] : "";
+  const orderId = ctx.match?.[1] ?? "";
   const telegramId = String(ctx.from?.id || "");
   const customer = await CustomerService.getOrCreateCustomer({ telegramId });
   const locale = locOf(customer);
@@ -1356,7 +1361,7 @@ customerHandler.callbackQuery(/^customer:payout:newqr:([a-zA-Z0-9_-]+)$/, async 
 /** FINAL step: only customer confirmation persists the destination. */
 customerHandler.callbackQuery(/^customer:payout:confirm:([a-zA-Z0-9_-]+)$/, async (ctx) => {
   await ctx.answerCallbackQuery();
-  const orderId = ctx.match ? ctx.match[1] : "";
+  const orderId = ctx.match?.[1] ?? "";
   const telegramId = String(ctx.from?.id || "");
   const customer = await CustomerService.getOrCreateCustomer({ telegramId });
   const locale = locOf(customer);
@@ -1399,7 +1404,7 @@ customerHandler.callbackQuery(/^customer:payout:confirm:([a-zA-Z0-9_-]+)$/, asyn
 /** Edit → re-enter text input (session kept, preview cleared). */
 customerHandler.callbackQuery(/^customer:payout:edit:([a-zA-Z0-9_-]+)$/, async (ctx) => {
   await ctx.answerCallbackQuery();
-  const orderId = ctx.match ? ctx.match[1] : "";
+  const orderId = ctx.match?.[1] ?? "";
   const telegramId = String(ctx.from?.id || "");
   const customer = await CustomerService.getOrCreateCustomer({ telegramId });
   const locale = locOf(customer);
@@ -1414,7 +1419,7 @@ customerHandler.callbackQuery(/^customer:payout:edit:([a-zA-Z0-9_-]+)$/, async (
 /** Cancel destination input → drop session, back to chooser. */
 customerHandler.callbackQuery(/^customer:payout:cancel:([a-zA-Z0-9_-]+)$/, async (ctx) => {
   await ctx.answerCallbackQuery();
-  const orderId = ctx.match ? ctx.match[1] : "";
+  const orderId = ctx.match?.[1] ?? "";
   const telegramId = String(ctx.from?.id || "");
   clearPayoutInputSession(telegramId);
   await sendPayoutDestinationPromptToCustomerCtx(ctx, orderId);

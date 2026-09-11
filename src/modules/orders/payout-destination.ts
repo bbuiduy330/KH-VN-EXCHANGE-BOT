@@ -77,8 +77,10 @@ export function parsePayoutDestinationText(text: string): ParsedPayoutDestinatio
   let accountNumber: string | null = null;
   let numberIndex = -1;
   for (let i = 0; i < tokens.length; i++) {
-    if (ACCOUNT_NUMBER_RE.test(tokens[i]) && (!accountNumber || tokens[i].length > accountNumber.length)) {
-      accountNumber = tokens[i];
+    const token = tokens[i];
+    if (!token) continue;
+    if (ACCOUNT_NUMBER_RE.test(token) && (!accountNumber || token.length > accountNumber.length)) {
+      accountNumber = token;
       numberIndex = i;
     }
   }
@@ -91,9 +93,12 @@ export function parsePayoutDestinationText(text: string): ParsedPayoutDestinatio
   let bankIndex = -1;
   for (let i = 0; i < tokens.length; i++) {
     if (i === numberIndex) continue;
-    const key = tokens[i].toLowerCase().replace(/[^a-z0-9]/g, "");
-    if (BANK_ALIASES[key]) {
-      bankName = BANK_ALIASES[key];
+    const token = tokens[i];
+    if (!token) continue;
+    const key = token.toLowerCase().replace(/[^a-z0-9]/g, "");
+    const alias = BANK_ALIASES[key];
+    if (alias) {
+      bankName = alias;
       bankIndex = i;
       break;
     }
@@ -111,7 +116,13 @@ export function parsePayoutDestinationText(text: string): ParsedPayoutDestinatio
 export function parsePayoutDestinationPipe(text: string): ParsedPayoutDestination | null {
   const parts = String(text || "").split("|").map((p) => p.trim());
   if (parts.length < 4) return null;
-  const [, bankName, accountName, accountNumber] = parts;
+  // Strict-null fix (noUncheckedIndexedAccess): split parts are
+  // string | undefined. A missing required field yields the existing
+  // null-failure result - never an invented destination.
+  const bankName = parts[1];
+  const accountName = parts[2];
+  const accountNumber = parts[3];
+  if (bankName === undefined || accountName === undefined || accountNumber === undefined) return null;
   const number = cleanText(accountNumber).replace(/\s/g, "");
   if (!cleanText(bankName) || !cleanText(accountName) || !ACCOUNT_NUMBER_RE.test(number)) {
     return null;

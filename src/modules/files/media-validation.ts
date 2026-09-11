@@ -84,7 +84,10 @@ function mimeFromExtension(path: string | null | undefined): string | null {
 }
 
 function normalizeMime(raw: string | null | undefined): string | null {
-  const m = String(raw || "").trim().toLowerCase().split(";")[0].trim();
+  // Strict-null fix (noUncheckedIndexedAccess): split(";")[0] is
+  // string | undefined — normalize through a deliberate empty fallback.
+  const firstPart = String(raw || "").trim().toLowerCase().split(";")[0];
+  const m = (firstPart ?? "").trim();
   if (!m || m === "application/octet-stream" || m === "binary/octet-stream") return null;
   // Telegram sometimes serves the nonstandard "image/jpg".
   if (m === "image/jpg") return "image/jpeg";
@@ -95,6 +98,12 @@ function normalizeMime(raw: string | null | undefined): string | null {
  * Resolve the authoritative evidence MIME type. `telegramMime` comes from
  * Telegram metadata (document.mime_type); `fileNameOrPath` may be empty (a
  * compressed Telegram photo has NO original filename — that must never reject).
+ *
+ * Precedence implemented below (bytes are AUTHORITATIVE):
+ *   1. magic-byte sniffing of `input.buffer` — wins over every hint;
+ *   2. Telegram metadata — fallback hint;
+ *   3. filename/extension — fallback hint;
+ *   4. HTTP Content-Type — last-resort hint.
  */
 export function resolveEvidenceMime(input: {
   telegramMime?: string | null;
@@ -102,34 +111,44 @@ export function resolveEvidenceMime(input: {
   responseMime?: string | null;
   buffer?: Buffer | null;
 }): MediaResolution {
-  const sniffed = normalizeMime(sniffMimeFromBytes(buffer));
+  // Strict-null fix (defect B): the byte source is `input.buffer`, NOT a bare
+  // `buffer` variable. Sniffing runs FIRST — recognizable magic bytes are
+  // authoritative and always beat metadata/extension/header hints.
+  const sniffed = normalizeMime(sniffMimeFromBytes(input.buffer));
   const candidates = [
     normalizeMime(input.telegramMime),
     sniffed,
     mimeFromExtension(input.fileNameOrPath),
     normalizeMime(input.responseMime)
-  ].filter(Boolean) as string[];
+  ].filter((m): m is string => m !== null);
 
   if (!input.buffer || input.buffer.length === 0) {
-    return { mimeType: candidates[0] || "application/octet-stream", accepted: false, reason: "EMPTY_FILE" };
+    const fallback = candidates[0] ?? "application/octet-stream";
+    return { mimeType: fallback, accepted: false, reason: "EMPTY_FILE" };
   }
 
-  // Magic bytes win over everything for known signatures.
+  // 1. Magic bytes win over everything for known signatures.
   if (sniffed) {
     return {
       mimeType: sniffed,
-      accepted: (ALLOWED_EVIDENCE_MIMES as readonly string[]).includes(sniffed) || sniffed.startsWith("image/")
+      accepted: (ALLOWED_EVIDENCE_MIMES as readonly string[]).includes(sniffed) || sniffed.startsWith("image/"),
+      reason: "NONE"
     };
   }
 
+  // 2-4. Fallback hints only (Telegram metadata first, then extension, then
+  // HTTP header). A known-safe hint is accepted; nothing else is invented.
   for (const candidate of candidates) {
     if ((ALLOWED_EVIDENCE_MIMES as readonly string[]).includes(candidate) || candidate.startsWith("image/")) {
       return { mimeType: candidate, accepted: true, reason: "NONE" };
     }
   }
 
-  if (candidates.length > 0) {
-    return { mimeType: candidates[0], accepted: false, reason: "UNSUPPORTED_TYPE" };
+  const firstCandidate = candidates[0];
+  if (firstCandidate !== undefined) {
+    // Known but unsupported declared type → reject with a stable reason code;
+    // never turn unknown media into an accepted image.
+    return { mimeType: firstCandidate, accepted: false, reason: "UNSUPPORTED_TYPE" };
   }
   return { mimeType: "application/octet-stream", accepted: false, reason: "UNKNOWN_TYPE" };
 }
