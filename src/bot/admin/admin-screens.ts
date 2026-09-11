@@ -101,7 +101,7 @@ function rateEditPlaceholder(ctx: BotContext): Promise<void> {
     `✏️ <b>CẬP NHẬT TỶ GIÁ (Phase 2)</b>\n\n` +
     `Trình cập nhật tỷ giá linh hoạt (26200, +50, -100, "tăng usd vnd thêm 50", cập nhật cả hai chiều, xem trước số báo giá bị vô hiệu, xác nhận cuối, setRateAndInvalidate()) sẽ ra mắt ở Phase 2.\n\n` +
     `Hiện tại dùng lệnh an toàn:\n<code>/setrate USD/VND base buyMargin sellMargin fee feeCurrency</code>`;
-  return ctx.reply(text, { parse_mode: "HTML" });
+  await ctx.reply(text, { parse_mode: "HTML" });
 }
 
 // ---------------------------------------------------------------------------
