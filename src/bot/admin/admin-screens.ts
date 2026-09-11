@@ -263,15 +263,7 @@ export async function showAdvancedCommands(ctx: BotContext): Promise<void> {
   await replyOrEdit(ctx, text, kb);
 }
 
-adminScreensHandler.callbackQuery("ops:rates", (ctx) => showRateScreen(ctx));
-adminScreensHandler.callbackQuery(/^ops:rates:edit:(usd_vnd|vnd_usd|both)$/, (ctx) => rateEditPlaceholder(ctx));
 adminScreensHandler.callbackQuery("ops:rates:detail", (ctx) => showRateDetail(ctx));
-adminScreensHandler.callbackQuery("ops:ai", (ctx) => showAiStatus(ctx));
-adminScreensHandler.callbackQuery("ops:ai:test", (ctx) => testAi(ctx));
-adminScreensHandler.callbackQuery("ops:accounts", (ctx) => showPaymentAccounts(ctx));
-adminScreensHandler.callbackQuery("ops:staff", (ctx) => showStaffList(ctx));
-adminScreensHandler.callbackQuery("ops:config", (ctx) => showConfig(ctx));
-adminScreensHandler.callbackQuery("ops:audit", (ctx) => showAudit(ctx));
 adminScreensHandler.callbackQuery("ops:help", (ctx) => showHelp(ctx));
 adminScreensHandler.callbackQuery("ops:advanced", (ctx) => showAdvancedCommands(ctx));
 

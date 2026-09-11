@@ -7,10 +7,13 @@ import { requirePermission } from "../middleware/permissions.js";
 import { prisma } from "../../database/client.js";
 import { OrderService } from "../../modules/orders/order-service.js";
 import { QuoteService } from "../../modules/quotes/quote-service.js";
+import { ConversationService } from "../../modules/conversation/conversation-service.js";
+import { PermissionService } from "../../modules/permissions/permission-service.js";
 import { MoneyService } from "../../modules/money/money-service.js";
 import { escapeHtml, staffDisplayName } from "../menus/cskh-panel.js";
 import { customerLabel, shortCustomerId, shortOrderId } from "./admin-panel.js";
 import { setAdminSearch } from "./admin-session.js";
+import { clearSelectedCustomer, getSelectedCustomer, setSelectedCustomer } from "../state/staff-chat-session.js";
 
 export const adminCustomersHandler = new Composer<BotContext>();
 
@@ -69,6 +72,7 @@ export function renderCustomerDetailText(customer: any, conv: any, latestOrder: 
 
 export function customerDetailKeyboard(customer: any, latestOrder: any): InlineKeyboard {
   const kb = new InlineKeyboard();
+  kb.row().text("💬 Hỗ trợ khách", `ops:customer:support:${customer.id}`);
   if (latestOrder) {
     kb.text("📦 Xem đơn", `ops:order:detail:${latestOrder.id}`);
   }
@@ -184,4 +188,78 @@ adminCustomersHandler.callbackQuery(/^ops:customer:detail:(.+)$/, async (ctx) =>
   await showCustomerDetail(ctx, ctx.match?.[1] || "");
 });
 adminCustomersHandler.callbackQuery(/^ops:customer:history:(.+)$/, (ctx) => showCustomerHistory(ctx, ctx.match?.[1] || ""));
+
+// ---------------------------------------------------------------------------
+// Admin → customer direct support (reuses existing C3 claim/selected-chat)
+// ---------------------------------------------------------------------------
+
+export async function showCustomerSupport(ctx: BotContext, customerId: string): Promise<void> {
+  if (!(await requirePermission(ctx, "customer.message"))) return;
+  const adminId = String(ctx.from?.id || "");
+  const customer = await prisma.customer.findUnique({ where: { id: customerId } });
+  if (!customer) {
+    await ctx.reply("❌ Không tìm thấy khách hàng.").catch(() => {});
+    return;
+  }
+  const conv = await ConversationService.getOrCreateConversation(customerId);
+  const lines = ["💬 <b>HỖ TRỢ KHÁCH</b>", "", `👤 ${escapeHtml(customerLabel(customer))}`];
+  const kb = new InlineKeyboard();
+  if (conv.claimedById === adminId) {
+    lines.push("Bạn đang hỗ trợ khách này.");
+    kb.row().text("↩️ Kết thúc hỗ trợ", `ops:customer:support:release:${customerId}`);
+  } else if (conv.claimedById) {
+    const owner = await PermissionService.getStaffUser(conv.claimedById);
+    lines.push(`👨‍💼 Đang hỗ trợ: ${escapeHtml(staffDisplayName(owner, conv.claimedById))}`);
+    kb.row().text("🔄 Chiếm quyền hỗ trợ", `ops:customer:support:claim:${customerId}`);
+  } else {
+    lines.push("Chưa có ai hỗ trợ.");
+    kb.row().text("✅ Nhận khách", `ops:customer:support:claim:${customerId}`);
+  }
+  kb.row().text("⬅️ Quay lại", `ops:customer:detail:${customerId}`).text("🏠 Menu Admin", "ops:home");
+
+  if (ctx.callbackQuery) {
+    await ctx.answerCallbackQuery();
+    try {
+      await ctx.editMessageText(lines.join("\n"), { parse_mode: "HTML", reply_markup: kb });
+      return;
+    } catch {
+      /* fall through */
+    }
+  }
+  await ctx.reply(lines.join("\n"), { parse_mode: "HTML", reply_markup: kb });
+}
+
+export async function claimCustomerAsAdmin(ctx: BotContext, customerId: string): Promise<void> {
+  await ctx.answerCallbackQuery();
+  if (!(await requirePermission(ctx, "customer.message"))) return;
+  const adminId = String(ctx.from?.id || "");
+  try {
+    const conv = await ConversationService.getOrCreateConversation(customerId);
+    if (conv.claimedById && conv.claimedById !== adminId) {
+      await ConversationService.release(customerId, adminId, "ADMIN", ctx.identity?.staff?.permissions || []);
+    }
+    await ConversationService.claim(customerId, adminId, "ADMIN");
+    setSelectedCustomer(adminId, customerId);
+    await ctx.reply("✅ Đã nhận hỗ trợ khách. Gửi tin nhắn để trả lời (chế độ riêng cho bạn).", { parse_mode: "HTML" });
+  } catch (err: any) {
+    await ctx.reply(`❌ ${escapeHtml(err?.message || "lỗi không xác định")}`, { parse_mode: "HTML" }).catch(() => {});
+  }
+}
+
+export async function releaseCustomerAsAdmin(ctx: BotContext, customerId: string): Promise<void> {
+  await ctx.answerCallbackQuery();
+  if (!(await requirePermission(ctx, "customer.message"))) return;
+  const adminId = String(ctx.from?.id || "");
+  try {
+    await ConversationService.release(customerId, adminId, "ADMIN", ctx.identity?.staff?.permissions || []);
+    clearSelectedCustomer(adminId);
+    await ctx.reply("✅ Đã kết thúc hỗ trợ.").catch(() => {});
+  } catch (err: any) {
+    await ctx.reply(`❌ ${escapeHtml(err?.message || "lỗi không xác định")}`, { parse_mode: "HTML" }).catch(() => {});
+  }
+}
+
+adminCustomersHandler.callbackQuery(/^ops:customer:support:(.+)$/, (ctx) => showCustomerSupport(ctx, ctx.match?.[1] || ""));
+adminCustomersHandler.callbackQuery(/^ops:customer:support:claim:(.+)$/, (ctx) => claimCustomerAsAdmin(ctx, ctx.match?.[1] || ""));
+adminCustomersHandler.callbackQuery(/^ops:customer:support:release:(.+)$/, (ctx) => releaseCustomerAsAdmin(ctx, ctx.match?.[1] || ""));
 

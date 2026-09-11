@@ -3,7 +3,7 @@ import { BotContext, identityMiddleware } from "./middleware/identity.js";
 import { customerHandler, showCustomerStart, handleCustomerTextMessage, handleCustomerPhoto, handleCustomerVoice } from "./handlers/customer-handler.js";
 import { cskhHandler, showCskhStart, handleStaffMedia, handleStaffTextMessage } from "./handlers/cskh-handler.js";
 import { adminHandler, showAdminStart, handleAdminPhoto, handleAdminTextMessage } from "./handlers/admin-handler.js";
-import { adminOperationsHandler, handleAdminReservedText, handleAdminSessionText, handleAdminPayoutEvidenceMedia } from "./admin/index.js";
+import { adminOperationsHandler, handleAdminReservedText, handleAdminSessionText, handleAdminPayoutEvidenceMedia, handleAiVoiceTestMedia } from "./admin/index.js";
 import { PermissionService } from "../modules/permissions/permission-service.js";
 import { sendToAdminNotificationChat } from "./notifications.js";
 
@@ -118,6 +118,10 @@ mainRouter.on("message:photo", async (ctx) => {
 // 6. Global Voice router
 mainRouter.on("message:voice", async (ctx) => {
   const userType = ctx.identity?.userType;
+  // Per-admin AI voice diagnostic session (before staff media relay).
+  if (userType === "ADMIN" || userType === "SUPER_ADMIN") {
+    if (await handleAiVoiceTestMedia(ctx)) return;
+  }
   if (userType === "ADMIN" || userType === "SUPER_ADMIN" || userType === "CSKH") {
     await handleStaffMedia(ctx);
     return;
