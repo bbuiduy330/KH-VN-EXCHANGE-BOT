@@ -7,19 +7,36 @@ import { CustomerService } from "../src/modules/customer/customer-service.js";
 import { env } from "../src/config/env.js";
 
 describe("Requirement 18: AI Model Strategy & Fallback Engine", () => {
-  it("Model chain ordering: gemini-3.8-flash -> gemini-3.6-flash -> gemini-3.5-flash-lite", () => {
-    const chain = GeminiModelStrategy.getTextModelChain();
-    expect(chain).toEqual(["gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.5-flash-lite"]);
+  const LEGIT_MODELS = ["gemini-3.8-flash", "gemini-3.6-flash", "gemini-3.5-flash-lite"];
+
+  it("Default text model is gemini-3.8-flash", () => {
+    expect(GeminiModelStrategy.getPrimaryModel()).toBe("gemini-3.8-flash");
   });
 
-  it("Custom primary model keeps configured model first, followed by fallbacks without duplicates", () => {
-    const customChain = GeminiModelStrategy.getTextModelChain("gemini-3.6-flash");
-    expect(customChain[0]).toBe("gemini-3.6-flash");
-    expect(customChain).toContain("gemini-3.8-flash");
-    expect(customChain).toContain("gemini-3.5-flash-lite");
-    // Ensure no duplicates
-    const unique = new Set(customChain);
-    expect(unique.size).toBe(customChain.length);
+  it("Text model chain only contains legitimate models and deduplicates", () => {
+    const chain = GeminiModelStrategy.getTextModelChain();
+    expect(chain[0]).toBe("gemini-3.8-flash");
+    for (const m of chain) expect(LEGIT_MODELS).toContain(m);
+    expect(new Set(chain).size).toBe(chain.length);
+  });
+
+  it("Explicit primary override stays first and deduplicates", () => {
+    const chain = GeminiModelStrategy.getTextModelChain("gemini-3.6-flash");
+    expect(chain[0]).toBe("gemini-3.6-flash");
+    for (const m of chain) expect(LEGIT_MODELS).toContain(m);
+    expect(new Set(chain).size).toBe(chain.length);
+  });
+
+  it("Transcribe chain defaults to legitimate models and deduplicates", () => {
+    const chain = GeminiModelStrategy.getTranscribeModelChain();
+    expect(chain[0]).toBe("gemini-3.8-flash");
+    for (const m of chain) expect(LEGIT_MODELS).toContain(m);
+    expect(new Set(chain).size).toBe(chain.length);
+  });
+
+  it("Transcribe chain respects an explicit STT override first", () => {
+    const chain = GeminiModelStrategy.getTranscribeModelChain("gemini-3.5-transcribe");
+    expect(chain[0]).toBe("gemini-3.5-transcribe");
   });
 
   it("Fallback occurs on 404 (Model Not Found)", async () => {

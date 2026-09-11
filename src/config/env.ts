@@ -18,7 +18,9 @@ const envSchema = z.object({
   GEMINI_FALLBACK_MODEL: z.string().default("gemini-3.6-flash"),
   GEMINI_LITE_MODEL: z.string().default("gemini-3.5-flash-lite"),
   GEMINI_TEXT_MODEL: z.string().default("gemini-3.8-flash"),
-  GEMINI_TRANSCRIBE_MODEL: z.string().default("gemini-3.8-flash"),
+  // Empty default: STT defers to the configured text model (then gemini-3.8-flash)
+  // per the documented STT precedence.
+  GEMINI_TRANSCRIBE_MODEL: z.string().default(""),
   ENABLE_GEMINI_DIAGNOSTIC_ENDPOINT: z
     .preprocess((val) => val === "true" || val === true, z.boolean())
     .default(false),
