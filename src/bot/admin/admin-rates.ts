@@ -6,6 +6,11 @@
  * "VND → USD" = 1 / (base + sellMargin). Editing either direction therefore
  * edits the same baseRate — made explicit in the UI (no fake second value).
  * All mutations go through QuoteService.setRateAndInvalidate().
+ *
+ * Fresh install: when no USD/VND row exists, startRateEdit starts a first-time
+ * setup wizard (base rate → buyMargin → sellMargin → fee). The admin enters
+ * every financial value explicitly — nothing is auto-seeded or guessed. The
+ * save still goes through the same authoritative setRateAndInvalidate upsert.
  */
 import { Composer, InlineKeyboard } from "grammy";
 import { BotContext } from "../middleware/identity.js";
@@ -15,7 +20,7 @@ import { QuoteService } from "../../modules/quotes/quote-service.js";
 import { MoneyService } from "../../modules/money/money-service.js";
 import { escapeHtml } from "../menus/cskh-panel.js";
 import { timeAgo } from "./admin-panel.js";
-import { clearWizard, getAdminSession, isSessionExpired, startWizard, updateWizard } from "./admin-session.js";
+import { clearWizard, getAdminSession, isSessionExpired, startWizard, updateWizard, AdminWizard } from "./admin-session.js";
 
 export const adminRatesHandler = new Composer<BotContext>();
 
@@ -69,6 +74,18 @@ export function parseRateInput(input: string): RateParseResult {
   return { kind: "error", reason: "Không hiểu được giá trị nhập" };
 }
 
+/**
+ * Deterministic parser for the first-time-setup margin/fee steps.
+ * Plain non-negative integers only — ambiguous thousand/decimal separators
+ * ("1.000", "1,000") are rejected, consistent with parseRateInput.
+ */
+export function parseNonNegativeInteger(input: string): number | null {
+  const raw = (input || "").trim().replace(/\s+/g, "");
+  if (!/^\d+$/.test(raw)) return null;
+  const value = Number(raw);
+  return Number.isFinite(value) && value >= 0 ? value : null;
+}
+
 async function getUsdVnd() {
   return prisma.exchangeRate.findUnique({ where: { pair: "USD/VND" } });
 }
@@ -76,7 +93,8 @@ async function getUsdVnd() {
 function renderRateManagementText(rate: any): string {
   const lines = ["💱 <b>QUẢN LÝ TỶ GIÁ</b>", ""];
   if (!rate) {
-    lines.push("Chưa cấu hình cặp USD/VND.");
+    lines.push("⚠️ Chưa có tỷ giá USD/VND.");
+    lines.push("Vui lòng thiết lập tỷ giá đầu tiên.");
     return lines.join("\n");
   }
   const { effectiveBuy, effectiveSell } = MoneyService.calculateEffectiveRates(rate.baseRate, rate.buyMargin, rate.sellMargin);
@@ -89,7 +107,14 @@ function renderRateManagementText(rate: any): string {
   return lines.join("\n");
 }
 
-export function getRateManagementKeyboard(): InlineKeyboard {
+export function getRateManagementKeyboard(hasRate = true): InlineKeyboard {
+  if (!hasRate) {
+    // Fresh install: the only meaningful action is the first-time setup.
+    return new InlineKeyboard()
+      .text("🛠 Thiết lập tỷ giá đầu tiên", "ops:rate:edit:usd_vnd")
+      .row()
+      .text("🏠 Menu Admin", "ops:home");
+  }
   return new InlineKeyboard()
     .text("✏️ USD → VND", "ops:rate:edit:usd_vnd")
     .text("✏️ VND → USD", "ops:rate:edit:vnd_usd")
@@ -106,7 +131,7 @@ export async function showRateManagement(ctx: BotContext): Promise<void> {
   if (!(await requirePermission(ctx, "rate.view"))) return;
   const rate = await getUsdVnd();
   const text = renderRateManagementText(rate);
-  const kb = getRateManagementKeyboard();
+  const kb = getRateManagementKeyboard(!!rate);
   if (ctx.callbackQuery) {
     await ctx.answerCallbackQuery();
     try {
@@ -144,7 +169,24 @@ export async function startRateEdit(ctx: BotContext, direction: string): Promise
   if (!(await requirePermission(ctx, "rate.edit"))) return;
   const rate = await getUsdVnd();
   if (!rate) {
-    await ctx.reply("Chưa cấu hình cặp USD/VND.").catch(() => {});
+    // Fresh install: no ExchangeRate row yet — start the first-time setup
+    // wizard instead of dead-ending. The admin creates the initial USD/VND
+    // rate step by step; nothing is auto-seeded or guessed.
+    const adminId = String(ctx.from?.id || "");
+    startWizard(adminId, "rate_edit", {
+      direction,
+      isCreate: true,
+      currentBaseRate: 0,
+      pair: "USD/VND"
+    });
+    await ctx.reply(
+      `⚠️ <b>Chưa có tỷ giá USD/VND.</b>\n` +
+        `Vui lòng thiết lập tỷ giá đầu tiên.\n\n` +
+        `💱 <b>BƯỚC 1/4 — NHẬP TỶ GIÁ GỐC (VND / 1 USD)</b>\n\n` +
+        `Nhập một số nguyên, ví dụ: <code>26200</code>\n` +
+        `Gửi /cancel để hủy.`,
+      { parse_mode: "HTML" }
+    );
     return;
   }
   const adminId = String(ctx.from?.id || "");
@@ -182,6 +224,13 @@ export async function handleRateWizardInput(ctx: BotContext, text: string): Prom
     return true;
   }
 
+  // First-time setup (fresh DB): no ExchangeRate row yet. The admin enters
+  // base rate, margins and fee explicitly — every value is authoritative.
+  if (wizard.data.isCreate) {
+    await handleRateCreateInput(ctx, adminId, wizard, text);
+    return true;
+  }
+
   const parsed = parseRateInput(text);
   if (parsed.kind === "error") {
     await ctx.reply(`❌ ${escapeHtml(parsed.reason)}. Nhập lại (ví dụ: 26200, +50, -100, tăng 50) hoặc /cancel.`).catch(() => {});
@@ -198,6 +247,120 @@ export async function handleRateWizardInput(ctx: BotContext, text: string): Prom
   updateWizard(adminId, { step: 2, data: { newBaseRate: newBase } });
   await showRatePreview(ctx, adminId);
   return true;
+}
+
+/**
+ * First-time setup wizard steps (fresh DB, no ExchangeRate row):
+ * step 1 = base rate (absolute only), 2 = buyMargin, 3 = sellMargin,
+ * 4 = fee (USD), 5 = preview/confirm. No value is invented by the system.
+ */
+async function handleRateCreateInput(ctx: BotContext, adminId: string, wizard: AdminWizard, text: string): Promise<void> {
+  const step = Number(wizard.step);
+
+  if (step === 1) {
+    const parsed = parseRateInput(text);
+    if (parsed.kind === "error") {
+      await ctx.reply(`❌ ${escapeHtml(parsed.reason)}. Nhập tỷ giá tuyệt đối (ví dụ: 26200) hoặc /cancel.`).catch(() => {});
+      return;
+    }
+    if (parsed.kind === "delta") {
+      await ctx.reply("❌ Đây là lần thiết lập đầu tiên — hãy nhập tỷ giá tuyệt đối (ví dụ: 26200).").catch(() => {});
+      return;
+    }
+    if (!Number.isFinite(parsed.value) || parsed.value <= 0) {
+      await ctx.reply("❌ Tỷ giá không hợp lệ (phải lớn hơn 0). Nhập lại.").catch(() => {});
+      return;
+    }
+    updateWizard(adminId, { step: 2, data: { newBaseRate: parsed.value } });
+    await ctx.reply(
+      `💱 <b>BƯỚC 2/4 — BUY MARGIN (VND, trừ khỏi base)</b>\n\n` +
+        `USD → VND = base − buyMargin\n` +
+        `Nhập số nguyên ≥ 0 (ví dụ: <code>50</code>). Gửi /cancel để hủy.`,
+      { parse_mode: "HTML" }
+    );
+    return;
+  }
+
+  if (step === 2) {
+    const buy = parseNonNegativeInteger(text);
+    if (buy === null) {
+      await ctx.reply("❌ Nhập số nguyên ≥ 0 (ví dụ: 50) hoặc /cancel.").catch(() => {});
+      return;
+    }
+    updateWizard(adminId, { step: 3, data: { newBuyMargin: buy } });
+    await ctx.reply(
+      `💱 <b>BƯỚC 3/4 — SELL MARGIN (VND, cộng vào base)</b>\n\n` +
+        `VND → USD = base + sellMargin\n` +
+        `Nhập số nguyên ≥ 0 (ví dụ: <code>100</code>). Gửi /cancel để hủy.`,
+      { parse_mode: "HTML" }
+    );
+    return;
+  }
+
+  if (step === 3) {
+    const sell = parseNonNegativeInteger(text);
+    if (sell === null) {
+      await ctx.reply("❌ Nhập số nguyên ≥ 0 (ví dụ: 100) hoặc /cancel.").catch(() => {});
+      return;
+    }
+    updateWizard(adminId, { step: 4, data: { newSellMargin: sell } });
+    await ctx.reply(
+      `💱 <b>BƯỚC 4/4 — PHÍ (USD)</b>\n\n` +
+        `Nhập số nguyên ≥ 0 (ví dụ: <code>2</code>). Gửi /cancel để hủy.`,
+      { parse_mode: "HTML" }
+    );
+    return;
+  }
+
+  if (step === 4) {
+    const fee = parseNonNegativeInteger(text);
+    if (fee === null) {
+      await ctx.reply("❌ Nhập số nguyên ≥ 0 (ví dụ: 2) hoặc /cancel.").catch(() => {});
+      return;
+    }
+    updateWizard(adminId, { step: 5, data: { newFee: fee } });
+    await showCreatePreview(ctx, adminId);
+    return;
+  }
+}
+
+async function showCreatePreview(ctx: BotContext, adminId: string): Promise<void> {
+  const session = getAdminSession(adminId);
+  const wizard = session.wizard;
+  if (!wizard) return;
+
+  const base = Number(wizard.data.newBaseRate);
+  const buy = Number(wizard.data.newBuyMargin);
+  const sell = Number(wizard.data.newSellMargin);
+  const fee = Number(wizard.data.newFee);
+  if (![base, buy, sell, fee].every((v) => Number.isFinite(v))) {
+    clearWizard(adminId);
+    await ctx.reply("⚠️ Dữ liệu thiết lập không đầy đủ. Vui lòng bắt đầu lại từ màn hình Tỷ giá.").catch(() => {});
+    return;
+  }
+
+  const { effectiveBuy, effectiveSell } = MoneyService.calculateEffectiveRates(base, buy, sell);
+  const pending = await prisma.quote.count({ where: { status: "PENDING" } });
+
+  const text =
+    `⚠️ <b>XÁC NHẬN THIẾT LẬP TỶ GIÁ ĐẦU TIÊN (USD/VND)</b>\n\n` +
+    `Base: <b>${MoneyService.formatAmount(base, "VND")}</b>\n` +
+    `Buy margin: <b>-${buy}</b>\n` +
+    `Sell margin: <b>+${sell}</b>\n` +
+    `Phí: <b>${fee} USD</b>\n\n` +
+    `USD → VND: <b>1 USD = ${MoneyService.formatAmount(effectiveBuy, "VND")} VND</b>\n` +
+    `VND → USD: <b>1 USD = ${MoneyService.formatAmount(effectiveSell, "VND")} VND</b>\n\n` +
+    `Quote PENDING đang tồn tại: <b>${pending}</b>\n\n` +
+    `Khi xác nhận:\n` +
+    `• tạo tỷ giá USD/VND đầu tiên\n` +
+    `• toàn bộ PENDING quotes (nếu có) sẽ hết hiệu lực`;
+
+  const kb = new InlineKeyboard()
+    .text("✅ XÁC NHẬN", "ops:rate:confirm")
+    .row()
+    .text("❌ HỦY", "ops:rate:cancel");
+
+  await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb });
 }
 
 async function showRatePreview(ctx: BotContext, adminId: string): Promise<void> {
@@ -245,6 +408,50 @@ export async function confirmRateChange(ctx: BotContext): Promise<void> {
   if (isSessionExpired(adminId)) {
     clearWizard(adminId);
     await ctx.reply("⏱ Phiên đã hết hạn. Vui lòng bắt đầu lại.").catch(() => {});
+    return;
+  }
+
+  // First-time setup: there is no existing rate row — the wizard itself
+  // carries base/margins/fee. The authoritative save path is unchanged.
+  if (wizard.data.isCreate) {
+    const newBaseRate = Number(wizard.data.newBaseRate);
+    const newBuyMargin = Number(wizard.data.newBuyMargin);
+    const newSellMargin = Number(wizard.data.newSellMargin);
+    const newFee = Number(wizard.data.newFee);
+    if (
+      !Number.isFinite(newBaseRate) || newBaseRate <= 0 ||
+      !Number.isFinite(newBuyMargin) || newBuyMargin < 0 ||
+      !Number.isFinite(newSellMargin) || newSellMargin < 0 ||
+      !Number.isFinite(newFee) || newFee < 0
+    ) {
+      clearWizard(adminId);
+      await ctx.reply("⚠️ Dữ liệu thiết lập không đầy đủ. Vui lòng bắt đầu lại từ màn hình Tỷ giá.").catch(() => {});
+      return;
+    }
+    try {
+      const res = await QuoteService.setRateAndInvalidate(
+        "USD/VND",
+        newBaseRate,
+        newBuyMargin,
+        newSellMargin,
+        newFee,
+        "USD",
+        adminId,
+        ctx.identity?.userType || "ADMIN"
+      );
+      clearWizard(adminId);
+      const { effectiveBuy, effectiveSell } = MoneyService.calculateEffectiveRates(newBaseRate, newBuyMargin, newSellMargin);
+      await ctx.reply(
+        `✅ <b>ĐÃ TẠO TỶ GIÁ USD/VND</b>\n\n` +
+          `Base: <b>${MoneyService.formatAmount(newBaseRate, "VND")}</b>\n` +
+          `USD → VND: <b>${MoneyService.formatAmount(effectiveBuy, "VND")} VND</b>\n` +
+          `VND → USD: <b>${MoneyService.formatAmount(effectiveSell, "VND")} VND</b>\n` +
+          `Quote PENDING đã hết hiệu lực: <b>${res.invalidatedCount}</b>`,
+        { parse_mode: "HTML" }
+      );
+    } catch (err: any) {
+      await ctx.reply(`❌ Tạo tỷ giá thất bại: ${escapeHtml(err?.message || "lỗi không xác định")}`, { parse_mode: "HTML" }).catch(() => {});
+    }
     return;
   }
 
