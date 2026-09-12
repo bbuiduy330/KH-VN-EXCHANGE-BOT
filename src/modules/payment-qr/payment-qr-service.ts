@@ -23,7 +23,7 @@
  * payment-reminder-service; NOT the 10-minute quote validity). VietQR
  * dynamic payloads have no expiration field.
  */
-import Decimal from "decimal.js";
+import { Decimal } from "decimal.js";
 import { BakongKHQR, IndividualInfo, MerchantInfo, khqrData } from "bakong-khqr";
 import { QRPay } from "vietnam-qr-pay";
 import QRCode from "qrcode";
@@ -242,7 +242,10 @@ export class PaymentQrService {
     // for the WAITING_PAYMENT → CANCELLED transition; this only closes the
     // scheduler-lag window. The Order is never mutated here and no new
     // quote/order is created.
-    if (paymentDeadlineReached) {
+    // Deadline derived ONCE from the FROZEN Order.createdAt — never from
+    // Date.now() + timeout, so re-display cannot extend the payment lifetime.
+    const paymentDeadlineMs = computePaymentDeadlineMs(order);
+    if (Date.now() >= paymentDeadlineMs) {
       logger.info({ orderRef }, "PaymentQr: payment deadline reached — EXPIRED (no payment method presented)");
       return {
         type: "EXPIRED",

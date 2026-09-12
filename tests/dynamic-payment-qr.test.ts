@@ -51,6 +51,9 @@ async function makeOrder(customerId: string, opts: {
   snapshot: Record<string, unknown>;
   status?: string;
   transferMemo?: string;
+  /** Order creation time — required by expiry tests; defaults to "now" so
+   *  non-expiry tests sit safely inside the 50-minute payment window. */
+  createdAt?: Date;
 }): Promise<any> {
   seq++;
   return prisma.order.create({
@@ -66,6 +69,7 @@ async function makeOrder(customerId: string, opts: {
       feeCurrency: "USD",
       receivingAccountSnapshot: opts.snapshot,
       transferMemo: opts.transferMemo,
+      createdAt: opts.createdAt ?? new Date(),
       status: opts.status ?? "WAITING_PAYMENT"
     }
   });
@@ -171,9 +175,11 @@ describe("KHQR expiration = Order payment deadline (never renewed on re-display)
 // 3/4/5/6 — locked Order data is the single source of truth
 describe("frozen Order payment data", () => {
   it("KHQR Individual + Merchant mappings embed exact amount + memo", () => {
+    // Deterministic valid-future expiration (within the 50-min payment window):
+    const expirationMs = Date.now() + 50 * 60_000;
     const cap = detectKhqrCapability(snap({ khqrBakongAccountId: "x@dev", khqrMerchantName: "M", khqrMerchantCity: "Phnom Penh" }))!;
     expect(cap.mode).toBe("INDIVIDUAL");
-    const pInd = buildKhqrPayload(cap, "100", "A7K92 CK");
+    const pInd = buildKhqrPayload(cap, "100", "A7K92 CK", expirationMs);
     expect(BakongKHQR.verify(pInd).isValid).toBe(true);
 
     const capM = detectKhqrCapability(snap({
@@ -181,7 +187,7 @@ describe("frozen Order payment data", () => {
       khqrMode: "MERCHANT", khqrMerchantId: "M123", khqrAcquiringBank: "ACLEDA"
     }))!;
     expect(capM.mode).toBe("MERCHANT");
-    const pMer = buildKhqrPayload(capM, "100", "A7K92 CK");
+    const pMer = buildKhqrPayload(capM, "100", "A7K92 CK", expirationMs);
     expect(BakongKHQR.verify(pMer).isValid).toBe(true);
   });
 
@@ -197,13 +203,14 @@ describe("frozen Order payment data", () => {
   });
 
   it("KHQR decimal USD amount 100.25 embeds exactly 100.25 (string-safe, SDK validates ≤2dp)", () => {
+    const expirationMs = Date.now() + 50 * 60_000; // deterministic valid-future
     const cap = detectKhqrCapability(snap({ khqrBakongAccountId: "x@dev", khqrMerchantName: "M", khqrMerchantCity: "Phnom Penh" }))!;
-    const payload = buildKhqrPayload(cap, "100.25", "A7K92 CK");
+    const payload = buildKhqrPayload(cap, "100.25", "A7K92 CK", expirationMs);
     expect(BakongKHQR.verify(payload).isValid).toBe(true);
     // EMV tag 54 (amount), length 05, value "100.25":
     expect(payload).toContain("5405100.25");
     // >2 decimals would be rejected by the official SDK — never silently rounded:
-    expect(() => buildKhqrPayload(cap, "100.256", "A7K92 CK")).toThrow();
+    expect(() => buildKhqrPayload(cap, "100.256", "A7K92 CK", expirationMs)).toThrow();
   });
 
   it("QR amount exactly equals the locked Order payment amount (no recomputation)", async () => {
