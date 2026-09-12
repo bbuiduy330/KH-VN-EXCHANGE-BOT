@@ -174,37 +174,42 @@ describe("C. Shared customer Confirm label", () => {
   });
 });
 
+// Shared helpers for the clear-chat tests (hoisted to module scope so ALL
+// clear-chat test cases — D/E/F — can use them; previously they were scoped
+// inside describe D, which broke the E/F references).
+async function mkCustomerWithTrackedMessages(): Promise<{ customer: any; trackedIds: number[] }> {
+  seq++;
+  const customer = await CustomerService.getOrCreateCustomer({
+    telegramId: String(887000000 + seq),
+    username: `clearchat_${seq}`
+  });
+  const conv = await ConversationService.getOrCreateConversation(customer.id);
+  const trackedIds: number[] = [];
+  for (let i = 0; i < 3; i++) {
+    await prisma.message.create({
+      data: { conversationId: conv.id, senderType: "BOT", content: `tracked ${i}`, telegramMessageId: 1000 + i }
+    });
+    trackedIds.push(1000 + i);
+  }
+  return { customer, trackedIds };
+}
+
+/** The exact grammY callback update that triggers the clear-chat action
+ *  (customer-handler.ts: customer:menu:clearchat / customer:clearchat:go). */
+function clearCallback(updateId: number, customer: any, data: string): any {
+  return {
+    update_id: updateId,
+    callback_query: {
+      id: `cb-cc-${updateId}`,
+      from: { id: Number(customer.telegramId), is_bot: false, first_name: "C" },
+      data,
+      message: { message_id: 20 + updateId, chat: { id: Number(customer.telegramId), type: "private" }, date: 1, from: { id: Number(customer.telegramId), is_bot: false, first_name: "C" } }
+    }
+  } as any;
+}
+
 // D — clear-chat confirmation: no backend delete operation
 describe("D. Clear-chat confirmation screen deletes NOTHING backend", () => {
-  async function mkCustomerWithTrackedMessages(): Promise<{ customer: any; trackedIds: number[] }> {
-    seq++;
-    const customer = await CustomerService.getOrCreateCustomer({
-      telegramId: String(887000000 + seq),
-      username: `clearchat_${seq}`
-    });
-    const conv = await ConversationService.getOrCreateConversation(customer.id);
-    const trackedIds: number[] = [];
-    for (let i = 0; i < 3; i++) {
-      await prisma.message.create({
-        data: { conversationId: conv.id, senderType: "BOT", content: `tracked ${i}`, telegramMessageId: 1000 + i }
-      });
-      trackedIds.push(1000 + i);
-    }
-    return { customer, trackedIds };
-  }
-
-  function clearCallback(updateId: number, customer: any, data: string): any {
-    return {
-      update_id: updateId,
-      callback_query: {
-        id: `cb-cc-${updateId}`,
-        from: { id: Number(customer.telegramId), is_bot: false, first_name: "C" },
-        data,
-        message: { message_id: 20 + updateId, chat: { id: Number(customer.telegramId), type: "private" }, date: 1, from: { id: Number(customer.telegramId), is_bot: false, first_name: "C" } }
-      }
-    } as any;
-  }
-
   it("confirmation screen shows bullets + buttons and performs NO backend deletion", async () => {
     const { customer } = await mkCustomerWithTrackedMessages();
     const { calls, fake } = captureBotApi();
