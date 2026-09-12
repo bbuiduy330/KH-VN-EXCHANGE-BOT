@@ -2,11 +2,19 @@
  * Per-CTV payout-destination input session (PART J).
  * Scoped strictly by PARTNER TELEGRAM ID. Short-lived (10 min), in-memory.
  * Only the partner's OWN payout destination can ever be written through it.
+ *
+ * V2: the destination is FREE-FORM reference text (Admin manually reviews and
+ * pays). No bank/account format validation — only non-empty, length cap,
+ * control-char stripping and a command-injection guard.
  */
+export const PAYOUT_DESTINATION_MAX_LEN = 500;
+
 export interface PartnerPayoutSession {
   partnerId: string;
-  /** Parsed candidate awaiting ✅ confirm — not yet persisted. */
-  pending: { bankName: string; accountNumber: string; accountName: string } | null;
+  /** Free-form destination candidate awaiting ✅ confirm — not yet persisted. */
+  pending: { text: string } | null;
+  /** When true, the partner's next photo/image-document is stored as their payout QR. */
+  awaitingQr?: boolean;
   createdAt: number;
 }
 
@@ -31,22 +39,44 @@ export function getPartnerPayoutSession(telegramId: string): PartnerPayoutSessio
 
 export function updatePartnerPayoutSession(
   telegramId: string,
-  pending: { bankName: string; accountNumber: string; accountName: string }
+  pending: { text: string }
 ): void {
   const s = sessions.get(String(telegramId || "").trim());
   if (!s) return;
-  sessions.set(String(telegramId || "").trim(), { ...s, pending });
+  sessions.set(String(telegramId || "").trim(), { ...s, pending, awaitingQr: false });
+}
+
+/** Arm/disarm the payout-QR media intake for this partner session. */
+export function setPartnerPayoutQrAwaiting(telegramId: string, awaitingQr: boolean): void {
+  const key = String(telegramId || "").trim();
+  const s = sessions.get(key);
+  if (!s) return;
+  sessions.set(key, { ...s, awaitingQr, pending: null });
 }
 
 export function clearPartnerPayoutSession(telegramId: string): void {
   sessions.delete(String(telegramId || "").trim());
 }
 
-/** Parse "Bank\nAccount number\nAccount holder" (3 non-empty lines). */
-export function parsePayoutDestinationInput(text: string): { bankName: string; accountNumber: string; accountName: string } | null {
-  const parts = String(text || "").split("\n").map((l) => l.trim()).filter(Boolean);
-  if (parts.length !== 3) return null;
-  const [bankName, accountNumber, accountName] = parts as [string, string, string];
-  if (bankName.length < 2 || accountNumber.length < 4 || accountName.length < 2) return null;
-  return { bankName, accountNumber, accountName };
+/** Strip C0 control chars (keep \n \r \t for multi-line formatting) + DEL. */
+export function sanitizePayoutDestinationText(raw: string): string {
+  return String(raw || "")
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "")
+    .replace(/\r\n/g, "\n")
+    .trim();
+}
+
+/**
+ * Free-form destination parser (reference info only — Admin reviews manually).
+ * Accepts anything human-readable: "ABA 001234567 - BUI DUY",
+ * "Bakong: abc@bakong", "012345678", 3-line bank blocks, etc.
+ * Rejects ONLY: empty, >500 chars, command-like input beginning with "/".
+ * Returns null when rejected (caller replies with an explicit message).
+ */
+export function parsePayoutDestinationFreeForm(text: string): string | null {
+  const cleaned = sanitizePayoutDestinationText(text);
+  if (!cleaned) return null;
+  if (cleaned.startsWith("/")) return null; // command/control injection guard
+  if (cleaned.length > PAYOUT_DESTINATION_MAX_LEN) return null;
+  return cleaned;
 }

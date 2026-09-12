@@ -212,17 +212,20 @@ export class PartnerService {
 
   static async setPayoutDestination(
     partnerId: string,
-    data: { bankName: string; accountNumber: string; accountName: string }
+    data: { text: string }
   ): Promise<any> {
-    const bank = String(data.bankName || "").trim();
-    const number = String(data.accountNumber || "").trim();
-    const holder = String(data.accountName || "").trim();
-    if (bank.length < 2 || number.length < 4 || holder.length < 2) {
-      throw new Error("Thông tin tài khoản nhận hoa hồng chưa hợp lệ (ngân hàng, số TK, chủ TK).");
+    // V2 — FREE-FORM reference text. The CTV payout is manually reviewed and
+    // paid by Admin, so NO bank/account format validation: only non-empty,
+    // length cap, control-char stripping and a command-injection guard
+    // (shared with the Telegram intake via parsePayoutDestinationFreeForm).
+    const { parsePayoutDestinationFreeForm } = await import("../../bot/state/partner-session.js");
+    const text = parsePayoutDestinationFreeForm(data?.text || "");
+    if (!text) {
+      throw new Error("Thông tin nhận hoa hồng chưa hợp lệ (trống, quá 500 ký tự hoặc bắt đầu bằng '/').");
     }
     const updated = await prisma.partner.update({
       where: { id: partnerId },
-      data: { payoutBankName: bank, payoutAccountNumber: number, payoutAccountName: holder }
+      data: { payoutDestinationText: text }
     });
     await AuditService.log({
       actorId: partnerId,
@@ -230,8 +233,77 @@ export class PartnerService {
       action: "PARTNER_PAYOUT_UPDATED",
       targetType: "PARTNER",
       targetId: partnerId,
-      // Never log the full account number:
-      details: { bankName: bank, accountNumberMasked: this.maskAccountNumber(number), accountName: holder }
+      // Never log the full destination text — preview + length only:
+      details: { destinationLength: text.length, destinationPreview: text.slice(0, 40) }
+    });
+    return updated;
+  }
+
+  /**
+   * Store the CTV payout QR image reference (FileEvidence id created by the
+   * shared evidence storage). Reference only — never payment proof, never
+   * OCR/AI-validated; Admin reviews it manually.
+   */
+  static async setPayoutQr(partnerId: string, fileEvidenceId: string, actorId: string): Promise<any> {
+    const evidenceId = String(fileEvidenceId || "").trim();
+    if (!evidenceId) throw new Error("Thiếu tệp QR.");
+    const evidence = await prisma.fileEvidence.findUnique({ where: { id: evidenceId } });
+    if (!evidence) throw new Error("Tệp QR không tồn tại.");
+    const updated = await prisma.partner.update({
+      where: { id: partnerId },
+      data: { payoutQrFileId: evidenceId }
+    });
+    await AuditService.log({
+      actorId,
+      actorRole: "SYSTEM",
+      action: "PARTNER_PAYOUT_QR_UPDATED",
+      targetType: "PARTNER",
+      targetId: partnerId,
+      details: { evidenceId, mimeType: evidence.mimeType }
+    });
+    return updated;
+  }
+
+  /**
+   * FROZEN payout destination snapshot for a settlement. Free-form fields win;
+   * when they are empty but legacy structured payout fields exist, a read-only
+   * fallback snapshot is built from them (Admin still needs the details to pay).
+   * Old settlements NEVER change when the Partner edits their payout info later.
+   */
+  static buildPayoutDestinationSnapshot(partner: any): { text: string | null; qrFileId: string | null; source: "free_form" | "legacy" } | null {
+    if (!partner) return null;
+    const text = String(partner.payoutDestinationText || "").trim();
+    const qrFileId = partner.payoutQrFileId ? String(partner.payoutQrFileId) : null;
+    if (text || qrFileId) {
+      return { text: text || null, qrFileId, source: "free_form" };
+    }
+    const legacyParts = [partner.payoutBankName, partner.payoutAccountNumber, partner.payoutAccountName]
+      .map((v: unknown) => String(v || "").trim())
+      .filter(Boolean);
+    if (legacyParts.length === 0) return null;
+    return { text: legacyParts.join(" · "), qrFileId: null, source: "legacy" };
+  }
+
+  /** Admin payout proof (image/PDF) for a PENDING settlement — reference only. */
+  static async uploadSettlementProof(settlementId: string, fileEvidenceId: string, adminId: string): Promise<any> {
+    const evidenceId = String(fileEvidenceId || "").trim();
+    if (!evidenceId) throw new Error("Thiếu tệp bằng chứng.");
+    const evidence = await prisma.fileEvidence.findUnique({ where: { id: evidenceId } });
+    if (!evidence) throw new Error("Tệp bằng chứng không tồn tại.");
+    const settlement = await prisma.partnerSettlement.findUnique({ where: { id: settlementId } });
+    if (!settlement) throw new Error("Không tìm thấy đợt tất toán.");
+    if (settlement.status === "PAID") throw new Error("Đợt tất toán đã PAID — không thể nộp thêm bằng chứng.");
+    const updated = await prisma.partnerSettlement.update({
+      where: { id: settlementId },
+      data: { payoutProofFileId: evidenceId }
+    });
+    await AuditService.log({
+      actorId: adminId,
+      actorRole: "ADMIN",
+      action: "PARTNER_SETTLEMENT_PROOF_UPLOADED",
+      targetType: "PARTNER_SETTLEMENT",
+      targetId: settlementId,
+      details: { evidenceId, mimeType: evidence.mimeType }
     });
     return updated;
   }
@@ -733,6 +805,11 @@ export class PartnerService {
       if (available.length === 0) throw new Error("Không có hoa hồng AVAILABLE nào để tất toán.");
       const total = available.reduce((acc: Decimal, c: any) => acc.plus(new Decimal(c.totalUsd ?? 0)), new Decimal(0));
 
+      // Freeze the payout destination used for THIS settlement: later Partner
+      // edits must never retroactively change what old settlements point at.
+      const partnerRow = await tx.partner.findUnique({ where: { id: partnerId } });
+      const payoutDestinationSnapshot = this.buildPayoutDestinationSnapshot(partnerRow);
+
       const created = await tx.partnerSettlement.create({
         data: {
           partnerId,
@@ -740,7 +817,8 @@ export class PartnerService {
           itemCount: available.length,
           status: "PENDING",
           createdBy: adminId,
-          note: note?.trim() || null
+          note: note?.trim() || null,
+          payoutDestinationSnapshot: payoutDestinationSnapshot ?? undefined
         }
       });
       for (const c of available) {

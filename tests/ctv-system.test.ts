@@ -303,12 +303,12 @@ describe("15. PRIVACY: CTV surfaces contain NO customer identity", () => {
   });
 });
 
-// 16 — CTV payout destination (own account, validated, audited)
-describe("16. Payout destination: validated + audited (masked)", () => {
-  it("setPayoutDestination saves and audits WITHOUT the full account number", async () => {
+// 16 — CTV payout destination (V2: free-form reference text, audited)
+describe("16. Payout destination: free-form reference text + audited", () => {
+  it("setPayoutDestination saves free-form text and audits WITHOUT logging the full text", async () => {
     const p = await mkPartner("Payout CTV");
     await PartnerService.setPayoutDestination(p.id, {
-      bankName: "Vietcombank", accountNumber: "0123456789", accountName: "NGUYEN VAN A"
+      text: "Vietcombank 0123456789 NGUYEN VAN A"
     });
     const audit = await prisma.auditLog.findFirst({
       where: { action: "PARTNER_PAYOUT_UPDATED", targetId: p.id },
@@ -316,20 +316,20 @@ describe("16. Payout destination: validated + audited (masked)", () => {
     });
     expect(audit).not.toBeNull();
     const details = JSON.stringify(audit!.details);
-    expect(details).toContain("****");
-    expect(details).not.toContain("0123456789"); // full number never logged
+    expect(details).not.toContain("0123456789"); // full destination never logged
     const reloaded: any = await PartnerService.getPartnerById(p.id);
-    expect(reloaded.payoutBankName).toBe("Vietcombank");
-    expect(reloaded.payoutAccountNumber).toBe("0123456789");
+    expect(reloaded.payoutDestinationText).toBe("Vietcombank 0123456789 NGUYEN VAN A");
   });
 
-  it("invalid payout data is rejected (nothing saved)", async () => {
+  it("empty/oversized/command-like destination is rejected (nothing saved)", async () => {
     const p = await mkPartner("Payout Invalid");
+    await expect(PartnerService.setPayoutDestination(p.id, { text: "" })).rejects.toThrow();
+    await expect(PartnerService.setPayoutDestination(p.id, { text: "/bin/rm" })).rejects.toThrow();
     await expect(
-      PartnerService.setPayoutDestination(p.id, { bankName: "", accountNumber: "1", accountName: "" })
+      PartnerService.setPayoutDestination(p.id, { text: "x".repeat(501) })
     ).rejects.toThrow();
     const reloaded: any = await PartnerService.getPartnerById(p.id);
-    expect(reloaded.payoutBankName).toBeNull();
+    expect(reloaded.payoutDestinationText).toBeNull();
   });
 });
 

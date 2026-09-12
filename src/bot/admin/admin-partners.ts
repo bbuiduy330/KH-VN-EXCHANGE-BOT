@@ -4,15 +4,19 @@
  * NO customer data is shown here (only aggregates + partner-owned payout
  * metadata the Admin needs to pay the partner).
  */
-import { Composer, InlineKeyboard } from "grammy";
+import { Composer, InlineKeyboard, InputFile } from "grammy";
 import { BotContext } from "../middleware/identity.js";
 import { requireRole } from "../middleware/permissions.js";
 import { PartnerService } from "../../modules/partner/partner-service.js";
 import { escapeHtml } from "../menus/cskh-panel.js";
 import { startWizard, getAdminSession, isSessionExpired, clearWizard, updateWizard } from "./admin-session.js";
 import { setAdminSearch } from "./admin-session.js";
-import { getBotInstance } from "../notifications.js";
+import { getBotInstance, notifyPartnerSettlementPaid } from "../notifications.js";
 import { formatAdminDateTime } from "../../shared/app-time.js";
+import { prisma } from "../../database/client.js";
+import { FileService } from "../../modules/files/file-service.js";
+import { env } from "../../config/env.js";
+import { logger } from "../../shared/logger.js";
 
 export const adminPartnersHandler = new Composer<BotContext>();
 
@@ -75,7 +79,11 @@ async function showPartnerDetail(ctx: BotContext, partnerId: string): Promise<vo
     "",
     `📦 Đơn hoàn tất đủ điều kiện: <b>${s.eligibleCompleted}</b>`,
     `💵 HELD: <b>${usd(s.held)}</b> · AVAILABLE: <b>${usd(s.available)}</b> · PAID: <b>${usd(s.paid)}</b>`,
-    p.payoutBankName ? `🏦 Chi trả cho CTV: ${escapeHtml(p.payoutBankName)} ••••${escapeHtml(String(p.payoutAccountNumber || "").slice(-4))} — ${escapeHtml(p.payoutAccountName || "")}` : "🏦 CTV chưa nộp thông tin chi trả",
+    p.payoutDestinationText
+      ? `💳 <b>Thông tin nhận hoa hồng:</b>\n<code>${escapeHtml(p.payoutDestinationText.length > 400 ? `${p.payoutDestinationText.slice(0, 400)}…` : p.payoutDestinationText)}</code>`
+      : p.payoutBankName
+        ? `🏦 Chi trả cho CTV: ${escapeHtml(p.payoutBankName)} ••••${escapeHtml(String(p.payoutAccountNumber || "").slice(-4))} — ${escapeHtml(p.payoutAccountName || "")}`
+        : "💳 CTV chưa nộp thông tin nhận hoa hồng",
     "",
     `<b>Hoa hồng gần nhất:</b>`
   ];
@@ -100,7 +108,9 @@ async function showPartnerDetail(ctx: BotContext, partnerId: string): Promise<vo
     .text("💸 Lịch sử thanh toán", `ops:partner:settlements:${p.id}`)
     .row()
     .text(p.status === "ACTIVE" ? "⛔ Tắt CTV" : "✅ Bật lại CTV", `ops:partner:toggle:${p.id}`)
-    .row()
+    .row();
+  if (p.payoutQrFileId) kb.text("🖼 Xem QR nhận HH", `ops:partner:payoutqr:${p.id}`).row();
+  kb
     .text("⬅️ Danh sách CTV", "ops:partners")
     .text("🏠 Menu Admin", "ops:home");
   await ctx.reply(lines.join("\n"), { parse_mode: "HTML", reply_markup: kb });
@@ -113,6 +123,7 @@ async function showPartnerSettlements(ctx: BotContext, partnerId: string): Promi
   const p = await PartnerService.getPartnerById(partnerId);
   const settlements = await PartnerService.listPartnerSettlements(partnerId, 10);
   const lines = [`💸 <b>LỊCH SỬ THANH TOÁN — ${escapeHtml(p?.displayName || "")}</b>`, ""];
+  const kb = new InlineKeyboard();
   if (settlements.length === 0) {
     lines.push("Chưa có đợt thanh toán nào.");
   } else {
@@ -120,9 +131,11 @@ async function showPartnerSettlements(ctx: BotContext, partnerId: string): Promi
       lines.push(
         `${s.status === "PAID" ? "✅" : "⏳"} ${formatAdminDateTime(s.createdAt)} · ${usd(s.totalUsd)} · ${s.itemCount} hoa hồng · ${s.status} · bởi ${s.createdBy}`
       );
+      kb.text(`👁 Chi tiết #${s.id.slice(-6)}`, `ops:partner:settlement:detail:${s.id}`).row();
     }
   }
-  await ctx.reply(lines.join("\n"), { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("⬅️ Chi tiết CTV", `ops:partner:detail:${partnerId}`) });
+  kb.text("⬅️ Chi tiết CTV", `ops:partner:detail:${partnerId}`);
+  await ctx.reply(lines.join("\n"), { parse_mode: "HTML", reply_markup: kb });
 }
 
 /** Commission list (💰) — safe business references only. */
@@ -328,10 +341,10 @@ adminPartnersHandler.callbackQuery(/^ops:partner:settle:go:([a-zA-Z0-9_-]+)$/, a
   try {
     const settlement = await PartnerService.createSettlement(String(ctx.from?.id || ""), ctx.match?.[1] || "");
     await ctx.reply(
-      `🧾 <b>ĐỢT TẤT TOÁN #${settlement.id.slice(-6)} (PENDING)</b>\n💵 ${usd(settlement.totalUsd)} · ${settlement.itemCount} hoa hồng\n\nChuyển tiền cho CTV rồi bấm ✅ ĐÃ CHUYỂN.`,
+      `🧾 <b>ĐỢT TẤT TOÁN #${settlement.id.slice(-6)} (PENDING)</b>\n💵 ${usd(settlement.totalUsd)} · ${settlement.itemCount} hoa hồng\n\nChuyển tiền cho CTV, nộp bằng chứng, rồi xác nhận PAID trong chi tiết đợt.`,
       {
         parse_mode: "HTML",
-        reply_markup: new InlineKeyboard().text("✅ ĐÃ CHUYỂN", `ops:partner:settle:paid:${settlement.id}`).row()
+        reply_markup: new InlineKeyboard().text("🧾 Mở đợt tất toán", `ops:partner:settlement:detail:${settlement.id}`).row()
       }
     );
   } catch (err: any) {
@@ -341,10 +354,226 @@ adminPartnersHandler.callbackQuery(/^ops:partner:settle:go:([a-zA-Z0-9_-]+)$/, a
 adminPartnersHandler.callbackQuery(/^ops:partner:settle:paid:([a-zA-Z0-9_-]+)$/, async (ctx) => {
   await ctx.answerCallbackQuery();
   if (!(await requireRole(ctx, ["ADMIN", "SUPER_ADMIN"]))) return;
+  const settlementId = ctx.match?.[1] || "";
   try {
-    const settlement = await PartnerService.markSettlementPaid(String(ctx.from?.id || ""), ctx.match?.[1] || "");
-    await ctx.reply(`✅ <b>ĐỢT TẤT TOÁN PAID</b>\n💵 ${usd(settlement.totalUsd)} · ${settlement.itemCount} hoa hồng → PAID (audit ghi nhận).`, { parse_mode: "HTML" });
+    // Attach-then-confirm: a PENDING settlement needs the stored payout proof
+    // BEFORE Admin confirms PAID. The Admin action itself remains authoritative.
+    const existing = await prisma.partnerSettlement.findUnique({ where: { id: settlementId } });
+    if (existing && existing.status !== "PAID" && !existing.payoutProofFileId) {
+      await ctx.reply(
+        `⚠️ <b>Chưa có bằng chứng chuyển tiền.</b>\nNộp ảnh/PDF bằng chứng trong chi tiết đợt tất toán trước khi xác nhận PAID.`,
+        { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🧾 Mở đợt tất toán", `ops:partner:settlement:detail:${settlementId}`) }
+      );
+      return;
+    }
+    const settlement = await PartnerService.markSettlementPaid(String(ctx.from?.id || ""), settlementId);
+    const notify = await notifyPartnerSettlementPaid(settlement.id);
+    await ctx.reply(
+      `✅ <b>ĐỢT TẤT TOÁN PAID</b>\n💵 ${usd(settlement.totalUsd)} · ${settlement.itemCount} hoa hồng → PAID (audit ghi nhận).\n📩 Thông báo + bằng chứng cho CTV: ${notify.sent ? "✅ đã gửi" : `⚠️ chưa gửi (${notify.reason || "lỗi"})`}`,
+      { parse_mode: "HTML" }
+    );
   } catch (err: any) {
     await ctx.reply(`❌ ${escapeHtml(err?.message || "Lỗi")}`).catch(() => {});
   }
 });
+
+// ---------------------------------------------------------------------------
+// PART J3 — Settlement detail: FROZEN destination snapshot, frozen payout QR,
+// and Admin payout proof (image/PDF). The current live Partner payout fields
+// are NEVER rendered as belonging to an old settlement.
+// ---------------------------------------------------------------------------
+function renderDestinationSnapshotText(snap: any): string {
+  if (!snap) return "(không có)";
+  const text = String(snap.text || "").trim();
+  if (!text) return "(không có)";
+  return escapeHtml(text.length > 400 ? `${text.slice(0, 400)}…` : text);
+}
+
+export async function showSettlementDetail(ctx: BotContext, settlementId: string): Promise<void> {
+  await ctx.answerCallbackQuery();
+  if (!(await requireRole(ctx, ["ADMIN", "SUPER_ADMIN"]))) return;
+  const s = await prisma.partnerSettlement.findUnique({ where: { id: settlementId }, include: { partner: true } });
+  if (!s) {
+    await ctx.reply("❌ Không tìm thấy đợt tất toán.").catch(() => {});
+    return;
+  }
+  const snap = s.payoutDestinationSnapshot as any;
+  const lines = [
+    `🧾 <b>ĐỢT TẤT TOÁN #${s.id.slice(-6)}</b> · ${s.status === "PAID" ? "✅ PAID" : "⏳ PENDING"}`,
+    `💵 <b>${usd(s.totalUsd)}</b> · ${s.itemCount} hoa hồng`,
+    `👤 CTV: ${escapeHtml(s.partner?.displayName || "")}`,
+    `🕒 Tạo: ${formatAdminDateTime(s.createdAt)} · bởi ${escapeHtml(s.createdBy)}${s.paidAt ? ` · PAID: ${formatAdminDateTime(s.paidAt)}` : ""}`,
+    "",
+    `💳 <b>Thông tin nhận hoa hồng (đóng băng lúc tạo):</b>`,
+    renderDestinationSnapshotText(snap),
+    `🖼 QR nhận tiền: ${snap?.qrFileId ? "✅ có" : "— không"}`,
+    `🧾 Bằng chứng chuyển tiền: ${s.payoutProofFileId ? "✅ có" : "— chưa có"}`,
+    "",
+    "<i>Bằng chứng chỉ mang tính tham khảo — thao tác ✅ XÁC NHẬN ĐÃ CHUYỂN của Admin mới là xác nhận chính thức.</i>"
+  ];
+  const kb = new InlineKeyboard();
+  if (snap?.qrFileId) kb.text("🖼 QR nhận tiền", `ops:partner:settlement:qr:${s.id}`).row();
+  if (s.payoutProofFileId) kb.text("🧾 Xem bằng chứng CK", `ops:partner:settlement:proof:${s.id}`).row();
+  if (s.status !== "PAID") {
+    kb.text("📎 Nộp bằng chứng CK", `ops:partner:settlement:proofupload:${s.id}`).row();
+    kb.text("✅ XÁC NHẬN ĐÃ CHUYỂN", `ops:partner:settle:paid:${s.id}`).row();
+  }
+  kb.text("⬅️ Lịch sử thanh toán", `ops:partner:settlements:${s.partnerId}`).row();
+  await ctx.reply(lines.join("\n"), { parse_mode: "HTML", reply_markup: kb });
+}
+
+/** Send one stored FileEvidence: image → photo, PDF/other → document. */
+async function sendEvidence(ctx: BotContext, evidenceId: string | null | undefined, caption: string): Promise<boolean> {
+  if (!evidenceId) return false;
+  const evidence = await prisma.fileEvidence.findUnique({ where: { id: evidenceId } });
+  const buffer = evidence?.filePath ? await FileService.getFile(evidence.filePath) : null;
+  if (!buffer || buffer.length === 0) {
+    await ctx.reply("⚠️ Không đọc được tệp đã lưu (có thể đã bị xóa khỏi lưu trữ).").catch(() => {});
+    return false;
+  }
+  const file = new InputFile(buffer, evidence!.fileName || `evidence_${evidenceId}`);
+  if (String(evidence!.mimeType || "").startsWith("image/")) {
+    await ctx.replyWithPhoto(file, { caption, parse_mode: "HTML" });
+  } else {
+    await ctx.replyWithDocument(file, { caption, parse_mode: "HTML" });
+  }
+  return true;
+}
+
+export async function viewSettlementQr(ctx: BotContext, settlementId: string): Promise<void> {
+  await ctx.answerCallbackQuery();
+  if (!(await requireRole(ctx, ["ADMIN", "SUPER_ADMIN"]))) return;
+  const s = await prisma.partnerSettlement.findUnique({ where: { id: settlementId } });
+  if (!s) return;
+  const snap = s.payoutDestinationSnapshot as any;
+  await sendEvidence(ctx, snap?.qrFileId ?? null, "🖼 QR nhận tiền CTV (đóng băng lúc tạo đợt tất toán).");
+}
+
+export async function viewSettlementProof(ctx: BotContext, settlementId: string): Promise<void> {
+  await ctx.answerCallbackQuery();
+  if (!(await requireRole(ctx, ["ADMIN", "SUPER_ADMIN"]))) return;
+  const s = await prisma.partnerSettlement.findUnique({ where: { id: settlementId } });
+  if (!s) return;
+  await sendEvidence(ctx, s.payoutProofFileId, "🧾 Bằng chứng chuyển tiền hoa hồng (tham khảo — Admin xác nhận PAID mới là chính thức).");
+}
+
+export async function viewPartnerPayoutQr(ctx: BotContext, partnerId: string): Promise<void> {
+  await ctx.answerCallbackQuery();
+  if (!(await requireRole(ctx, ["ADMIN", "SUPER_ADMIN"]))) return;
+  const p = await PartnerService.getPartnerById(partnerId);
+  if (!p) return;
+  await sendEvidence(ctx, p.payoutQrFileId ?? null, "🖼 Ảnh QR nhận hoa hồng của CTV (tham khảo — Admin xem thủ công).");
+}
+
+export async function armSettlementProofUpload(ctx: BotContext, settlementId: string): Promise<void> {
+  await ctx.answerCallbackQuery();
+  if (!(await requireRole(ctx, ["ADMIN", "SUPER_ADMIN"]))) return;
+  const adminId = String(ctx.from?.id || "");
+  const s = await prisma.partnerSettlement.findUnique({ where: { id: settlementId } });
+  if (!s) {
+    await ctx.reply("❌ Không tìm thấy đợt tất toán.").catch(() => {});
+    return;
+  }
+  if (s.status === "PAID") {
+    await ctx.reply("⚠️ Đợt này đã PAID — không thể nộp thêm bằng chứng.").catch(() => {});
+    return;
+  }
+  startWizard(adminId, "settlement_proof", { settlementId });
+  await ctx.reply(
+    "📎 <b>NỘP BẰNG CHỨNG CHUYỂN TIỀN</b>\n\nGửi <b>ảnh hoặc PDF</b> bằng chứng chuyển tiền cho CTV vào khung chat.\n\n<i>Chỉ lưu tham khảo — không tự động xác nhận PAID.</i>\n\nGửi /cancel để hủy.",
+    { parse_mode: "HTML" }
+  );
+}
+
+
+
+/** Router-level Admin media intake for the settlement payout-proof wizard. */
+export async function handleSettlementProofMedia(ctx: BotContext): Promise<boolean> {
+  try {
+    return await runSettlementProofMediaFlow(ctx);
+  } catch (err: any) {
+    logger.error({ err: err?.message }, "Settlement proof: unexpected failure during media intake");
+    await ctx.reply(
+      `❌ Có lỗi khi xử lý bằng chứng: ${escapeHtml(err?.message || "lỗi không xác định")}.\nVui lòng thử lại, hoặc /cancel để hủy.`,
+      { parse_mode: "HTML" }
+    ).catch(() => {});
+    return true;
+  }
+}
+
+async function runSettlementProofMediaFlow(ctx: BotContext): Promise<boolean> {
+  const adminId = String(ctx.from?.id || "");
+  const session = getAdminSession(adminId);
+  if (!session.wizard || session.wizard.kind !== "settlement_proof") return false;
+  if (!(await requireRole(ctx, ["ADMIN", "SUPER_ADMIN"]))) return true;
+  if (isSessionExpired(adminId)) {
+    clearWizard(adminId);
+    await ctx.reply("⌛️ Phiên đã hết hạn. Mở lại từ chi tiết đợt tất toán.").catch(() => {});
+    return true;
+  }
+  const settlementId = String(session.wizard.data.settlementId || "");
+  const settlement = await prisma.partnerSettlement.findUnique({ where: { id: settlementId } });
+  if (!settlement) {
+    clearWizard(adminId);
+    await ctx.reply("❌ Không tìm thấy đợt tất toán.").catch(() => {});
+    return true;
+  }
+  if (settlement.status === "PAID") {
+    clearWizard(adminId);
+    await ctx.reply("⚠️ Đợt này đã PAID — không thể nộp thêm bằng chứng.").catch(() => {});
+    return true;
+  }
+
+  const MAX_BYTES = (env.MAX_UPLOAD_MB || 10) * 1024 * 1024;
+  const photo = ctx.message?.photo?.length ? ctx.message.photo[ctx.message.photo.length - 1] : undefined;
+  const doc = ctx.message?.document;
+  if (!photo && !doc) {
+    await ctx.reply("📎 Vui lòng gửi <b>ảnh hoặc PDF</b> bằng chứng, hoặc /cancel để hủy.", { parse_mode: "HTML" }).catch(() => {});
+    return true;
+  }
+  if (doc?.file_size && doc.file_size > MAX_BYTES) {
+    await ctx.reply(`⚠️ Tệp quá lớn (giới hạn ${env.MAX_UPLOAD_MB || 10}MB).`).catch(() => {});
+    return true;
+  }
+  if (doc?.mime_type && !(doc.mime_type.startsWith("image/") || doc.mime_type === "application/pdf")) {
+    await ctx.reply("❌ Vui lòng gửi <b>ảnh hoặc PDF</b> bằng chứng.").catch(() => {});
+    return true;
+  }
+
+  try {
+    const fileId = photo ? photo.file_id : doc!.file_id;
+    const file = await ctx.api.getFile(fileId);
+    const url = `https://api.telegram.org/file/bot${env.TELEGRAM_BOT_TOKEN}/${file.file_path}`;
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`Tải tệp thất bại (HTTP ${res.status})`);
+    const buffer = Buffer.from(await res.arrayBuffer());
+    if (!buffer || buffer.length === 0 || buffer.length > MAX_BYTES) {
+      await ctx.reply("❌ Tệp không hợp lệ hoặc quá lớn.").catch(() => {});
+      return true;
+    }
+    const mimeType = String(doc?.mime_type || res.headers.get("content-type") || "application/octet-stream");
+    const ext = mimeType === "application/pdf" ? ".pdf" : mimeType === "image/png" ? ".png" : ".jpg";
+    const evidence = await FileService.saveEvidenceFile(
+      buffer,
+      `settlement_proof_${settlementId}_${Date.now()}${ext}`,
+      "PAYOUT_BILL",
+      mimeType
+    );
+    await PartnerService.uploadSettlementProof(settlementId, evidence.id, adminId);
+    clearWizard(adminId);
+    await ctx.reply(
+      `✅ <b>ĐÃ LƯU BẰNG CHỨNG CHUYỂN TIỀN</b>\n🧾 Đợt #${settlementId.slice(-6)} — vẫn PENDING cho tới khi bạn bấm ✅ XÁC NHẬN ĐÃ CHUYỂN.`,
+      { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("🧾 Mở đợt tất toán", `ops:partner:settlement:detail:${settlementId}`).row() }
+    );
+  } catch (err: any) {
+    // Wizard stays armed so Admin can simply resend.
+    await ctx.reply(`❌ Không lưu được bằng chứng: ${escapeHtml(err?.message || "lỗi")}`).catch(() => {});
+  }
+  return true;
+}
+
+adminPartnersHandler.callbackQuery(/^ops:partner:settlement:detail:([a-zA-Z0-9_-]+)$/, (ctx) => showSettlementDetail(ctx, ctx.match?.[1] || ""));
+adminPartnersHandler.callbackQuery(/^ops:partner:settlement:qr:([a-zA-Z0-9_-]+)$/, (ctx) => viewSettlementQr(ctx, ctx.match?.[1] || ""));
+adminPartnersHandler.callbackQuery(/^ops:partner:settlement:proof:([a-zA-Z0-9_-]+)$/, (ctx) => viewSettlementProof(ctx, ctx.match?.[1] || ""));
+adminPartnersHandler.callbackQuery(/^ops:partner:settlement:proofupload:([a-zA-Z0-9_-]+)$/, (ctx) => armSettlementProofUpload(ctx, ctx.match?.[1] || ""));
+adminPartnersHandler.callbackQuery(/^ops:partner:payoutqr:([a-zA-Z0-9_-]+)$/, (ctx) => viewPartnerPayoutQr(ctx, ctx.match?.[1] || ""));

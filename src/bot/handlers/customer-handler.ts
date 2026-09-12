@@ -18,7 +18,7 @@ import { generateTransferMemo } from "../../modules/orders/transfer-memo.js";
 import { parsePayoutDestinationText, parsePayoutDestinationPipe, parsePayoutDestinationWithAi, decodePayoutQrImage } from "../../modules/orders/payout-destination.js";
 import { getPayoutInputSession, setPayoutInputSession, updatePayoutInputSession, clearPayoutInputSession } from "../state/customer-session.js";
 import { setPendingBillSession, clearPendingBillSession, takePendingBillSession, finishPendingBill } from "../state/pending-bill-session.js";
-import { setPartnerPayoutSession, getPartnerPayoutSession, updatePartnerPayoutSession, clearPartnerPayoutSession, parsePayoutDestinationInput } from "../state/partner-session.js";
+import { setPartnerPayoutSession, getPartnerPayoutSession, updatePartnerPayoutSession, setPartnerPayoutQrAwaiting, clearPartnerPayoutSession, parsePayoutDestinationFreeForm } from "../state/partner-session.js";
 import { clearCustomerTelegramChat } from "../../modules/telegram/clear-chat-service.js";
 import { formatAdminDateTime } from "../../shared/app-time.js";
 import { PaymentQrService } from "../../modules/payment-qr/payment-qr-service.js";
@@ -1103,22 +1103,24 @@ export async function handleCustomerTextMessage(ctx: BotContext, text: string) {
   if (partnerPayoutSession) {
     if (text.trim() === "/cancel") {
       clearPartnerPayoutSession(telegramId);
-      await ctx.reply("Đã hủy cập nhật tài khoản nhận hoa hồng.");
+      await ctx.reply("Đã hủy cập nhật thông tin nhận hoa hồng.");
       return;
     }
-    const parsed = parsePayoutDestinationInput(text);
-    if (!parsed) {
+    // V2 — FREE-FORM destination (reference info only; Admin reviews manually).
+    // No bank/account format validation — only non-empty, ≤500 chars,
+    // control-char stripping and a command-injection guard.
+    const destination = parsePayoutDestinationFreeForm(text);
+    if (!destination) {
       await ctx.reply(
-        "❌ Sai định dạng. Gửi ĐÚNG 3 dòng:\n<code>Tên ngân hàng\nSố tài khoản\nChủ tài khoản</code>\nHoặc /cancel để hủy.",
+        `❌ Thông tin chưa hợp lệ: không được trống, tối đa 500 ký tự và không bắt đầu bằng "/".\nGửi lại hoặc /cancel để hủy.`,
         { parse_mode: "HTML" }
       );
       return;
     }
-    updatePartnerPayoutSession(telegramId, parsed);
-    const { PartnerService } = await import("../../modules/partner/partner-service.js");
-    const kb = new InlineKeyboard().text("✅ Confirm", "ctv:payout:confirm:go").row().text("↩️ Hủy", "ctv:payout");
+    updatePartnerPayoutSession(telegramId, { text: destination });
+    const kb = new InlineKeyboard().text("✅ Xác nhận", "ctv:payout:confirm:go").row().text("↩️ Hủy", "ctv:payout");
     await ctx.reply(
-      `⚠️ <b>XÁC NHẬN TÀI KHOẢN NHẬN HOA HỒNG</b>\n\n🏦 Ngân hàng: <b>${escapeHtml(parsed.bankName)}</b>\n💳 Số TK: <code>${escapeHtml(parsed.accountNumber)}</code>\n👤 Chủ TK: ${escapeHtml(parsed.accountName)}`,
+      `⚠️ <b>XÁC NHẬN THÔNG TIN NHẬN HOA HỒNG</b>\n\n${escapeHtml(destination.length > 400 ? `${destination.slice(0, 400)}…` : destination)}\n\n<i>Chỉ là thông tin tham khảo — Admin sẽ xem thủ công khi chi trả.</i>`,
       { parse_mode: "HTML", reply_markup: kb }
     );
     return;
@@ -1935,7 +1937,8 @@ export async function showCtvDashboard(ctx: BotContext): Promise<void> {
     `🤝 <b>CTV — ${escapeHtml(partner.displayName)}</b>\n\n` +
       `🔗 Mã giới thiệu: <code>${escapeHtml(partner.referralCode)}</code>\n` +
       `👥 Khách giới thiệu: <b>${referredCount}</b>\n` +
-      `✅ Giao dịch hoàn tất: <b>${summary.eligibleCompleted}</b>\n\n` +
+      `✅ Giao dịch hoàn tất: <b>${summary.eligibleCompleted}</b>\n` +
+      `💳 Nhận hoa hồng: ${partner.payoutDestinationText || partner.payoutBankName ? "✅ đã thiết lập" : "⚠️ chưa có"}\n\n` +
       `💰 Hoa hồng:\n` +
       `• Đang chờ: <b>${usd(summary.held)}</b>\n` +
       `• Có thể rút: <b>${usd(summary.available)}</b>\n` +
@@ -2021,17 +2024,30 @@ customerHandler.callbackQuery("ctv:payout", async (ctx) => {
   const { PartnerService } = await import("../../modules/partner/partner-service.js");
   const partner = await PartnerService.getPartnerByTelegramId(telegramId);
   if (!partner || partner.status !== "ACTIVE") return;
-  const lines = ["🏦 <b>TÀI KHOẢN NHẬN HOA HỒNG</b>", ""];
-  if (partner.payoutBankName) {
+  // V2 — free-form payout destination (reference info only).
+  const lines = ["💳 <b>THÔNG TIN NHẬN HOA HỒNG</b>", ""];
+  if (partner.payoutDestinationText) {
+    const t = partner.payoutDestinationText;
+    lines.push(`<pre>${escapeHtml(t.length > 400 ? `${t.slice(0, 400)}…` : t)}</pre>`);
+  } else if (partner.payoutBankName) {
     lines.push(`🏦 Ngân hàng: <b>${escapeHtml(partner.payoutBankName)}</b>`);
     lines.push(`💳 Số TK: <code>${escapeHtml(PartnerService.maskAccountNumber(partner.payoutAccountNumber))}</code>`);
     lines.push(`👤 Chủ TK: ${escapeHtml(partner.payoutAccountName || "")}`);
   } else {
-    lines.push("Chưa có thông tin tài khoản nhận hoa hồng.");
+    lines.push("Chưa có thông tin nhận hoa hồng.");
   }
+  lines.push("", `🖼 Ảnh QR: ${partner.payoutQrFileId ? "✅ đã tải lên (Admin xem thủ công)" : "— chưa có"}`);
   await ctx.reply(
     lines.join("\n"),
-    { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("✏️ Cập nhật", "ctv:payout:edit").row().text("⬅️ Về dashboard", "ctv:home") }
+    {
+      parse_mode: "HTML",
+      reply_markup: new InlineKeyboard()
+        .text("✏️ Cập nhật thông tin", "ctv:payout:edit")
+        .row()
+        .text("🖼 Gửi ảnh QR", "ctv:payout:qr")
+        .row()
+        .text("⬅️ Về dashboard", "ctv:home")
+    }
   );
 });
 
@@ -2043,7 +2059,21 @@ customerHandler.callbackQuery("ctv:payout:edit", async (ctx) => {
   if (!partner || partner.status !== "ACTIVE") return;
   setPartnerPayoutSession(telegramId, partner.id);
   await ctx.reply(
-    "🏦 <b>CẬP NHẬT TÀI KHOẢN NHẬN HOA HỒNG</b>\n\nGửi MỘT tin nhắn theo mẫu:\n<code>Tên ngân hàng\nSố tài khoản\nChủ tài khoản</code>\n\nVí dụ:\n<code>Vietcombank\n0123456789\nNGUYEN VAN A</code>\n\nGửi /cancel để hủy.",
+    "💳 <b>CẬP NHẬT THÔNG TIN NHẬN HOA HỒNG</b>\n\nGửi thông tin nhận tiền ở dạng tự do, ví dụ:\n<code>ABA 001234567 - BUI DUY</code>\n<code>Bakong: abc@bakong</code>\n<code>Vietcombank 1234567890 Nguyen Van A</code>\n\n<i>Chỉ cần rõ ràng để Admin chuyển tiền — không bắt buộc mẫu nào.</i>\n\nGửi /cancel để hủy.",
+    { parse_mode: "HTML" }
+  );
+});
+
+customerHandler.callbackQuery("ctv:payout:qr", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const telegramId = String(ctx.from?.id || "");
+  const { PartnerService } = await import("../../modules/partner/partner-service.js");
+  const partner = await PartnerService.getPartnerByTelegramId(telegramId);
+  if (!partner || partner.status !== "ACTIVE") return;
+  setPartnerPayoutSession(telegramId, partner.id);
+  setPartnerPayoutQrAwaiting(telegramId, true);
+  await ctx.reply(
+    "🖼 <b>GỬI ẢNH QR NHẬN HOA HỒNG</b>\n\nGửi ảnh QR (PNG/JPG) vào khung chat.\n\n<i>Ảnh chỉ mang tính THAM KHẢO — không OCR, không kiểm tra tự động; Admin xem thủ công khi chi trả.</i>\n\nGửi /cancel để hủy.",
     { parse_mode: "HTML" }
   );
 });
@@ -2055,15 +2085,15 @@ customerHandler.callbackQuery("ctv:payout:confirm:go", async (ctx) => {
   if (!session?.pending) return;
   try {
     const { PartnerService } = await import("../../modules/partner/partner-service.js");
-    await PartnerService.setPayoutDestination(session.partnerId, session.pending!);
+    await PartnerService.setPayoutDestination(session.partnerId, { text: session.pending.text });
     clearPartnerPayoutSession(telegramId);
-    const usdMasked = PartnerService.maskAccountNumber(session.pending.accountNumber);
+    const t = session.pending.text;
     await ctx.reply(
-      `✅ <b>ĐÃ LƯU TÀI KHOẢN NHẬN HOA HỒNG</b>\n🏦 ${escapeHtml(session.pending.bankName)} · ${escapeHtml(PartnerService.maskAccountNumber(session.pending.accountNumber))} — ${escapeHtml(session.pending.accountName)}`,
+      `✅ <b>ĐÃ LƯU THÔNG TIN NHẬN HOA HỒNG</b>\n\n${escapeHtml(t.length > 400 ? `${t.slice(0, 400)}…` : t)}`,
       { parse_mode: "HTML" }
     );
   } catch (err: any) {
-    await ctx.reply(`❌ ${err?.message || "Không lưu được tài khoản."}`);
+    await ctx.reply(`❌ ${err?.message || "Không lưu được thông tin."}`);
   }
 });
 
@@ -2168,9 +2198,77 @@ export async function sendOrderPaymentQrOnConfirm(ctx: BotContext, order: any, l
 // A customer talking to CSKH while sending a payment bill therefore STILL
 // gets the bill stored on the order — it is not swallowed as a support
 // attachment, and a payout QR never becomes a bill or a relayed photo.
+/**
+ * PART J2 — CTV payout QR upload intake (reference only; Admin reviews
+ * manually). No OCR, no AI validation, no banking validation: the image is
+ * simply stored as FileEvidence and referenced from Partner.payoutQrFileId.
+ */
+async function handlePartnerPayoutQrUpload(ctx: BotContext, telegramId: string, partnerId: string): Promise<void> {
+  const photo = ctx.message?.photo?.length ? ctx.message.photo[ctx.message.photo.length - 1] : undefined;
+  const document = (ctx.message as any)?.document as any;
+  if (!photo && !document) {
+    await ctx.reply("📷 Vui lòng gửi ẢNH QR (PNG/JPG), hoặc /cancel để hủy.", { parse_mode: "HTML" });
+    return;
+  }
+  const maxBytes = (env.MAX_UPLOAD_MB || 10) * 1024 * 1024;
+  if (document?.file_size && document.file_size > maxBytes) {
+    await ctx.reply(`⚠️ Ảnh quá lớn (giới hạn ${env.MAX_UPLOAD_MB || 10}MB). Vui lòng nén/gửi ảnh nhỏ hơn.`);
+    return;
+  }
+  try {
+    const fileId = photo ? photo.file_id : document.file_id;
+    const file = await ctx.api.getFile(fileId);
+    const url = `https://api.telegram.org/file/bot${env.TELEGRAM_BOT_TOKEN}/${file.file_path}`;
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`Tải ảnh thất bại (HTTP ${res.status})`);
+    const buffer = Buffer.from(await res.arrayBuffer());
+    if (!buffer || buffer.length === 0 || buffer.length > maxBytes) {
+      await ctx.reply("❌ Ảnh không hợp lệ hoặc quá lớn. Vui lòng gửi lại.");
+      return;
+    }
+    // Magic-byte-first MIME resolution — only real images are accepted.
+    const resolved = resolveEvidenceMime({
+      telegramMime: document?.mime_type || null,
+      fileNameOrPath: document?.file_name || file.file_path,
+      responseMime: res.headers.get("content-type"),
+      buffer
+    });
+    if (!resolved.accepted || !resolved.mimeType.startsWith("image/")) {
+      await ctx.reply("❌ Vui lòng gửi ẢNH QR (PNG/JPG) — tệp này không phải ảnh.", { parse_mode: "HTML" });
+      return;
+    }
+    const ext = resolved.mimeType === "image/png" ? "png" : resolved.mimeType === "image/webp" ? "webp" : "jpg";
+    const evidence = await FileService.saveEvidenceFile(
+      buffer,
+      `partner_payout_qr_${partnerId}_${Date.now()}.${ext}`,
+      "QR",
+      resolved.mimeType
+    );
+    const { PartnerService } = await import("../../modules/partner/partner-service.js");
+    await PartnerService.setPayoutQr(partnerId, evidence.id, telegramId);
+    clearPartnerPayoutSession(telegramId);
+    await ctx.reply(
+      "✅ <b>ĐÃ LƯU ẢNH QR NHẬN HOA HỒNG</b>\n🖼 Ảnh chỉ mang tính THAM KHẢO — Admin sẽ xem thủ công khi chi trả.",
+      { parse_mode: "HTML" }
+    );
+  } catch (err: any) {
+    // Session stays armed so the CTV can simply send another image.
+    await ctx.reply(`❌ Không lưu được ảnh QR: ${escapeHtml(err?.message || "lỗi")}`).catch(() => {});
+  }
+}
+
 export async function handleCustomerPhoto(ctx: BotContext) {
   const telegramId = String(ctx.from?.id || "");
   const customer = await CustomerService.getOrCreateCustomer({ telegramId });
+
+  // PART J2 — CTV payout QR upload (reference only; Admin reviews manually).
+  // Intercepted FIRST so the partner QR is never treated as bill evidence
+  // or relayed as a support attachment.
+  const partnerSession = getPartnerPayoutSession(telegramId);
+  if (partnerSession?.awaitingQr) {
+    await handlePartnerPayoutQrUpload(ctx, telegramId, partnerSession.partnerId);
+    return;
+  }
 
   // 1. State-aware payout QR: an active payout-input session BINDS this photo
   // to ONE explicit eligible Order. Without a session, a photo is never
