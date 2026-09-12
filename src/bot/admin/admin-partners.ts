@@ -189,7 +189,7 @@ adminPartnersHandler.callbackQuery(/^ops:partner:bind:([a-zA-Z0-9_-]+)$/, async 
   );
 });
 
-async function handlePartnerBindInput(ctx: BotContext, text: string): Promise<boolean> {
+export async function handlePartnerBindInput(ctx: BotContext, text: string): Promise<boolean> {
   const adminId = String(ctx.from?.id || "");
   const session = getAdminSession(adminId);
   if (session.wizard?.kind !== "partner_bind") return false;

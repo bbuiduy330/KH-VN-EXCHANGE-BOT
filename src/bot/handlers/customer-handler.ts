@@ -39,6 +39,7 @@ import {
   renderSupportActiveText,
   getActiveOrderActionKeyboard
 } from "../menus/customer-menu.js";
+import { escapeHtml } from "../menus/cskh-panel.js";
 import { resolveEvidenceMime, logEvidenceDiagnostics } from "../../modules/files/media-validation.js";
 import {
   notifyOrderCancelledByCustomer,

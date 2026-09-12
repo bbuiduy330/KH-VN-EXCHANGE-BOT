@@ -60,23 +60,21 @@ export async function clearCustomerTelegramChat(customerId: string): Promise<Cle
 
   // READ-ONLY backend access: only recorded telegram ids are read.
   const conv = await ConversationService.getOrCreateConversation(customerId);
-  const rows = await prisma.message.findMany({
+  // EXPLICIT row typing: Message.telegramMessageId is Prisma Int? — this
+  // annotation matches the EXACT select projection shape, so no callback
+  // parameter can ever degrade to an implicit any (TS7006) even if the
+  // generated Prisma client types are stale/unavailable at build time.
+  type TelegramMessageIdRow = { telegramMessageId: number | null };
+  const rows: TelegramMessageIdRow[] = await prisma.message.findMany({
     where: { conversationId: conv.id, telegramMessageId: { not: null } },
     orderBy: { createdAt: "desc" },
     take: MAX_TRACKED_MESSAGES,
     select: { telegramMessageId: true }
   });
-  // Type-safe collection: Prisma Message.telegramMessageId is Int? (number |
-  // null) and the Bot API expects numeric ids — only well-formed integers may
-  // enter the deletion list (null/undefined/invalid are excluded). The row
-  // type is EXPLICITLY annotated to the exact Prisma select projection shape
-  // ({ telegramMessageId: number | null }) so the map callback can never
-  // degrade to an implicit-any parameter, even if client types are stale.
-  type TelegramMessageIdRow = { telegramMessageId: number | null };
   const messageIds: number[] = rows
     .map((row: TelegramMessageIdRow) => row.telegramMessageId)
     .filter(
-      (id): id is number =>
+      (id: number | null): id is number =>
         typeof id === "number" &&
         Number.isInteger(id)
     );
