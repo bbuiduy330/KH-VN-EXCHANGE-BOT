@@ -126,6 +126,10 @@ export async function applyImportedQrMeta(
   // VietQR safety: the decoded account number must belong to THIS account —
   // an imported QR for another bank account is never silently re-pointed.
   if (meta.provider === "VIETQR" && meta.bankNumber && String(a.accountNumber) !== String(meta.bankNumber)) {
+    logger.warn(
+      { code: "QR_IMPORT_ACCOUNT_MISMATCH", accountId, adminId },
+      "QR import: VietQR account number does not match the selected PaymentAccount"
+    );
     return { ok: false, readiness, reason: "account_mismatch" };
   }
 
@@ -141,6 +145,10 @@ export async function applyImportedQrMeta(
     khqrMerchantId: meta.khqrMerchantId ?? null,
     khqrAcquiringBank: meta.khqrAcquiringBank ?? null
   });
+  logger.info(
+    { code: "QR_IMPORT_SAVED", accountId, provider: meta.provider, khqrMode: meta.khqrMode ?? null, adminId },
+    "QR import: PaymentAccount QR metadata saved (dynamic-QR ready)"
+  );
   return { ok: true, readiness };
 }
 
@@ -618,7 +626,10 @@ async function runQrImportMediaFlow(ctx: BotContext): Promise<boolean> {
   // NEVER-SILENT contract: every failure path below replies with an explicit
   // Vietnamese Admin message; the outer catch logs the technical reason
   // server-side (no secrets) so an unexpected failure can never vanish.
-  logger.info({ adminId, accountId: session.wizard.data.accountId }, "QR import: media intake reached");
+  logger.info(
+    { code: "QR_IMPORT_MEDIA_RECEIVED", adminId, accountId: session.wizard.data.accountId },
+    "QR import: media intake reached"
+  );
 
   const accountId = String(session.wizard.data.accountId || "");
   const a = await PaymentAccountService.getAccountById(accountId);
@@ -660,10 +671,12 @@ async function runQrImportMediaFlow(ctx: BotContext): Promise<boolean> {
   try {
     payload = await decodeQrImagePayload(buffer);
   } catch (err: any) {
+    logger.warn({ code: "QR_IMPORT_DECODE_FAILED", reason: err?.message }, "QR import: image decode threw");
     await ctx.reply(`❌ ${escapeHtml(err?.message || "Không đọc được QR từ ảnh.")}`).catch(() => {});
     return true; // wizard stays open for another image
   }
   if (!payload) {
+    logger.warn({ code: "QR_IMPORT_DECODE_FAILED", reason: "no_symbol_found" }, "QR import: no QR symbol in image");
     await ctx.reply(
       "❌ Không tìm thấy mã QR nào trong ảnh. Vui lòng gửi ảnh rõ hơn (QR chiếm phần lớn khung ảnh), hoặc /cancel."
     ).catch(() => {});
@@ -671,10 +684,34 @@ async function runQrImportMediaFlow(ctx: BotContext): Promise<boolean> {
   }
   const meta = parseImportedQr(payload);
   if (!meta || !meta.provider) {
+    logger.warn({ code: "QR_IMPORT_DECODE_FAILED", reason: "unrecognized_payload" }, "QR import: payload is neither KHQR nor VietQR");
     await ctx.reply(
       "❌ QR này không phải KHQR (Bakong) hoặc VietQR (NAPAS) — hệ thống chỉ hỗ trợ hai loại này cho QR động."
     ).catch(() => {});
     return true; // wizard stays open for another image
+  }
+  if (meta.provider === "KHQR") {
+    // Metadata booleans only — never log the Bakong ID / merchant fields.
+    logger.info(
+      {
+        code: "QR_IMPORT_PARSED_KHQR",
+        khqrMode: meta.khqrMode ?? null,
+        hasBakongId: Boolean(meta.khqrBakongAccountId),
+        hasMerchantName: Boolean(meta.khqrMerchantName),
+        hasMerchantCity: Boolean(meta.khqrMerchantCity),
+        crcValid: meta.crcValid ?? null
+      },
+      "QR import: parsed KHQR payload"
+    );
+  } else {
+    logger.info(
+      {
+        code: "QR_IMPORT_PARSED_VIETQR",
+        hasBankBin: Boolean(meta.bankBin),
+        accountMatches: Boolean(meta.bankNumber && String(a.accountNumber) === String(meta.bankNumber))
+      },
+      "QR import: parsed VietQR payload"
+    );
   }
 
   const preview = previewImportedQr(a, meta);
