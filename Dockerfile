@@ -1,5 +1,8 @@
 FROM node:22-bookworm-slim AS build
 WORKDIR /app
+# Canonical application display timezone (GMT+7). Display conversion lives in
+# src/shared/app-time.ts; this only aligns container wall-clock tools/logs.
+ENV TZ=Asia/Ho_Chi_Minh
 RUN apt-get update && apt-get install -y --no-install-recommends openssl && rm -rf /var/lib/apt/lists/*
 COPY package.json ./
 RUN npm install --ignore-scripts
@@ -15,6 +18,8 @@ RUN npm prune --omit=dev --ignore-scripts
 FROM node:22-bookworm-slim AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
+# Canonical application display timezone (GMT+7) — centralized, host-independent.
+ENV TZ=Asia/Ho_Chi_Minh
 RUN apt-get update && apt-get install -y --no-install-recommends openssl && rm -rf /var/lib/apt/lists/*
 # Ship the already-prepared production tree from the build stage.
 # NO second npm install: installing with --ignore-scripts omits Prisma engine

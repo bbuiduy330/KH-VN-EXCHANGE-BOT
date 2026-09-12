@@ -19,6 +19,7 @@ import { SystemSecretService } from "../../modules/system-config/system-secret-s
 import { EncryptionService } from "../../modules/security/encryption-service.js";
 import { GeminiModelStrategy } from "../../modules/ai/gemini-models.js";
 import { BackupService } from "../../modules/backup/backup-service.js";
+import { formatAdminDate, formatAdminDateTime, formatAdminTime, APP_TIMEZONE } from "../../shared/app-time.js";
 
 export const pendingAdminInputs = new Map<string, { action: string; [key: string]: any }>();
 
@@ -126,7 +127,7 @@ async function renderSystemSettingsView(): Promise<{ text: string; keyboard: Inl
   const history = await BackupService.getLatestRuns();
   const lastBackup = history[0];
   const lastBackupStr = lastBackup
-    ? `${new Date(lastBackup.createdAt).toLocaleString("vi-VN")} (${lastBackup.status === "SUCCESS" ? "✅ Thành công" : lastBackup.status})`
+    ? `${formatAdminDateTime(lastBackup.createdAt)} (GMT+7) (${lastBackup.status === "SUCCESS" ? "✅ Thành công" : lastBackup.status})`
     : "Chưa có bản sao lưu";
 
   const text =
@@ -325,7 +326,7 @@ adminHandler.command("backup", async (ctx) => {
         `• Mã snapshot: <code>${result.snapshotId || "N/A"}</code>\n` +
         `• Thời lượng: <b>${result.durationSeconds ?? 0}s</b>\n` +
         `• Chi tiết: <i>${result.message}</i>\n` +
-        `• Thời gian: <code>${new Date().toLocaleString("vi-VN")}</code>\n\n` +
+        `• Thời gian: <code>${formatAdminDateTime(new Date())} (GMT+7)</code>\n\n` +
         `💾 Dữ liệu đã được bảo vệ an toàn trên ổ đĩa VPS.`,
       { parse_mode: "HTML" }
     );
@@ -353,8 +354,8 @@ adminHandler.command("backups", async (ctx) => {
 
   let msg = `💾 <b>DANH SÁCH BẢN SAO LƯU HỆ THỐNG GẦN NHẤT:</b>\n\n`;
   for (const b of history.slice(0, 10)) {
-    const timeStr = new Date(b.createdAt).toLocaleString("vi-VN");
-    msg += `• <b>${b.id}</b> [${b.backupType}]\n  📅 ${timeStr} | 📦 ${b.snapshotId || "N/A"} | ${b.status === "SUCCESS" ? "✅" : "❌"}\n`;
+    const timeStr = formatAdminDateTime(b.createdAt);
+    msg += `• <b>${b.id}</b> [${b.backupType}]\n  📅 ${timeStr} (GMT+7) | 📦 ${b.snapshotId || "N/A"} | ${b.status === "SUCCESS" ? "✅" : "❌"}\n`;
   }
 
   msg += `\n💡 <i>Gõ /backup để chạy sao lưu ngay bây giờ.</i>`;
@@ -587,12 +588,12 @@ adminHandler.command("order", async (ctx) => {
     `💸 <b>TIỀN CHI:</b> <b>${order.targetAmount} ${order.targetCurrency}</b>\n` +
     `• Tài khoản chi trả: ${payoutSnapshot?.bankName} - <code>${payoutSnapshot?.accountNumber}</code> (${payoutSnapshot?.accountName})\n` +
     `• Tỷ giá: <b>${order.rate}</b> | Phí: <b>${order.fee} ${order.feeCurrency}</b>\n\n` +
-    `🕒 Ngày tạo: ${new Date(order.createdAt).toLocaleString("vi-VN")}\n`;
+    `🕒 Ngày tạo: ${formatAdminDateTime(order.createdAt)} (GMT+7)\n`;
 
   if (order.stateHistories && order.stateHistories.length > 0) {
     msg += `\n📜 <b>Lịch sử chuyển trạng thái:</b>\n`;
     for (const h of order.stateHistories.slice(-4)) {
-      msg += `• [${h.fromStatus} ➔ ${h.toStatus}] bởi ${h.actorRole} lúc ${new Date(h.createdAt).toLocaleTimeString()}\n`;
+      msg += `• [${h.fromStatus} ➔ ${h.toStatus}] bởi ${h.actorRole} lúc ${formatAdminTime(h.createdAt)} (GMT+7)\n`;
     }
   }
 
@@ -886,7 +887,7 @@ adminHandler.callbackQuery(/^staff_detail:(\d+|super-admin)$/, async (ctx) => {
     `• Vai trò: <b>${staff.role}</b>\n` +
     `• Trạng thái: <b>${statusIcon}</b>\n` +
     `• Số lượng quyền: <b>${perms.length}</b>/${ALL_PERMISSIONS.length}\n` +
-    `• Ngày tạo: ${new Date(staff.createdAt || Date.now()).toLocaleDateString()}\n`;
+    `• Ngày tạo: ${formatAdminDate(staff.createdAt || new Date())} (GMT+7)\n`;
 
   const keyboard = new InlineKeyboard()
     .text("🔑 Xem quyền", `staff_perms:${staff.telegramId}`)
@@ -1045,7 +1046,7 @@ adminHandler.callbackQuery(/^staff_audit:(\d+)$/, async (ctx) => {
     msg += `Chưa có nhật ký hoạt động nào được ghi nhận.`;
   } else {
     for (const l of logs) {
-      msg += `• [${l.action}] lúc ${new Date(l.createdAt).toLocaleTimeString()} - ${JSON.stringify(l.details || {})}\n`;
+      msg += `• [${l.action}] lúc ${formatAdminTime(l.createdAt)} (GMT+7) - ${JSON.stringify(l.details || {})}\n`;
     }
   }
 
@@ -1061,7 +1062,7 @@ adminHandler.callbackQuery("staff_audit_all", async (ctx) => {
   const logs = await AuditService.getLogs(undefined, 10);
   let msg = `📜 <b>NHẬT KÝ BẢO MẬT &amp; NHÂN SỰ GẦN NHẤT:</b>\n\n`;
   for (const l of logs) {
-    msg += `• [${l.action}] bởi <code>${l.actorId}</code> (${l.actorRole}) lúc ${new Date(l.createdAt).toLocaleTimeString()}\n`;
+    msg += `• [${l.action}] bởi <code>${l.actorId}</code> (${l.actorRole}) lúc ${formatAdminTime(l.createdAt)} (GMT+7)\n`;
   }
 
   const keyboard = new InlineKeyboard().text("🔙 Quay lại Menu", "staff_menu");
@@ -1104,7 +1105,7 @@ adminHandler.callbackQuery(/^staff_create_invite:(ADMIN|CSKH)$/, async (ctx) => 
       `🎟 <b>ĐÃ TẠO MÃ MỜI NHÂN SỰ (${role})</b>\n\n` +
         `• Mã mời: <code>${invite.code}</code>\n` +
         `• Vai trò: <b>${invite.role}</b>\n` +
-        `• Hạn dùng: 24 giờ (hết hạn lúc ${new Date(invite.expiresAt).toLocaleTimeString()})\n` +
+        `• Hạn dùng: 24 giờ (hết hạn lúc ${formatAdminDateTime(invite.expiresAt)} GMT+7)\n` +
         `• Quy tắc bảo mật: Dùng 1 lần duy nhất, yêu cầu Admin duyệt sau khi nhập.\n\n` +
         `<i>Hướng dẫn nhân sự mới:</i> Vào bot và gõ lệnh sau:\n` +
         `<code>/start ${invite.code}</code>`,
@@ -1278,7 +1279,7 @@ adminHandler.command("audit", async (ctx) => {
   const logs = await AuditService.getLogs(undefined, 10);
   let msg = `🛡 <b>NHẬT KÝ KIỂM TOÁN GẦN NHẤT:</b>\n\n`;
   for (const l of logs) {
-    msg += `• [${l.action}] bởi <code>${l.actorId}</code> (${l.actorRole}) lúc ${new Date(l.createdAt).toLocaleTimeString()}\n`;
+    msg += `• [${l.action}] bởi <code>${l.actorId}</code> (${l.actorRole}) lúc ${formatAdminTime(l.createdAt)} (GMT+7)\n`;
   }
   await ctx.reply(msg, { parse_mode: "HTML" });
 });
@@ -1434,7 +1435,7 @@ adminHandler.callbackQuery("admin:menu:audit", async (ctx) => {
   const logs = await AuditService.getLogs(undefined, 8);
   let msg = `📜 <b>NHẬT KÝ HOẠT ĐỘNG KIỂM TOÁN:</b>\n\n`;
   for (const l of logs) {
-    msg += `• [${l.action}] bởi <code>${l.actorId}</code> lúc ${new Date(l.createdAt).toLocaleTimeString()}\n`;
+    msg += `• [${l.action}] bởi <code>${l.actorId}</code> lúc ${formatAdminTime(l.createdAt)} (GMT+7)\n`;
   }
   await ctx.reply(msg, { parse_mode: "HTML" });
 });
@@ -1445,7 +1446,8 @@ adminHandler.callbackQuery("admin:menu:system", async (ctx) => {
   const health = {
     status: "ok",
     nodeEnv: env.NODE_ENV,
-    timezone: env.TIMEZONE,
+    // ONE canonical display timezone (app-time.ts) — never a per-env override.
+    timezone: `${APP_TIMEZONE} (UTC+07:00)`,
     storageStatus: storageHealth.writable ? "Hoạt động (Ghi/Đọc OK)" : "Cảnh báo lỗi ghi",
     backupStatus: env.BACKUP_ENABLED ? "Đã bật (Restic)" : "Chưa kích hoạt",
     gemini: env.GEMINI_API_KEY ? "Hoạt động" : "Chưa cấu hình"
@@ -1779,7 +1781,7 @@ adminHandler.callbackQuery("admin:menu:backup", async (ctx) => {
   const history = await BackupService.getLatestRuns();
   const last = history[0];
   const lastStr = last
-    ? `• Lần sao lưu gần nhất: <b>${new Date(last.createdAt).toLocaleString("vi-VN")}</b> (${last.status})\n• Snapshot: <code>${last.snapshotId || "N/A"}</code>\n`
+    ? `• Lần sao lưu gần nhất: <b>${formatAdminDateTime(last.createdAt)}</b> (GMT+7) (${last.status})\n• Snapshot: <code>${last.snapshotId || "N/A"}</code>\n`
     : "• Chưa có bản sao lưu nào.\n";
 
   const cfg = SystemConfigService.getConfig();
@@ -1814,7 +1816,7 @@ adminHandler.callbackQuery("admin:backup:run_now", async (ctx) => {
         `• Mã snapshot: <code>${result.snapshotId || "N/A"}</code>\n` +
         `• Thời lượng: <b>${result.durationSeconds ?? 0}s</b>\n` +
         `• Chi tiết: <i>${result.message}</i>\n` +
-        `• Thời gian: <code>${new Date().toLocaleString("vi-VN")}</code>`,
+        `• Thời gian: <code>${formatAdminDateTime(new Date())} (GMT+7)</code>`,
       { parse_mode: "HTML" }
     );
   } else {
@@ -1836,8 +1838,8 @@ adminHandler.callbackQuery("admin:backup:history", async (ctx) => {
 
   let msg = `📜 <b>LỊCH SỬ CÁC BẢN SAO LƯU GẦN NHẤT:</b>\n\n`;
   for (const b of history.slice(0, 8)) {
-    const t = new Date(b.createdAt).toLocaleString("vi-VN");
-    msg += `• <b>${b.id}</b> (${b.backupType})\n  📅 ${t} | 📦 ${b.snapshotId || "N/A"} | ${b.status === "SUCCESS" ? "✅ Thành công" : "❌ Thất bại"}\n`;
+    const t = formatAdminDateTime(b.createdAt);
+    msg += `• <b>${b.id}</b> (${b.backupType})\n  📅 ${t} (GMT+7) | 📦 ${b.snapshotId || "N/A"} | ${b.status === "SUCCESS" ? "✅ Thành công" : "❌ Thất bại"}\n`;
   }
 
   await ctx.reply(msg, {

@@ -11,6 +11,7 @@ import { sendToCustomer, sendToStaff, copyMessageToCustomer } from "../notificat
 import { resolveLocale, t } from "../../modules/i18n/locales.js";
 import { getCskhMenuKeyboard, renderCskhStartText } from "../menus/cskh-menu.js";
 import { clearSelectedCustomer, getSelectedCustomer, setSelectedCustomer } from "../state/staff-chat-session.js";
+import { formatAdminDateTime } from "../../shared/app-time.js";
 import {
   ConversationWithCustomer,
   activeRowText,
@@ -798,7 +799,7 @@ cskhHandler.callbackQuery(/^cskh:preview:([a-zA-Z0-9_-]+)$/, async (ctx) => {
     owner,
     need: context.need,
     order: context.order,
-    lastSeen: conv.updatedAt ? new Date(conv.updatedAt).toLocaleString("vi-VN") : undefined
+    lastSeen: conv.updatedAt ? formatAdminDateTime(conv.updatedAt) : undefined
   });
   const keyboard = getCustomerDetailKeyboard(conv, { isMine: conv.claimedById === me });
   try {
@@ -872,7 +873,7 @@ cskhHandler.callbackQuery(/^cskh:order:([a-zA-Z0-9_-]+)$/, async (ctx) => {
     `• Trạng thái: <code>${order.status}</code>\n` +
     `• Đổi: <b>${src}</b> ➔ <b>${tgt}</b>\n` +
     `• Tỷ giá: <b>${Number(order.rate)}</b> · Phí: <b>${Number(order.fee)} ${order.feeCurrency}</b>\n` +
-    `• Tạo lúc: ${new Date(order.createdAt).toLocaleString("vi-VN")}`;
+    `• Tạo lúc: ${formatAdminDateTime(order.createdAt)} (GMT+7)`;
   try {
     await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: kb });
   } catch {
@@ -907,7 +908,7 @@ cskhHandler.callbackQuery(/^cskh:quote:([a-zA-Z0-9_-]+)$/, async (ctx) => {
     `• Nhận: <b>${Number(quote.targetAmount)} ${quote.targetCurrency}</b>\n` +
     `• Tỷ giá: <b>${Number(quote.effectiveRate)}</b>\n` +
     `• Phí: <b>${Number(quote.fee)} ${quote.feeCurrency}</b>\n` +
-    `• Hết hạn: ${new Date(quote.expiresAt).toLocaleString("vi-VN")}`;
+    `• Hết hạn: ${formatAdminDateTime(quote.expiresAt)} (GMT+7)`;
   try {
     await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: kb });
   } catch {

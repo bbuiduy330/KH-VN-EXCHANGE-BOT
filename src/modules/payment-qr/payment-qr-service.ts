@@ -120,6 +120,62 @@ export function detectVietQrCapability(snapshot: unknown): VietQrCapability | nu
   return { bankBin, bankNumber };
 }
 
+// ---------------------------------------------------------------------------
+// QR READINESS — shared Admin-facing explanation (single source of truth).
+//
+// Uses the EXACT SAME capability detectors as generateForOrder, so the Admin
+// readiness screen can never disagree with actual runtime behavior. Accepts
+// either a PaymentAccount row or a frozen receivingAccountSnapshot — both
+// carry the same metadata keys.
+// ---------------------------------------------------------------------------
+export interface QrReadiness {
+  provider: "KHQR" | "VIETQR" | "STATIC";
+  ready: boolean;
+  /** Human-readable list of missing metadata (Admin UI, Vietnamese). */
+  missing: string[];
+}
+
+export function getQrReadiness(account: {
+  currency?: string | null;
+  qrProvider?: string | null;
+  bankBin?: string | null;
+  accountNumber?: string | null;
+  khqrMode?: string | null;
+  khqrBakongAccountId?: string | null;
+  khqrMerchantName?: string | null;
+  khqrMerchantCity?: string | null;
+  khqrMerchantId?: string | null;
+  khqrAcquiringBank?: string | null;
+}): QrReadiness {
+  const currency = String(account.currency ?? "").toUpperCase();
+  const missing: string[] = [];
+
+  if (currency === "USD") {
+    const cap = detectKhqrCapability(account);
+    const bakong = String(account.khqrBakongAccountId ?? "").trim();
+    const name = String(account.khqrMerchantName ?? "").trim();
+    const city = String(account.khqrMerchantCity ?? "").trim();
+    const mode = String(account.khqrMode ?? "INDIVIDUAL").toUpperCase() === "MERCHANT" ? "MERCHANT" : "INDIVIDUAL";
+    if (!bakong) missing.push("Bakong Account ID (name@bank)");
+    if (!name) missing.push("Tên hiển thị");
+    if (!city) missing.push("Thành phố");
+    if (mode === "MERCHANT") {
+      if (!String(account.khqrMerchantId ?? "").trim()) missing.push("Merchant ID");
+      if (!String(account.khqrAcquiringBank ?? "").trim()) missing.push("Acquiring Bank");
+    }
+    return { provider: "KHQR", ready: cap !== null, missing };
+  }
+
+  if (currency === "VND") {
+    const cap = detectVietQrCapability(account);
+    if (!String(account.bankBin ?? "").trim()) missing.push("Bank BIN (VietQR)");
+    if (!String(account.accountNumber ?? "").trim()) missing.push("Số tài khoản");
+    return { provider: "VIETQR", ready: cap !== null, missing };
+  }
+
+  return { provider: "STATIC", ready: false, missing: [`Không hỗ trợ QR động cho tiền ${currency || "?"}`] };
+}
+
 /**
  * KHQR expiration correctness (final pass): the dynamic QR expiration is the
  * ORDER's original payment deadline — Order.createdAt + the authoritative

@@ -9,6 +9,7 @@ import { OrderService } from "../modules/orders/order-service.js";
 import { getCustomerBillEvidence } from "../modules/orders/bill-evidence.js";
 import { LocalStorageService } from "../modules/storage/local-storage-service.js";
 import { resolveLocale, t } from "../modules/i18n/locales.js";
+import { formatAdminDateTime, formatAdminTime } from "../shared/app-time.js";
 
 
 let botInstance: Bot<any> | null = null;
@@ -296,7 +297,7 @@ export async function notifyOrderCreated(order: any, customer: any): Promise<voi
     `💱 ${MoneyService.formatMoney(order.sourceAmount, order.sourceCurrency)} → ${MoneyService.formatMoney(order.targetAmount, order.targetCurrency)}\n` +
     `📊 Tỷ giá khóa: ${MoneyService.formatEffectiveRate(order.sourceCurrency, order.targetCurrency, order.rate)}\n` +
     (memo ? `🔖 Nội dung CK khách cần dùng: <code>${escapeHtml(memo)}</code>\n` : "") +
-    `🕒 ${new Date(order.createdAt).toLocaleTimeString("vi-VN")}`;
+    `🕒 ${formatAdminTime(order.createdAt)} (GMT+7)`;
 
   const kb = new InlineKeyboard()
     .text("📦 Xem đơn", `ops:order:detail:${order.id}`)
@@ -529,7 +530,7 @@ export async function notifyOrderAutoCancelled(order: any, remindersSent: number
     `⏰ <b>TỰ ĐỘNG HỦY ĐƠN — QUÁ HẠN THANH TOÁN</b>\n\n` +
     `${customerIdentity(order.customer)}\n` +
     `📦 Mã đơn: ${shortId(order.id)}\n` +
-    `🕒 Tạo lúc: ${new Date(order.createdAt).toLocaleString("vi-VN")}\n` +
+    `🕒 Tạo lúc: ${formatAdminDateTime(order.createdAt)} (GMT+7)\n` +
     `🔔 Số lần nhắc đã gửi: <b>${remindersSent}</b>\n` +
     `📝 Lý do: quá hạn thanh toán (${remindersSent} lần nhắc không hiệu lực)\n` +
     `📍 Trạng thái: <b>CANCELLED (ORDER_AUTO_CANCELLED_PAYMENT_TIMEOUT)</b>`;

@@ -17,6 +17,7 @@ import { escapeHtml, STATUS_VI } from "../menus/cskh-panel.js";
 import { customerLabel, shortOrderId, maskAccountNumber } from "./admin-panel.js";
 import { sendPayoutDestinationPromptToCustomer } from "../handlers/customer-handler.js";
 import { getCustomerBillEvidence, hasCustomerBillEvidence } from "../../modules/orders/bill-evidence.js";
+import { formatAdminDateTime } from "../../shared/app-time.js";
 import { clearAdminSession, clearPendingFinancialAction, getAdminSession, setPendingFinancialAction, setPayoutEvidenceSession, setPendingAction, consumePendingAction, startWizard, clearWizard } from "./admin-session.js";
 import { ADMIN_CANCEL_REASONS, adminCancelReasonLabel } from "../../modules/orders/order-safety.js";
 import { resolveLocale, t } from "../../modules/i18n/locales.js";
@@ -246,14 +247,14 @@ export async function showPayoutPreview(ctx: BotContext, orderId: string): Promi
     if (payout.type === "qr") {
       lines.push(
         `🖱 Loại tài khoản nhận: <b>Ảnh QR</b>`,
-        `✅ Khách đã xác nhận${payout.confirmedAt ? ` · ${new Date(payout.confirmedAt).toLocaleString("vi-VN")}` : ""}`
+        `✅ Khách đã xác nhận${payout.confirmedAt ? ` · ${formatAdminDateTime(payout.confirmedAt)}` : ""}`
       );
     } else {
       lines.push(
         `🏦 ${escapeHtml(payout.bankName || "")}`,
         `👤 ${escapeHtml(payout.accountName || "")}`,
         `💳 ${escapeHtml(maskAccountNumber(payout.accountNumber || ""))}`,
-        `✅ Khách đã xác nhận${payout.confirmedAt ? ` · ${new Date(payout.confirmedAt).toLocaleString("vi-VN")}` : ""}`
+        `✅ Khách đã xác nhận${payout.confirmedAt ? ` · ${formatAdminDateTime(payout.confirmedAt)}` : ""}`
       );
     }
   } else {

@@ -10,6 +10,7 @@
  * - Full reply-mode/selected-chat state belongs to C2/C3 — intentionally absent.
  */
 import { InlineKeyboard } from "grammy";
+import { formatAdminTime } from "../../shared/app-time.js";
 import { Conversation, Customer, Quote, Order } from "@prisma/client";
 import { MoneyService } from "../../modules/money/money-service.js";
 
@@ -153,11 +154,11 @@ export function escapeHtml(input: string): string {
     .replace(/>/g, "&gt;");
 }
 
-/** Short time like "09:41" (vi locale, no timezone surprises). */
+/** Short time like "09:41" — CANONICAL APP TIMEZONE (Asia/Ho_Chi_Minh). */
 export function shortTime(iso: string | Date): string {
   const d = typeof iso === "string" ? new Date(iso) : iso;
   if (Number.isNaN(d.getTime())) return "";
-  return d.toLocaleTimeString("vi-VN", { hour: "2-digit", minute: "2-digit" });
+  return formatAdminTime(d);
 }
 
 /** Resolve a staff owner display label: "Name (ROLE)" with graceful fallback. */
