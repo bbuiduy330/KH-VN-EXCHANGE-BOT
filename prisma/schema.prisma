@@ -95,6 +95,18 @@ model PaymentAccount {
   createdAt     DateTime                @default(now())
   updatedAt     DateTime                @updatedAt
   versions      PaymentAccountVersion[]
+  // --- Dynamic payment QR V1 (additive, nullable — STATIC rows stay valid) ---
+  // STATIC (default behavior) | KHQR (USD/Bakong) | VIETQR (VND/NAPAS)
+  qrProvider            String?
+  // VietQR: NAPAS bank BIN (authoritative — never derived from bankName)
+  bankBin               String?
+  // KHQR mode: INDIVIDUAL | MERCHANT (fields required differ per official SDK)
+  khqrMode              String?
+  khqrBakongAccountId   String?
+  khqrMerchantName      String?
+  khqrMerchantCity      String?
+  khqrMerchantId        String?
+  khqrAcquiringBank     String?
 
   @@index([currency, isActive])
   @@index([isDefault])
@@ -154,6 +166,10 @@ model Order {
   // T — immutable attribution snapshot taken at Order creation; history never
   // changes even if the customer's assignment is later corrected by Admin.
   partnerId                String?
+  // FROZEN PAYMENT DATA (dynamic QR V1): memo generated ONCE at Order
+  // creation from the then-current template; later template changes never
+  // rewrite an existing Order's payment instructions.
+  transferMemo             String?
   sourceCurrency           String
   targetCurrency           String
   sourceAmount             Decimal             @db.Decimal(18, 6)
