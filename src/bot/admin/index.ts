@@ -33,6 +33,7 @@ import { adminAiHandler, handleAiKeyInput, handleAiModelInput, handleAiVoiceTest
 import { adminConfigHandler, handleConfigInput } from "./admin-config.js";
 import { adminAuditHandler } from "./admin-audit.js";
 import { adminPartnersHandler, handlePartnerAddInput } from "./admin-partners.js";
+import { accountQrMetaHandler, handleAccountQrMetaInput } from "./account-qr-meta.js";
 
 export const adminOperationsHandler = new Composer<BotContext>();
 
@@ -41,6 +42,7 @@ export { handleAdminPayoutEvidenceMedia, handleAiVoiceTestMedia, showOperationsC
 adminOperationsHandler.use(adminOrdersHandler);
 adminOperationsHandler.use(adminActionsHandler);
 adminOperationsHandler.use(adminPartnersHandler);
+adminOperationsHandler.use(accountQrMetaHandler);
 adminOperationsHandler.use(adminCustomersHandler);
 adminOperationsHandler.use(adminCskhHandler);
 adminOperationsHandler.use(adminScreensHandler);
@@ -103,6 +105,7 @@ export async function handleAdminSessionText(ctx: BotContext, text: string): Pro
     if (kind === "config_edit") return handleConfigInput(ctx, text);
     if (kind === "order_cancel_reason") return handleCancelReasonInput(ctx, text);
     if (kind === "partner_add") return handlePartnerAddInput(ctx, text);
+    if (kind.startsWith("qrmeta_")) return handleAccountQrMetaInput(ctx, text);
     if (kind === "account_qr") {
       await ctx.reply("📷 Vui lòng gửi <b>ảnh QR</b> vào khung chat, hoặc gửi /cancel để hủy.", { parse_mode: "HTML" });
       return true;

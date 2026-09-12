@@ -310,6 +310,54 @@ export class PaymentAccountService {
   /**
    * Retrieve historical QR version for an account
    */
+  /**
+   * Dynamic Payment QR V1 — additive QR metadata update (Admin Telegram UI).
+   * Only touches the new nullable QR columns; existing STATIC QR fields and
+   * account data are never modified. Audit-logged (actor + provider).
+   */
+  static async updateQrMetadata(data: {
+    accountId: string;
+    actorId: string;
+    qrProvider: string;
+    bankBin?: string | null;
+    khqrMode?: string | null;
+    khqrBakongAccountId?: string | null;
+    khqrMerchantName?: string | null;
+    khqrMerchantCity?: string | null;
+    khqrMerchantId?: string | null;
+    khqrAcquiringBank?: string | null;
+  }) {
+    const account = await prisma.paymentAccount.findUnique({ where: { id: data.accountId } });
+    if (!account) throw new Error("Payment account not found");
+    const updated = await prisma.paymentAccount.update({
+      where: { id: data.accountId },
+      data: {
+        qrProvider: data.qrProvider,
+        bankBin: data.bankBin ?? null,
+        khqrMode: data.khqrMode ?? null,
+        khqrBakongAccountId: data.khqrBakongAccountId ?? null,
+        khqrMerchantName: data.khqrMerchantName ?? null,
+        khqrMerchantCity: data.khqrMerchantCity ?? null,
+        khqrMerchantId: data.khqrMerchantId ?? null,
+        khqrAcquiringBank: data.khqrAcquiringBank ?? null
+      }
+    });
+    await AuditService.record({
+      actorId: data.actorId,
+      actorRole: "ADMIN",
+      action: "PAYMENT_ACCOUNT_QR_METADATA_UPDATED",
+      targetType: "PAYMENT_ACCOUNT",
+      targetId: data.accountId,
+      details: {
+        qrProvider: data.qrProvider,
+        bankBin: data.bankBin ?? null,
+        khqrMode: data.khqrMode ?? null,
+        currency: account.currency
+      }
+    });
+    return updated;
+  }
+
   static async getVersionQr(accountId: string, version: number) {
     return prisma.paymentAccountVersion.findUnique({
       where: {
