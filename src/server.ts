@@ -62,6 +62,23 @@ app.get("/health", async (_req, res) => {
 async function assertProductionDatabaseReady(): Promise<void> {
   if (process.env.NODE_ENV !== "production") return;
 
+  // PART Y — fail fast on REQUIRED bootstrap config (fail clearly, never
+  // silently degrade). OPTIONAL config (Gemini, QR metadata, notification
+  // chat, CTV payout destinations) must NOT block startup.
+  if (!env.TELEGRAM_BOT_TOKEN) {
+    logger.error("[STARTUP] FATAL: TELEGRAM_BOT_TOKEN is not configured — refusing to start in production");
+    process.exit(1);
+  }
+  const superAdminId = env.SUPER_ADMIN_TELEGRAM_ID?.trim();
+  if (!superAdminId || !/^\d{4,20}$/.test(superAdminId)) {
+    logger.error("[STARTUP] FATAL: SUPER_ADMIN_TELEGRAM_ID must be the numeric Telegram user ID of the initial Super Admin — refusing to start in production");
+    process.exit(1);
+  }
+  if (!env.CONFIG_ENCRYPTION_KEY) {
+    logger.error("[STARTUP] FATAL: CONFIG_ENCRYPTION_KEY is required in production — refusing to start (see .env.example)");
+    process.exit(1);
+  }
+
   if (!process.env.DATABASE_URL && !env.DATABASE_URL) {
     logger.error("[DB] FATAL: DATABASE_URL is not configured — refusing to start in production");
     process.exit(1);

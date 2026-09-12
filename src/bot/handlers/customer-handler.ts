@@ -18,7 +18,9 @@ import { generateTransferMemo } from "../../modules/orders/transfer-memo.js";
 import { parsePayoutDestinationText, parsePayoutDestinationPipe, parsePayoutDestinationWithAi, decodePayoutQrImage } from "../../modules/orders/payout-destination.js";
 import { getPayoutInputSession, setPayoutInputSession, updatePayoutInputSession, clearPayoutInputSession } from "../state/customer-session.js";
 import { setPendingBillSession, clearPendingBillSession, takePendingBillSession, finishPendingBill } from "../state/pending-bill-session.js";
+import { setPartnerPayoutSession, getPartnerPayoutSession, updatePartnerPayoutSession, clearPartnerPayoutSession, parsePayoutDestinationInput } from "../state/partner-session.js";
 import { clearCustomerTelegramChat } from "../../modules/telegram/clear-chat-service.js";
+import { formatAdminDateTime } from "../../shared/app-time.js";
 import { PaymentQrService } from "../../modules/payment-qr/payment-qr-service.js";
 
 /** Mask a payout account number for customer-facing previews (**** + last 4). */
@@ -1094,6 +1096,33 @@ export async function handleCustomerTextMessage(ctx: BotContext, text: string) {
     return;
   }
 
+  // 0b. PART J — CTV payout-destination text input (partner session armed).
+  // Scoped to the partner's OWN destination; nothing else can be written.
+  const partnerPayoutSession = getPartnerPayoutSession(telegramId);
+  if (partnerPayoutSession) {
+    if (text.trim() === "/cancel") {
+      clearPartnerPayoutSession(telegramId);
+      await ctx.reply("Đã hủy cập nhật tài khoản nhận hoa hồng.");
+      return;
+    }
+    const parsed = parsePayoutDestinationInput(text);
+    if (!parsed) {
+      await ctx.reply(
+        "❌ Sai định dạng. Gửi ĐÚNG 3 dòng:\n<code>Tên ngân hàng\nSố tài khoản\nChủ tài khoản</code>\nHoặc /cancel để hủy.",
+        { parse_mode: "HTML" }
+      );
+      return;
+    }
+    updatePartnerPayoutSession(telegramId, parsed);
+    const { PartnerService } = await import("../../modules/partner/partner-service.js");
+    const kb = new InlineKeyboard().text("✅ Confirm", "ctv:payout:confirm:go").row().text("↩️ Hủy", "ctv:payout");
+    await ctx.reply(
+      `⚠️ <b>XÁC NHẬN TÀI KHOẢN NHẬN HOA HỒNG</b>\n\n🏦 Ngân hàng: <b>${escapeHtml(parsed.bankName)}</b>\n💳 Số TK: <code>${escapeHtml(parsed.accountNumber)}</code>\n👤 Chủ TK: ${escapeHtml(parsed.accountName)}`,
+      { parse_mode: "HTML", reply_markup: kb }
+    );
+    return;
+  }
+
   // 1. Check exchange intent
   const intent = await AiProvider.parseExchangeIntent(text);
   if (intent) {
@@ -1863,29 +1892,178 @@ async function handlePayoutQrUpload(
   await attachPayoutQrImage(ctx, customer, order, true);
 }
 
-// S/X — Partner/CTV self-service: aggregate-only, NO customer data exposed.
-// Invisible to normal customers (silent no-op) — attribution stays private.
+// S/X — Partner/CTV self-service (D/E/J): aggregate-only, NO customer data
+// exposed. Resolution: ctx.from.id → Partner.telegramId (numeric identity
+// ONLY — never username/referralCode/display name). Unbound → explicit
+// message; disabled → explicit message; active → dashboard with buttons.
 customerHandler.command("ctv", async (ctx) => {
+  await showCtvDashboard(ctx);
+});
+
+export async function showCtvDashboard(ctx: BotContext): Promise<void> {
+  const telegramId = String(ctx.from?.id || "");
+  const { PartnerService } = await import("../../modules/partner/partner-service.js");
+  const { getBotInstance } = await import("../notifications.js");
+
+  const partner = await PartnerService.getPartnerByTelegramId(telegramId);
+  if (!partner) {
+    await ctx.reply("⚠️ Tài khoản Telegram này chưa được liên kết với CTV.\nVui lòng liên hệ quản trị viên.");
+    return;
+  }
+  if (partner.status !== "ACTIVE") {
+    await ctx.reply("⛔ Tài khoản CTV hiện đang tạm ngưng.");
+    return;
+  }
+
+  const summary = await PartnerService.partnerSummary(partner.id);
+  const referredCount = await PartnerService.countReferredCustomers(partner.id);
+  const me = (getBotInstance() as any)?.botInfo?.username as string | undefined;
+  const link = me ? `https://t.me/${me}?start=${PartnerService.referralPayload(partner)}` : null;
+  const usd = (d: any) => `$${Number(d ?? 0).toFixed(2)}`;
+
+  const kb = new InlineKeyboard()
+    .text("🔗 Link giới thiệu", "ctv:link")
+    .text("💰 Hoa hồng", "ctv:commissions")
+    .row()
+    .text("💸 Lịch sử thanh toán", "ctv:settlements")
+    .text("🏦 Tài khoản nhận HH", "ctv:payout")
+    .row()
+    .text("🔄 Làm mới", "ctv:home");
+
+  await ctx.reply(
+    `🤝 <b>CTV — ${escapeHtml(partner.displayName)}</b>\n\n` +
+      `🔗 Mã giới thiệu: <code>${escapeHtml(partner.referralCode)}</code>\n` +
+      `👥 Khách giới thiệu: <b>${referredCount}</b>\n` +
+      `✅ Giao dịch hoàn tất: <b>${summary.eligibleCompleted}</b>\n\n` +
+      `💰 Hoa hồng:\n` +
+      `• Đang chờ: <b>${usd(summary.held)}</b>\n` +
+      `• Có thể rút: <b>${usd(summary.available)}</b>\n` +
+      `• Đã thanh toán: <b>${usd(summary.paid)}</b>\n\n` +
+      (link ? `🔗 Link: <code>${link}</code>` : "🔗 Link: liên hệ Admin (bot chưa có username)."),
+    { parse_mode: "HTML", reply_markup: kb }
+  );
+}
+
+customerHandler.callbackQuery("ctv:home", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  await showCtvDashboard(ctx);
+});
+
+customerHandler.callbackQuery("ctv:link", async (ctx) => {
+  await ctx.answerCallbackQuery();
   const telegramId = String(ctx.from?.id || "");
   const { PartnerService } = await import("../../modules/partner/partner-service.js");
   const { getBotInstance } = await import("../notifications.js");
   const partner = await PartnerService.getPartnerByTelegramId(telegramId);
-  if (!partner || partner.status !== "ACTIVE") {
-    return; // non-partners: fully silent
-  }
-  const summary = await PartnerService.partnerSummary(partner.id);
+  if (!partner || partner.status !== "ACTIVE") return;
   const me = (getBotInstance() as any)?.botInfo?.username as string | undefined;
   const link = me ? `https://t.me/${me}?start=${PartnerService.referralPayload(partner)}` : null;
-  const usd = (d: any) => `$${Number(d ?? 0).toFixed(2)}`;
   await ctx.reply(
-    `🤝 <b>CTV CỦA TÔI</b>\n\n` +
-      `📦 Đơn hoàn tất đủ điều kiện: <b>${summary.eligibleCompleted}</b>\n` +
-      `💵 Hoa hồng HELD: <b>${usd(summary.held)}</b>\n` +
-      `💵 AVAILABLE: <b>${usd(summary.available)}</b>\n` +
-      `💵 PAID: <b>${usd(summary.paid)}</b>\n\n` +
-      (link ? `🔗 Link giới thiệu:\n<code>${link}</code>` : `🔗 Link giới thiệu: liên hệ Admin.`),
+    link
+      ? `🔗 <b>Link giới thiệu của bạn:</b>\n<code>${link}</code>\n\nKhách bấm link sẽ được gán về CTV của bạn (chỉ khách mới / chưa gán).`
+      : "⚠️ Bot chưa có username công khai. Vui lòng liên hệ Admin.",
     { parse_mode: "HTML" }
   );
+});
+
+/** PART F — commission history rows use ONLY safe business references. */
+customerHandler.callbackQuery("ctv:commissions", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const telegramId = String(ctx.from?.id || "");
+  const { PartnerService } = await import("../../modules/partner/partner-service.js");
+  const partner = await PartnerService.getPartnerByTelegramId(telegramId);
+  if (!partner || partner.status !== "ACTIVE") return;
+  const commissions = await PartnerService.listPartnerCommissions(partner.id, 15);
+  const usd = (d: any) => `$${Number(d ?? 0).toFixed(2)}`;
+  const lines = ["💰 <b>HOA HỒNG GẦN NHẤT</b>", ""];
+  if (commissions.length === 0) {
+    lines.push("Chưa có hoa hồng nào.");
+  } else {
+    for (const c of commissions) {
+      const st = PartnerService.effectiveStatus(c);
+      // PRIVACY: date + order short-ref + amount + status. NO customer identity.
+      lines.push(`${formatAdminDateTime(c.createdAt)} · Giao dịch #${c.orderId.slice(-6)} · ${usd(c.totalUsd)} · ${st}`);
+    }
+  }
+  await ctx.reply(lines.join("\n"), { parse_mode: "HTML" });
+});
+
+// PART K/L — CTV settlement history: amount/date/status only.
+customerHandler.callbackQuery("ctv:settlements", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const telegramId = String(ctx.from?.id || "");
+  const { PartnerService } = await import("../../modules/partner/partner-service.js");
+  const partner = await PartnerService.getPartnerByTelegramId(telegramId);
+  if (!partner || partner.status !== "ACTIVE") return;
+  const settlements = await PartnerService.listPartnerSettlements(partner.id, 10);
+  const usd = (d: any) => `$${Number(d ?? 0).toFixed(2)}`;
+  const lines = ["💸 <b>LỊCH SỬ THANH TOÁN HOA HỒNG</b>", ""];
+  if (settlements.length === 0) {
+    lines.push("Chưa có đợt thanh toán nào.");
+  } else {
+    for (const s of settlements) {
+      lines.push(`${s.status === "PAID" ? "✅" : "⏳"} ${formatAdminDateTime(s.createdAt)} · ${usd(s.totalUsd)} · ${s.itemCount} hoa hồng · ${s.status}`);
+    }
+  }
+  await ctx.reply(lines.join("\n"), { parse_mode: "HTML" });
+});
+
+// ---------------------------------------------------------------------------
+// PART J — CTV payout destination self-service (partner-OWN money metadata).
+// CTV can view/add/update their own destination with explicit confirmation.
+// CTV CANNOT change: commission amounts, settlement status, identity,
+// referral attribution. Audit masks the account number.
+// ---------------------------------------------------------------------------
+customerHandler.callbackQuery("ctv:payout", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const telegramId = String(ctx.from?.id || "");
+  const { PartnerService } = await import("../../modules/partner/partner-service.js");
+  const partner = await PartnerService.getPartnerByTelegramId(telegramId);
+  if (!partner || partner.status !== "ACTIVE") return;
+  const lines = ["🏦 <b>TÀI KHOẢN NHẬN HOA HỒNG</b>", ""];
+  if (partner.payoutBankName) {
+    lines.push(`🏦 Ngân hàng: <b>${escapeHtml(partner.payoutBankName)}</b>`);
+    lines.push(`💳 Số TK: <code>${escapeHtml(PartnerService.maskAccountNumber(partner.payoutAccountNumber))}</code>`);
+    lines.push(`👤 Chủ TK: ${escapeHtml(partner.payoutAccountName || "")}`);
+  } else {
+    lines.push("Chưa có thông tin tài khoản nhận hoa hồng.");
+  }
+  await ctx.reply(
+    lines.join("\n"),
+    { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("✏️ Cập nhật", "ctv:payout:edit").row().text("⬅️ Về dashboard", "ctv:home") }
+  );
+});
+
+customerHandler.callbackQuery("ctv:payout:edit", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const telegramId = String(ctx.from?.id || "");
+  const { PartnerService } = await import("../../modules/partner/partner-service.js");
+  const partner = await PartnerService.getPartnerByTelegramId(telegramId);
+  if (!partner || partner.status !== "ACTIVE") return;
+  setPartnerPayoutSession(telegramId, partner.id);
+  await ctx.reply(
+    "🏦 <b>CẬP NHẬT TÀI KHOẢN NHẬN HOA HỒNG</b>\n\nGửi MỘT tin nhắn theo mẫu:\n<code>Tên ngân hàng\nSố tài khoản\nChủ tài khoản</code>\n\nVí dụ:\n<code>Vietcombank\n0123456789\nNGUYEN VAN A</code>\n\nGửi /cancel để hủy.",
+    { parse_mode: "HTML" }
+  );
+});
+
+customerHandler.callbackQuery("ctv:payout:confirm:go", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const telegramId = String(ctx.from?.id || "");
+  const session = getPartnerPayoutSession(telegramId);
+  if (!session?.pending) return;
+  try {
+    const { PartnerService } = await import("../../modules/partner/partner-service.js");
+    await PartnerService.setPayoutDestination(session.partnerId, session.pending!);
+    clearPartnerPayoutSession(telegramId);
+    const usdMasked = PartnerService.maskAccountNumber(session.pending.accountNumber);
+    await ctx.reply(
+      `✅ <b>ĐÃ LƯU TÀI KHOẢN NHẬN HOA HỒNG</b>\n🏦 ${escapeHtml(session.pending.bankName)} · ${escapeHtml(PartnerService.maskAccountNumber(session.pending.accountNumber))} — ${escapeHtml(session.pending.accountName)}`,
+      { parse_mode: "HTML" }
+    );
+  } catch (err: any) {
+    await ctx.reply(`❌ ${err?.message || "Không lưu được tài khoản."}`);
+  }
 });
 
 // O — OPTIONAL post-completion rating (never blocks financial completion).
