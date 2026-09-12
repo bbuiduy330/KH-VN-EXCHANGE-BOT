@@ -294,6 +294,7 @@ describe("Z — CTV attribution rules (T/U/V)", () => {
     const audits = await prisma.auditLog.findMany({ where: { action: "PARTNER_SETTLEMENT_PAID", targetId: settlement.id } });
     expect(audits.length).toBe(1);
   });
+});
 
 describe("Z — commission atomicity + reconciliation (1)", () => {
   it("same-transaction completion creates the commission together with COMPLETED", async () => {
