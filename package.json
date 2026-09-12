@@ -44,10 +44,9 @@
   },
   "devDependencies": {
     "@types/express": "^5.0.6",
-    "@types/jpeg-js": "^0.4.4",
     "@types/node": "^22.0.0",
     "@types/pg": "^8.15.0",
-    "@types/pngjs": "^7.0.0",
+    "@types/pngjs": "^6.0.5",
     "@types/qrcode": "^1.5.5",
     "tsx": "^4.20.0",
     "typescript": "^5.8.0",
