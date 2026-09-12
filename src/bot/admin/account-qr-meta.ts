@@ -22,6 +22,10 @@ import { escapeHtml } from "../menus/cskh-panel.js";
 import { clearWizard, getAdminSession, isSessionExpired, startWizard, updateWizard } from "./admin-session.js";
 import { getQrReadiness, type QrReadiness } from "../../modules/payment-qr/payment-qr-service.js";
 import { Banks } from "vietnam-qr-pay";
+import { decodeQrImagePayload } from "../../modules/payment-qr/qr-image-decode.js";
+import { parseImportedQr, type ImportedQrMeta } from "../../modules/payment-qr/qr-import.js";
+import { env } from "../../config/env.js";
+import { logger } from "../../shared/logger.js";
 
 export const accountQrMetaHandler = new Composer<BotContext>();
 
@@ -94,6 +98,52 @@ export function readinessLine(r: QrReadiness): string {
   return `🟡 QR tĩnh\n${label} động chưa sẵn sàng:\nThiếu: ${r.missing.map((m) => escapeHtml(m)).join(", ")}`;
 }
 
+export async function applyImportedQrMeta(
+  accountId: string,
+  adminId: string,
+  meta: ImportedQrMeta
+): Promise<{ ok: boolean; readiness: QrReadiness; reason?: string }> {
+  const a = await PaymentAccountService.getAccountById(accountId);
+  if (!a) return { ok: false, readiness: getQrReadiness({}), reason: "account_missing" };
+
+  const wouldBe = {
+    currency: a.currency,
+    qrProvider: meta.provider,
+    bankBin: meta.bankBin ?? null,
+    accountNumber: meta.bankNumber ?? null,
+    khqrMode: meta.khqrMode ?? null,
+    khqrBakongAccountId: meta.khqrBakongAccountId ?? null,
+    khqrMerchantName: meta.khqrMerchantName ?? null,
+    khqrMerchantCity: meta.khqrMerchantCity ?? null,
+    khqrMerchantId: meta.khqrMerchantId ?? null,
+    khqrAcquiringBank: meta.khqrAcquiringBank ?? null
+  };
+  const readiness = getQrReadiness(wouldBe);
+  if (!readiness.ready) {
+    return { ok: false, readiness, reason: "not_ready" };
+  }
+
+  // VietQR safety: the decoded account number must belong to THIS account —
+  // an imported QR for another bank account is never silently re-pointed.
+  if (meta.provider === "VIETQR" && meta.bankNumber && String(a.accountNumber) !== String(meta.bankNumber)) {
+    return { ok: false, readiness, reason: "account_mismatch" };
+  }
+
+  await PaymentAccountService.updateQrMetadata({
+    accountId,
+    actorId: adminId,
+    qrProvider: meta.provider,
+    bankBin: meta.bankBin ?? null,
+    khqrMode: meta.khqrMode ?? null,
+    khqrBakongAccountId: meta.khqrBakongAccountId ?? null,
+    khqrMerchantName: meta.khqrMerchantName ?? null,
+    khqrMerchantCity: meta.khqrMerchantCity ?? null,
+    khqrMerchantId: meta.khqrMerchantId ?? null,
+    khqrAcquiringBank: meta.khqrAcquiringBank ?? null
+  });
+  return { ok: true, readiness };
+}
+
 export async function showAccountQrMetaList(ctx: BotContext): Promise<void> {
   await ctx.answerCallbackQuery();
   if (!(await requirePermission(ctx, "payment_account.edit"))) return;
@@ -128,6 +178,10 @@ export async function showAccountQrMetaEdit(ctx: BotContext, accountId: string):
   const r = getQrReadiness(a);
   const isUsd = a.currency === "USD";
   const kb = new InlineKeyboard();
+  // SIMPLEST setup path first: upload an existing bank QR — the bot decodes it
+  // locally and configures dynamic QR from the REAL account metadata.
+  kb.text("📷 Nhập từ QR ngân hàng", `ops:qrmeta:import:${accountId}`)
+    .row();
   if (isUsd) {
     kb.text("🇰🇭 KHQR động (đơn giản)", `ops:qrmeta:wizard:khqr_simple:${accountId}`)
       .row()
@@ -226,6 +280,15 @@ export async function handleAccountQrMetaInput(ctx: BotContext, text: string): P
   }
   const data = wizard.data;
   const kind = wizard.kind.replace("qrmeta_", "");
+
+  // ---- IMPORT: text input is never a field — the wizard waits for an IMAGE ----
+  if (kind === "import") {
+    await ctx.reply(
+      "📷 Phiên nhập QR đang chờ <b>ảnh QR</b>. Vui lòng gửi ảnh (PNG/JPG), hoặc gửi /cancel để hủy.",
+      { parse_mode: "HTML" }
+    ).catch(() => {});
+    return true;
+  }
 
   // ---- VIETQR: bank name/BIN → resolve against the verified NAPAS table ----
   if (kind === "vietqr") {
@@ -401,8 +464,240 @@ export async function confirmAccountQrMetaStatic(ctx: BotContext, accountId: str
   }
 }
 
+// ===========================================================================
+// TASK 6 — 📷 NHẬP TỪ QR NGÂN HÀNG (upload existing QR → decode → configure)
+//
+// Admin NEVER needs to understand Bakong ID / Merchant ID / Acquiring Bank /
+// bank BIN. Flow:
+//   Payment Account → ⚙️ QR thanh toán → 📷 Nhập từ QR ngân hàng
+//   → Admin uploads the bank's QR image (PNG/JPG)
+//   → LOCAL decode (jsqr + pngjs/jpeg-js — never any external HTTP service)
+//   → KHQR / VietQR classification + ACCOUNT metadata extraction (EMV TLV)
+//   → preview (shared readiness check) → Admin confirms → saved.
+//
+// 6D: the source QR's fixed amount / memo are NOT the account config — they
+// are shown for transparency only and never persisted (runtime Order QRs keep
+// using the FROZEN Order amount + transferMemo).
+// 6F: readiness uses the SAME shared getQrReadiness as PaymentQrService.
+// ===========================================================================
+
+export async function startQrImportWizard(ctx: BotContext, accountId: string): Promise<void> {
+  await ctx.answerCallbackQuery();
+  if (!(await requirePermission(ctx, "payment_account.edit"))) return;
+  const a = await PaymentAccountService.getAccountById(accountId);
+  if (!a) {
+    await ctx.reply("❌ Không tìm thấy tài khoản.").catch(() => {});
+    return;
+  }
+  startWizard(String(ctx.from?.id || ""), "qrmeta_import", { accountId });
+  await ctx.reply(
+    `📷 <b>NHẬP CẤU HÌNH QR TỪ ẢNH QR NGÂN HÀNG</b>\n\n` +
+      `Tài khoản: <b>${escapeHtml(a.bankName)} (${a.currency})</b>\n\n` +
+      `1. Gửi ảnh QR tĩnh của ngân hàng (PNG/JPG) vào khung chat.\n` +
+      `2. Hệ thống đọc QR TRÊN MÁY (không gửi ảnh đi đâu) và tự nhận dạng KHQR / VietQR.\n` +
+      `3. Kiểm tra bản xem trước → ✅ Xác nhận để bật QR động.\n\n` +
+      `ℹ️ Số tiền / nội dung có sẵn trong QR gốc KHÔNG được dùng — mỗi đơn sẽ tự tạo QR đúng số tiền + nội dung riêng.\n\n` +
+      `Gửi /cancel để hủy.`,
+    { parse_mode: "HTML" }
+  );
+}
+
+/** Vietnamese preview text for imported metadata + shared readiness output. */
+export function previewImportedQr(a: { currency: string; accountNumber?: string; bankName?: string }, meta: ImportedQrMeta): string {
+  const r = getQrReadiness({
+    currency: a.currency,
+    qrProvider: meta.provider,
+    bankBin: meta.bankBin ?? null,
+    accountNumber: meta.bankNumber ?? null,
+    khqrMode: meta.khqrMode ?? null,
+    khqrBakongAccountId: meta.khqrBakongAccountId ?? null,
+    khqrMerchantName: meta.khqrMerchantName ?? null,
+    khqrMerchantCity: meta.khqrMerchantCity ?? null,
+    khqrMerchantId: meta.khqrMerchantId ?? null,
+    khqrAcquiringBank: meta.khqrAcquiringBank ?? null
+  });
+
+  const lines: string[] = [];
+  if (meta.provider === "KHQR") {
+    lines.push(meta.khqrMode === "MERCHANT" ? `🏢 <b>KHQR MERCHANT</b>` : `🇰🇭 <b>KHQR INDIVIDUAL</b>`);
+    lines.push(`🆔 Bakong ID: <code>${escapeHtml(meta.khqrBakongAccountId || "")}</code>`);
+    lines.push(`👤 Tên: <code>${escapeHtml(meta.khqrMerchantName || "")}</code>`);
+    lines.push(`🏙 Thành phố: <code>${escapeHtml(meta.khqrMerchantCity || "")}</code>`);
+    if (meta.khqrMode === "MERCHANT") {
+      lines.push(`🏪 Merchant ID: <code>${escapeHtml(meta.khqrMerchantId || "")}</code>`);
+      lines.push(`🏦 Acquiring Bank: <code>${escapeHtml(meta.khqrAcquiringBank || "")}</code>`);
+    }
+    lines.push(meta.crcValid === false ? `⚠️ CRC KHQR KHÔNG hợp lệ — ảnh có thể bị mờ/mất góc.` : "");
+  } else {
+    const bank = resolveVietQrBank(String(meta.bankBin || ""));
+    lines.push(`🇻🇳 <b>VietQR</b>`);
+    lines.push(`🏦 Ngân hàng: <code>${escapeHtml(bank?.bankName || meta.bankBin || "")}</code> (BIN <code>${escapeHtml(meta.bankBin || "")}</code>)`);
+    lines.push(`💳 Số TK: <code>${escapeHtml(meta.bankNumber || "")}</code>`);
+    if (a.accountNumber && meta.bankNumber && String(a.accountNumber) !== String(meta.bankNumber)) {
+      lines.push(`⚠️ Số TK trong QR KHÁC số TK của tài khoản này — không thể lưu.`);
+    }
+  }
+  lines.push("", `QR thanh toán: ${readinessLine(r)}`);
+  if (meta.sourceAmount || meta.sourceMemo) {
+    lines.push(
+      `ℹ️ QR gốc chứa số tiền <code>${escapeHtml(meta.sourceAmount || "")}</code>` +
+        `${meta.sourceMemo ? ` / nội dung "<code>${escapeHtml(meta.sourceMemo)}</code>"` : ""} — ` +
+        `<b>chỉ mang tính tham khảo</b>, KHÔNG dùng cho cấu hình: mỗi đơn tự tạo QR đúng số tiền + memo riêng.`
+    );
+  }
+  if (!r.ready) {
+    lines.push(`🟡 <b>Chưa thể bật QR động</b>\nThiếu: ${r.missing.map((m) => escapeHtml(m)).join(", ")}`);
+  }
+  return lines.filter(Boolean).join("\n");
+}
+
+/** Admin media intake for the 📷 QR import wizard (photo OR document).
+ *
+ * Bounds: ADMIN-only (payment_account.edit permission) + PRIVATE chat only;
+ * Telegram document/photo size capped (QR images are small — oversize files
+ * are rejected before download); PNG/JPEG magic bytes validated by the local
+ * decoder. NO external HTTP decoding service — decode is in-process.
+ */
+export async function handleAccountQrImportMedia(ctx: BotContext): Promise<boolean> {
+  const adminId = String(ctx.from?.id || "");
+  const session = getAdminSession(adminId);
+  if (!session.wizard || session.wizard.kind !== "qrmeta_import") return false;
+  await ctx.answerCallbackQuery().catch(() => {});
+  if (ctx.chat?.type !== "private") {
+    // QR/account configuration is a private-chat financial-config action.
+    await ctx.reply("⚠️ Vui lòng thực hiện cấu hình QR trong <b>chat riêng với bot</b>.", { parse_mode: "HTML" }).catch(() => {});
+    return true;
+  }
+  if (!(await requirePermission(ctx, "payment_account.edit"))) return true;
+  if (isSessionExpired(adminId)) {
+    clearWizard(adminId);
+    await ctx.reply("⌛️ Phiên đã hết hạn. Mở lại từ ⚙️ Cấu hình QR.").catch(() => {});
+    return true;
+  }
+
+  // Bounded size: reject oversized uploads BEFORE downloading.
+  const MAX_IMPORT_BYTES = (env.MAX_UPLOAD_MB || 10) * 1024 * 1024;
+  const doc = ctx.message?.document;
+  if (doc?.file_size && doc.file_size > MAX_IMPORT_BYTES) {
+    await ctx.reply(`⚠️ Ảnh quá lớn (giới hạn ${env.MAX_UPLOAD_MB || 10}MB). Vui lòng nén/gửi ảnh nhỏ hơn.`).catch(() => {});
+    return true;
+  }
+  // Bounded type: only image documents are accepted (PDF/zip/etc. rejected).
+  const docMime = doc?.mime_type || "";
+  if (doc && docMime && !docMime.startsWith("image/")) {
+    await ctx.reply("❌ Vui lòng gửi ẢNH QR (PNG/JPG) — tệp này không phải ảnh.").catch(() => {});
+    return true;
+  }
+
+  const accountId = String(session.wizard.data.accountId || "");
+  const a = await PaymentAccountService.getAccountById(accountId);
+  if (!a) {
+    clearWizard(adminId);
+    await ctx.reply("❌ Không tìm thấy tài khoản.").catch(() => {});
+    return true;
+  }
+
+  const fileId = ctx.message?.photo?.length
+    ? ctx.message.photo[ctx.message.photo.length - 1]?.file_id
+    : ctx.message?.document?.file_id;
+  if (!fileId) {
+    await ctx.reply("📷 Vui lòng gửi <b>ảnh QR</b> (PNG/JPG), hoặc gửi /cancel để hủy.", { parse_mode: "HTML" }).catch(() => {});
+    return true;
+  }
+
+  let buffer: Buffer;
+  try {
+    const file = await ctx.api.getFile(fileId);
+    const url = `https://api.telegram.org/file/bot${env.TELEGRAM_BOT_TOKEN}/${file.file_path}`;
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`Tải ảnh thất bại (HTTP ${res.status})`);
+    buffer = Buffer.from(await res.arrayBuffer());
+    // Post-download bound (photo file_size is not always declared upfront):
+    if (buffer.length > MAX_IMPORT_BYTES) {
+      await ctx.reply(`⚠️ Ảnh quá lớn (giới hạn ${env.MAX_UPLOAD_MB || 10}MB). Vui lòng nén/gửi ảnh nhỏ hơn.`).catch(() => {});
+      return true;
+    }
+  } catch (err: any) {
+    logger.warn({ err: err?.message }, "QR import: image download failed");
+    await ctx.reply(`❌ Không tải được ảnh: ${escapeHtml(err?.message || "lỗi tải")}`).catch(() => {});
+    return true; // wizard stays open so Admin can upload another image
+  }
+
+  // LOCAL decode → classify → extract ACCOUNT metadata. No external HTTP
+  // service, no AI — the image never leaves this process.
+  let payload: string | null;
+  try {
+    payload = await decodeQrImagePayload(buffer);
+  } catch (err: any) {
+    await ctx.reply(`❌ ${escapeHtml(err?.message || "Không đọc được QR từ ảnh.")}`).catch(() => {});
+    return true; // wizard stays open for another image
+  }
+  if (!payload) {
+    await ctx.reply(
+      "❌ Không tìm thấy mã QR nào trong ảnh. Vui lòng gửi ảnh rõ hơn (QR chiếm phần lớn khung ảnh), hoặc /cancel."
+    ).catch(() => {});
+    return true;
+  }
+  const meta = parseImportedQr(payload);
+  if (!meta || !meta.provider) {
+    await ctx.reply(
+      "❌ QR này không phải KHQR (Bakong) hoặc VietQR (NAPAS) — hệ thống chỉ hỗ trợ hai loại này cho QR động."
+    ).catch(() => {});
+    return true; // wizard stays open for another image
+  }
+
+  const preview = previewImportedQr(a, meta);
+  updateWizard(adminId, { data: { preview: meta } });
+  const kb = new InlineKeyboard()
+    .text("✅ XÁC NHẬN LƯU", `ops:qrmeta:import:confirm:${accountId}`)
+    .row()
+    .text("❌ HỦY", `ops:qrmeta:edit:${accountId}`);
+  await ctx.reply(preview, { parse_mode: "HTML", reply_markup: kb });
+  return true;
+}
+
+/** Final confirm: SAME shared readiness gate — never save a broken config. */
+export async function confirmAccountQrImport(ctx: BotContext): Promise<void> {
+  await ctx.answerCallbackQuery();
+  if (!(await requirePermission(ctx, "payment_account.edit"))) return;
+  const adminId = String(ctx.from?.id || "");
+  const session = getAdminSession(adminId);
+  if (!session.wizard || session.wizard.kind !== "qrmeta_import" || !session.wizard.data.preview) {
+    await ctx.reply("⚠️ Không có phiên nhập QR hợp lệ. Mở lại từ ⚙️ Cấu hình QR.").catch(() => {});
+    return;
+  }
+  const accountId = String(session.wizard.data.accountId || "");
+  const meta: ImportedQrMeta = session.wizard.data.preview;
+  const outcome = await applyImportedQrMeta(accountId, adminId, meta);
+  if (!outcome.ok) {
+    if (outcome.reason === "account_mismatch") {
+      clearWizard(adminId);
+      await ctx.reply(
+        "❌ Số tài khoản trong QR KHÔNG khớp tài khoản này. Không lưu — hãy upload QR của đúng tài khoản.",
+        { parse_mode: "HTML" }
+      ).catch(() => {});
+      return;
+    }
+    await ctx.reply(
+      `🟡 <b>Chưa thể bật QR động</b>\nThiếu: ${outcome.readiness.missing.map((m) => escapeHtml(m)).join(", ")}\n\nCấu hình CHƯA được lưu. Hãy chọn 📷 Nhập từ QR ngân hàng bằng QR đầy đủ hơn, hoặc nhập thủ công.`,
+      { parse_mode: "HTML" }
+    ).catch(() => {});
+    return;
+  }
+  clearWizard(adminId);
+  const updated = await PaymentAccountService.getAccountById(accountId);
+  await ctx.reply(
+    `✅ <b>ĐÃ LƯU CẤU HÌNH QR TỪ ẢNH NGÂN HÀNG</b>\n🏦 ${escapeHtml(updated?.bankName || "")} (${updated?.currency})\n` +
+      `QR thanh toán: ${readinessLine(outcome.readiness)}\n` +
+      `Đơn mới sẽ tự tạo QR động đúng số tiền + nội dung chuyển khoản của từng đơn (QR gốc không khóa số tiền/memo).`,
+    { parse_mode: "HTML" }
+  ).catch(() => {});
+}
+
 accountQrMetaHandler.callbackQuery("ops:qrmeta", (ctx) => showAccountQrMetaList(ctx));
 accountQrMetaHandler.callbackQuery(/^ops:qrmeta:edit:([a-zA-Z0-9_-]+)$/, (ctx) => showAccountQrMetaEdit(ctx, ctx.match?.[1] || ""));
+accountQrMetaHandler.callbackQuery(/^ops:qrmeta:import:([a-zA-Z0-9_-]+)$/, (ctx) => startQrImportWizard(ctx, ctx.match?.[1] || ""));
+accountQrMetaHandler.callbackQuery(/^ops:qrmeta:import:confirm:([a-zA-Z0-9_-]+)$/, (ctx) => confirmAccountQrImport(ctx));
 accountQrMetaHandler.callbackQuery(/^ops:qrmeta:wizard:(vietqr|khqr_simple|khqr_merchant):([a-zA-Z0-9_-]+)$/, (ctx) =>
   startAccountQrMetaWizard(ctx, ctx.match?.[1] || "", ctx.match?.[2] || "")
 );

@@ -19,7 +19,8 @@ import { SystemSecretService } from "../../modules/system-config/system-secret-s
 import { EncryptionService } from "../../modules/security/encryption-service.js";
 import { GeminiModelStrategy } from "../../modules/ai/gemini-models.js";
 import { BackupService } from "../../modules/backup/backup-service.js";
-import { formatAdminDate, formatAdminDateTime, formatAdminTime, APP_TIMEZONE } from "../../shared/app-time.js";
+import { formatAdminDate, formatAdminDateTime, APP_TIMEZONE } from "../../shared/app-time.js";
+import { renderAuditRows } from "../admin/audit-view.js";
 
 export const pendingAdminInputs = new Map<string, { action: string; [key: string]: any }>();
 
@@ -593,7 +594,7 @@ adminHandler.command("order", async (ctx) => {
   if (order.stateHistories && order.stateHistories.length > 0) {
     msg += `\n📜 <b>Lịch sử chuyển trạng thái:</b>\n`;
     for (const h of order.stateHistories.slice(-4)) {
-      msg += `• [${h.fromStatus} ➔ ${h.toStatus}] bởi ${h.actorRole} lúc ${formatAdminTime(h.createdAt)} (GMT+7)\n`;
+      msg += `• [${h.fromStatus} ➔ ${h.toStatus}] bởi ${h.actorRole} lúc ${formatAdminDateTime(h.createdAt)} (GMT+7)\n`;
     }
   }
 
@@ -1045,9 +1046,9 @@ adminHandler.callbackQuery(/^staff_audit:(\d+)$/, async (ctx) => {
   if (logs.length === 0) {
     msg += `Chưa có nhật ký hoạt động nào được ghi nhận.`;
   } else {
-    for (const l of logs) {
-      msg += `• [${l.action}] lúc ${formatAdminTime(l.createdAt)} (GMT+7) - ${JSON.stringify(l.details || {})}\n`;
-    }
+    const kbAudit = new InlineKeyboard().text("🔙 Quay lại hồ sơ", `staff_detail:${targetTid}`);
+    const rows = await renderAuditRows(logs, kbAudit, 0, true);
+    msg += rows.join("\n");
   }
 
   const keyboard = new InlineKeyboard().text("🔙 Quay lại hồ sơ", `staff_detail:${targetTid}`);
@@ -1061,9 +1062,9 @@ adminHandler.callbackQuery("staff_audit_all", async (ctx) => {
 
   const logs = await AuditService.getLogs(undefined, 10);
   let msg = `📜 <b>NHẬT KÝ BẢO MẬT &amp; NHÂN SỰ GẦN NHẤT:</b>\n\n`;
-  for (const l of logs) {
-    msg += `• [${l.action}] bởi <code>${l.actorId}</code> (${l.actorRole}) lúc ${formatAdminTime(l.createdAt)} (GMT+7)\n`;
-  }
+  const kbAuditAll = new InlineKeyboard();
+  const rowsAll = await renderAuditRows(logs, kbAuditAll);
+  msg += rowsAll.join("\n");
 
   const keyboard = new InlineKeyboard().text("🔙 Quay lại Menu", "staff_menu");
   await ctx.editMessageText(msg, { parse_mode: "HTML", reply_markup: keyboard });
@@ -1278,10 +1279,10 @@ adminHandler.command("audit", async (ctx) => {
 
   const logs = await AuditService.getLogs(undefined, 10);
   let msg = `🛡 <b>NHẬT KÝ KIỂM TOÁN GẦN NHẤT:</b>\n\n`;
-  for (const l of logs) {
-    msg += `• [${l.action}] bởi <code>${l.actorId}</code> (${l.actorRole}) lúc ${formatAdminTime(l.createdAt)} (GMT+7)\n`;
-  }
-  await ctx.reply(msg, { parse_mode: "HTML" });
+  const kbAuditCmd = new InlineKeyboard();
+  const rowsCmd = await renderAuditRows(logs, kbAuditCmd);
+  msg += rowsCmd.join("\n");
+  await ctx.reply(msg, { parse_mode: "HTML", reply_markup: kbAuditCmd });
 });
 
 // Menu button callbacks
@@ -1434,10 +1435,10 @@ adminHandler.callbackQuery("admin:menu:audit", async (ctx) => {
 
   const logs = await AuditService.getLogs(undefined, 8);
   let msg = `📜 <b>NHẬT KÝ HOẠT ĐỘNG KIỂM TOÁN:</b>\n\n`;
-  for (const l of logs) {
-    msg += `• [${l.action}] bởi <code>${l.actorId}</code> lúc ${formatAdminTime(l.createdAt)} (GMT+7)\n`;
-  }
-  await ctx.reply(msg, { parse_mode: "HTML" });
+  const kbAuditMenu = new InlineKeyboard();
+  const rowsMenu = await renderAuditRows(logs, kbAuditMenu);
+  msg += rowsMenu.join("\n");
+  await ctx.reply(msg, { parse_mode: "HTML", reply_markup: kbAuditMenu });
 });
 
 adminHandler.callbackQuery("admin:menu:system", async (ctx) => {

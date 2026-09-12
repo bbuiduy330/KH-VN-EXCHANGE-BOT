@@ -73,6 +73,59 @@ export async function showBillView(ctx: BotContext, orderId: string): Promise<vo
   }
 }
 
+/**
+ * 🧾 Admin payout-receipt viewer: sends the EXACT stored payout evidence the
+ * Admin uploaded (FileEvidence via Order.payoutBillFileId) — photo OR PDF,
+ * never regenerated or substituted. Read-only: no Order mutation, no resend
+ * to the customer. Requires the payout-approval permission + private chat
+ * (same gate as the receipt resend, since the receipt may expose payout
+ * account details). No fake action when no payout receipt exists.
+ */
+export async function showPayoutEvidenceView(ctx: BotContext, orderId: string): Promise<void> {
+  await ctx.answerCallbackQuery();
+  if (!(await requirePermission(ctx, "payout.approve"))) return;
+  if (!isPrivate(ctx)) return denyNotPrivate(ctx);
+
+  const order = await OrderService.getOrder(orderId);
+  if (!order) {
+    await ctx.reply("❌ Không tìm thấy đơn hàng.").catch(() => {});
+    return;
+  }
+  if (!order.payoutBillFileId) {
+    await ctx.reply(`⚠️ Đơn ${shortOrderId(order.id)} chưa có hóa đơn chi trả nào được lưu.`).catch(() => {});
+    return;
+  }
+
+  // Authoritative stored evidence — the exact file Admin uploaded.
+  const evidence = await prisma.fileEvidence.findUnique({ where: { id: order.payoutBillFileId } });
+  const buffer = evidence?.filePath ? await FileService.getFile(evidence.filePath) : null;
+  if (!buffer || buffer.length === 0) {
+    await ctx.reply(
+      `⚠️ Hóa đơn chi trả của đơn ${shortOrderId(order.id)} không đọc được từ kho lưu trữ.`,
+      { parse_mode: "HTML" }
+    ).catch(() => {});
+    return;
+  }
+
+  const caption =
+    `🧾 <b>Hóa đơn chuyển tiền (Admin đã chi)</b>\n` +
+    `📦 ${shortOrderId(order.id)} · ${STATUS_VI[order.status] || order.status}\n` +
+    `👤 ${escapeHtml(customerLabel(order.customer))}${order.customer?.telegramId ? ` · 🆔 <code>${order.customer.telegramId}</code>` : ""}`;
+  const isPdf = (evidence.mimeType || "").includes("pdf");
+  try {
+    if (isPdf) {
+      await ctx.replyWithDocument(new InputFile(buffer, evidence.fileName || "payout_receipt.pdf"), {
+        caption,
+        parse_mode: "HTML"
+      });
+    } else {
+      await ctx.replyWithPhoto(new InputFile(buffer), { caption, parse_mode: "HTML" });
+    }
+  } catch {
+    await ctx.reply("⚠️ Không gửi được hóa đơn chi trả (tệp không hợp lệ hoặc quá lớn).").catch(() => {});
+  }
+}
+
 /** Step 1 (preview, NO mutation) for incoming-money confirmation. */
 export async function showPayPreview(ctx: BotContext, orderId: string): Promise<void> {
   await ctx.answerCallbackQuery();
@@ -803,6 +856,7 @@ adminActionsHandler.callbackQuery(/^ops:cancel:preview:([a-zA-Z0-9_-]+):([a-z_]+
 adminActionsHandler.callbackQuery(/^ops:cancel:confirm:([a-zA-Z0-9_-]+)$/, (ctx) => confirmCancelOrder(ctx, ctx.match?.[1] || ""));
 
 adminActionsHandler.callbackQuery(/^ops:bill:view:(.+)$/, (ctx) => showBillView(ctx, ctx.match?.[1] || ""));
+adminActionsHandler.callbackQuery(/^ops:payout:view:([a-zA-Z0-9_-]+)$/, (ctx) => showPayoutEvidenceView(ctx, ctx.match?.[1] || ""));
 adminActionsHandler.callbackQuery(/^ops:pay:preview:(.+)$/, (ctx) => showPayPreview(ctx, ctx.match?.[1] || ""));
 adminActionsHandler.callbackQuery(/^ops:pay:confirm:(.+)$/, (ctx) => confirmPayment(ctx, ctx.match?.[1] || ""));
 adminActionsHandler.callbackQuery(/^ops:pay:not_received:(.+)$/, (ctx) => showNotReceived(ctx, ctx.match?.[1] || ""));

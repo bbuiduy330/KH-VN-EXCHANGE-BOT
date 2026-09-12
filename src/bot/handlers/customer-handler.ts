@@ -225,10 +225,11 @@ customerHandler.command("orders", async (ctx) => {
   const telegramId = String(ctx.from?.id || "");
   const customer = await CustomerService.getOrCreateCustomer({ telegramId });
   const locale = locOf(customer);
-  const myOrders = await OrderService.getOrdersForCustomer(customer.id, 10);
+  // My Orders = ACTIVE ONLY (no terminal COMPLETED/CANCELLED history).
+  const myOrders = await OrderService.getActiveOrdersForCustomer(customer.id, 10);
 
   if (myOrders.length === 0) {
-    return ctx.reply(t(locale, "order.list_empty"), {
+    return ctx.reply(t(locale, "order.active_empty"), {
       reply_markup: getCustomerMenuKeyboard(locale)
     });
   }
@@ -499,10 +500,12 @@ customerHandler.callbackQuery("customer:menu:orders", async (ctx) => {
   const telegramId = String(ctx.from?.id || "");
   const customer = await CustomerService.getOrCreateCustomer({ telegramId });
   const locale = locOf(customer);
-  const myOrders = await OrderService.getOrdersForCustomer(customer.id, 10);
+  // My Orders = ACTIVE ONLY: terminal COMPLETED/CANCELLED Orders are never
+  // shown to the customer (history stays in the DB for audit/disputes).
+  const myOrders = await OrderService.getActiveOrdersForCustomer(customer.id, 10);
 
   if (myOrders.length === 0) {
-    return ctx.reply(t(locale, "order.list_empty"), { reply_markup: getCustomerMenuKeyboard(locale) });
+    return ctx.reply(t(locale, "order.active_empty"), { reply_markup: getCustomerMenuKeyboard(locale) });
   }
 
   // P — concise history lines (active Order is shown first via /start).
@@ -799,9 +802,10 @@ async function handleReservedCustomerControl(
       return true;
     }
     case "orders": {
-      const myOrders = await OrderService.getOrdersForCustomer(customer.id, 10);
+      // My Orders = ACTIVE ONLY (no terminal COMPLETED/CANCELLED history).
+      const myOrders = await OrderService.getActiveOrdersForCustomer(customer.id, 10);
       if (myOrders.length === 0) {
-        await ctx.reply(t(locale, "order.list_empty"), { parse_mode: "HTML", reply_markup: getCustomerReplyKeyboard(locale, inHuman) });
+        await ctx.reply(t(locale, "order.active_empty"), { parse_mode: "HTML", reply_markup: getCustomerReplyKeyboard(locale, inHuman) });
       } else {
         let msg = `${t(locale, "order.list_recent_title")}\n\n`;
         for (const o of myOrders.slice(0, 5)) {
@@ -857,6 +861,43 @@ async function handleReservedCustomerControl(
 
 
 // Customer text message handler
+// ---------------------------------------------------------------------------
+// DETERMINISTIC ORDER-STATUS INTENT (financial-safety requirement):
+// status questions are answered from the Order state machine with the real
+// display name + Order reference — NEVER by the conversational AI, and the
+// reply NEVER mentions a SYSTEM receiving account (KHQR UPAY / BIDV /
+// PaymentAccount) as if it were the customer's payout destination.
+// ---------------------------------------------------------------------------
+const STATUS_INTENT_RE =
+  /trạng\s*thái|đơn\s*hàng|kiểm\s*tra\s*(đơn|tiền|giao\s*dịch)|khi\s*nào|xác\s*nhận\s*(chưa|tiền)|nhận\s*tiền\s*chưa|chưa\s*nhận\s*được|biên\s*lai|bill\s*(chưa|khi|của|được)|order\s*status|status\s*of\s*(my\s*)?(order|payment)|my\s*order|when\s*will\s*(i|you)\s*(receive|transfer|send)|payment\s*status|still\s*processing|订单|状态|什么时候|到账|ស្ថានភាព|ការបញ្ជាទិញ/i;
+
+export function isOrderStatusQuestion(text: string): boolean {
+  return STATUS_INTENT_RE.test(String(text || ""));
+}
+
+function statusReplyKey(status: string): string | null {
+  switch (status) {
+    case "WAITING_PAYMENT":
+      return "order.status_reply_wait_pay";
+    // Bill received and being verified (incl. review states) — the required
+    // deterministic reply for the WAITING_ADMIN_VERIFY runtime scenario.
+    case "CUSTOMER_SENT_BILL":
+    case "WAITING_ADMIN_VERIFY":
+    case "MANUAL_REVIEW":
+    case "SUSPICIOUS":
+    case "PAYMENT_MISMATCH":
+      return "order.status_reply_verifying";
+    case "PAYMENT_CONFIRMED":
+      return "order.status_reply_confirmed";
+    case "WAITING_PAYOUT":
+      return "order.status_reply_payout_info";
+    case "PAYOUT_SENT":
+      return "order.status_reply_payout_sent";
+    default:
+      return null; // terminal states never reach here (active-only lookup)
+  }
+}
+
 export async function handleCustomerTextMessage(ctx: BotContext, text: string) {
   if (text.startsWith("/")) return;
 
@@ -909,19 +950,61 @@ export async function handleCustomerTextMessage(ctx: BotContext, text: string) {
   }
 
   // Check active order context
+  // SECURITY: the conversational-AI context carries NO receiving-account
+  // data. SYSTEM receiving accounts (KHQR UPAY / BIDV / PaymentAccount /
+  // receivingAccountSnapshot) are the bot's INCOMING payment rails — they are
+  // NOT the customer's payout destination, and the AI must never mention them
+  // as one. Financial-state answers are built deterministically below.
   const activeOrder = await OrderService.getLatestActiveOrderForCustomer(customer.id);
   let activeOrderContext = null;
   if (activeOrder) {
-    const recv = activeOrder.receivingAccountSnapshot as any;
     activeOrderContext = {
       orderId: activeOrder.id,
       status: activeOrder.status,
       sourceAmount: activeOrder.sourceAmount,
       sourceCurrency: activeOrder.sourceCurrency,
       targetAmount: activeOrder.targetAmount,
-      targetCurrency: activeOrder.targetCurrency,
-      receivingBank: recv?.bankName
+      targetCurrency: activeOrder.targetCurrency
     };
+  }
+
+  // 0c. DETERMINISTIC order-status response (before ANY AI involvement).
+  // When the customer asks about their order/payment status, the bot answers
+  // from the AUTHORITATIVE Order state with the actual display name + Order
+  // reference. The conversational AI never constructs this financial reply.
+  if (activeOrder && isOrderStatusQuestion(text)) {
+    const locale = locOf(customer);
+    const displayName = (customer.fullName || customer.username || "quý khách").trim();
+    const key = statusReplyKey(activeOrder.status as string) || "order.status_reply_verifying";
+    await ctx.reply(
+      t(locale, key, { name: displayName, id: activeOrder.id }),
+      {
+        parse_mode: "HTML",
+        reply_markup:
+          activeOrder.status === "WAITING_PAYMENT"
+            ? getActiveOrderActionKeyboard(activeOrder as any, locale)
+            : getCustomerMenuKeyboard(locale)
+      }
+    );
+    await ConversationService.addMessage({
+      customerId: customer.id,
+      // Deterministic bot answer — NOT AI-generated. `BOT` is a documented
+      // Message.senderType convention (prisma schema comment) so the history
+      // never attributes this financial-state reply to the conversational AI.
+      senderType: "BOT",
+      content: t(locale, key, { name: displayName, id: activeOrder.id })
+    });
+    return;
+  }
+  if (!activeOrder && isOrderStatusQuestion(text)) {
+    // Status question with nothing in progress → deterministic empty answer
+    // (still no AI, no bank/account invention).
+    const locale = locOf(customer);
+    await ctx.reply(t(locale, "order.active_empty"), {
+      parse_mode: "HTML",
+      reply_markup: getCustomerMenuKeyboard(locale)
+    });
+    return;
   }
 
   // 0a (moved above): the payout-input session is intercepted BEFORE the

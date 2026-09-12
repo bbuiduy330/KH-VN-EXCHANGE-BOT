@@ -263,7 +263,7 @@ export class ConversationService {
 
   static async addMessage(data: {
     customerId: string;
-    senderType: "CUSTOMER" | "CSKH" | "SYSTEM" | "AI";
+    senderType: "CUSTOMER" | "CSKH" | "SYSTEM" | "AI" | "BOT";
     senderId?: string;
     content: string;
     originalAudioFileId?: string;
