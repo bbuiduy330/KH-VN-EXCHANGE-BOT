@@ -10,11 +10,9 @@
  *  - Adds a 👤 Xem khách button per resolved customer → Admin customer detail
  *    + transaction history (never make Admin copy a long UUID).
  *
- * NOTE: `admin-audit.ts` (the ops:audit screen) is currently FILE-LOCKED by an
- * external process on this machine and could not be rewritten; it still works
- * with its previous rendering. All editable audit/history surfaces import the
- * shared helpers below. When the lock releases, admin-audit.ts should adopt
- * renderAuditRows too.
+ * NOTE: `admin-audit.ts` (the ops:audit screen) now renders through these
+ * shared helpers too. All editable audit/history surfaces import them so
+ * identity and exact-time formatting stay consistent everywhere.
  */
 import { InlineKeyboard } from "grammy";
 import { prisma } from "../../database/client.js";

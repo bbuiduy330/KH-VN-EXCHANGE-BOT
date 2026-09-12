@@ -110,6 +110,12 @@ describe("Phase A menu simplification and USD/VND-only surfaces", () => {
     expect(json).toContain("customer:menu:quote");
   });
 
+  it("🧹 clear chat is TEMPORARILY hidden from the customer menu (backend stays wired)", () => {
+    const json = JSON.stringify(getCustomerMenuKeyboard());
+    expect(json).not.toContain("customer:menu:clearchat");
+    expect(json).not.toContain("menu.clearchat");
+  });
+
   it("bank wizard keyboard targets the given order currency", () => {
     const json = JSON.stringify(getBankWizardKeyboard("USD"));
     expect(json).toContain("customer:bank:wiz:USD");

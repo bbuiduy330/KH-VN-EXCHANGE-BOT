@@ -16,6 +16,8 @@ import {
 /**
  * Main customer menu. Receiving-account entry is NOT here — those details
  * belong to the order flow only. Includes 🌐 Language.
+ * NOTE: 🧹 Clear chat is TEMPORARILY HIDDEN (deletion reliability pending) —
+ * the backend callback remains wired but is not advertised anywhere.
  */
 export function getCustomerMenuKeyboard(locale: SupportedLocale | string = DEFAULT_LOCALE): InlineKeyboard {
   const loc = resolveLocale(locale);
@@ -24,9 +26,7 @@ export function getCustomerMenuKeyboard(locale: SupportedLocale | string = DEFAU
     .text(t(loc, "menu.orders"), "customer:menu:orders")
     .row()
     .text(t(loc, "menu.support"), "customer:menu:support")
-    .text(t(loc, "menu.language"), "customer:menu:language")
-    .row()
-    .text(t(loc, "menu.clearchat"), "customer:menu:clearchat");
+    .text(t(loc, "menu.language"), "customer:menu:language");
 }
 
 /** Language selector keyboard (vi/en/km/zh). */
