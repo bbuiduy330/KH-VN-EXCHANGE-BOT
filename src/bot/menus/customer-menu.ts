@@ -196,14 +196,12 @@ export function renderQuoteCard(
   const formattedSrc = MoneyService.formatAmount(quote.sourceAmount, quote.sourceCurrency);
   const formattedTgt = MoneyService.formatAmount(quote.targetAmount, quote.targetCurrency);
 
+  // C — concise, action-first quote. One summary line + rate/fee/expiry.
   return (
-    `${t(loc, "quote.title")}\n\n` +
-    `${t(loc, "quote.send", { src: `${formattedSrc} ${quote.sourceCurrency}` })}\n` +
-    `${t(loc, "quote.receive", { tgt: `${formattedTgt} ${quote.targetCurrency}` })}\n` +
+    `${t(loc, "quote.summary", { src: `${formattedSrc} ${quote.sourceCurrency}`, tgt: `${formattedTgt} ${quote.targetCurrency}` })}\n` +
     `${t(loc, "quote.rate", { rate: rateDisplay })}\n` +
     `${t(loc, "quote.fee", { fee: `${quote.fee} ${quote.feeCurrency}` })}\n` +
-    `${t(loc, "quote.expiry", { minutes: expiryMinutes })}\n\n` +
-    t(loc, "quote.confirm_hint")
+    `${t(loc, "quote.expiry", { minutes: expiryMinutes })}`
   );
 }
 

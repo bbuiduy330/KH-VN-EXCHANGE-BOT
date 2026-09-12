@@ -177,12 +177,17 @@ export function orderDetailKeyboard(order: any): InlineKeyboard {
     kb.text("📷 Xem bill", `ops:bill:view:${order.id}`);
   }
 
-  if (["WAITING_ADMIN_VERIFY", "CUSTOMER_SENT_BILL", "MANUAL_REVIEW", "SUSPICIOUS"].includes(status)) {
+  if (["WAITING_ADMIN_VERIFY", "CUSTOMER_SENT_BILL"].includes(status)) {
     kb.row().text("✅ ĐÃ NHẬN TIỀN", `ops:pay:preview:${order.id}`);
     kb.row().text("❌ CHƯA NHẬN ĐƯỢC TIỀN", `ops:pay:not_received:${order.id}`);
+  } else if (["MANUAL_REVIEW", "SUSPICIOUS", "PAYMENT_MISMATCH"].includes(status)) {
+    // J — review states must NEVER dead-end: explicit resolution actions via
+    // the audited manualFinancialOverride (preview → confirm, reason-preserved).
+    kb.row().text("✅ XÁC NHẬN ĐÃ NHẬN TIỀN", `ops:review:confirm:${order.id}`);
+    kb.row().text("❌ CHƯA NHẬN ĐƯỢC TIỀN", `ops:review:notreceived:${order.id}`);
   } else if (status === "WAITING_PAYOUT") {
     if (OrderService.isPayoutReady(order as any)) {
-      kb.row().text("💸 Sẵn sàng payout", `ops:payout:preview:${order.id}`);
+      kb.row().text("💸 SẴN SÀNG THANH TOÁN", `ops:payout:preview:${order.id}`);
     } else {
       // WAITING_PAYOUT without destination = waiting for customer payout info.
       kb.row().text("🟡 Chờ khách gửi TK/QR nhận", `ops:payout:preview:${order.id}`);
@@ -190,6 +195,16 @@ export function orderDetailKeyboard(order: any): InlineKeyboard {
     }
   } else if (status === "PAYOUT_SENT") {
     kb.row().text("✅ Hoàn tất đơn", `ops:payout:complete:preview:${order.id}`);
+    // 7 — safe operational resend: deliver the stored payout receipt again
+    // without touching amounts, state, or payout duplicates.
+    if (order.payoutBillFileId) {
+      kb.row().text("📤 Gửi lại hóa đơn cho khách", `ops:receipt:resend:${order.id}`);
+    }
+  } else if (status === "COMPLETED") {
+    // 7 — resend remains available after completion while the receipt exists.
+    if (order.payoutBillFileId) {
+      kb.row().text("📤 Gửi lại hóa đơn cho khách", `ops:receipt:resend:${order.id}`);
+    }
   }
 
   // Requirement B: explicit two-step Admin cancel (reason → preview → confirm).

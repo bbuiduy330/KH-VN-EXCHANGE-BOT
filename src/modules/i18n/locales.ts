@@ -196,7 +196,7 @@ add("bill.late_cancelled_customer", "✅ Đã nhận được bằng chứng chu
 add("quote.expired_notice", "⚠️ Báo giá đã hết hạn (hiệu lực chỉ 10 phút).\nVui lòng gửi lại số tiền muốn đổi để nhận báo giá mới.", "⚠️ The quote has expired (validity is 10 minutes).\nPlease send the amount you want to exchange again to get a new quote.", "⚠️ សម្រង់តម្លៃផុតកំណត់ហើយ (មានសុពលភាព 10 នាទី)។\nសូមផ្ញើចំនួនទឹកប្រាក់ដែលអ្នកចង់ប្តូរម្តងទៀត ដើម្បីទទួលសម្រង់តម្លៃថ្មី។", "⚠️ 报价已过期（有效期 10 分钟）。\n请重新发送您要兑换的金额以获取新报价。");
 add("payout.before_verified", "ℹ️ Đơn của anh/chị chưa được Admin xác nhận tiền vào. Tài khoản nhận tiền sẽ được yêu cầu ngay sau khi Admin xác nhận.", "ℹ️ Your order is not yet verified for the incoming payment. Your payout account will be requested right after verification.", "ℹ️ ការបញ្ជាទិញរបស់អ្នកមិនទាន់ត្រូវបានបញ្ជាក់ប្រាក់ចូលទេ។ គណនីទទួលប្រាក់នឹងត្រូវសួរភ្លាមៗបន្ទាប់ពីការផ្ទៀងផ្ទាត់។", "ℹ️ 您的订单尚未确认收款。收款账户将在管理员确认后立即向您索取。");
 add("payout.awaiting_info", "💸 Đơn <code>{id}</code>: Admin đã xác nhận tiền vào. Vui lòng chọn tài khoản nhận <b>{currency}</b>:", "💸 Order <code>{id}</code>: payment verified. Please choose your payout account for <b>{currency}</b>:", "💸 ការបញ្ជាទិញ <code>{id}</code>: ប្រាក់ចូលត្រូវបានបញ្ជាក់។ សូមជ្រើសរើសគណនីទទួល <b>{currency}</b>:", "💸 订单 <code>{id}</code>：收款已确认。请选择您的 <b>{currency}</b> 收款账户：");
-add("payout.choose_title", "💸 <b>CHỌN TÀI KHOẢN NHẬN TIỀN</b>", "💸 <b>CHOOSE PAYOUT ACCOUNT</b>", "💸 <b>ជ្រើសរើសគណនីទទួលប្រាក់</b>", "💸 <b>选择收款账户</b>");
+add("payout.choose_title", "✅ <b>ĐÃ NHẬN TIỀN</b>", "✅ <b>PAYMENT VERIFIED</b>", "✅ <b>បានទទួលប្រាក់</b>", "✅ <b>已确认收款</b>");
 add("payout.recent_header", "🕘 Tài khoản đã dùng gần đây (từ các đơn đã hoàn tất của anh/chị):", "🕘 Accounts used recently (from your completed orders):", "🕘 គណនីដែលបានប្រើថ្មីៗ (ពីការបញ្ជាទិញដែលបានបញ្ចប់របស់អ្នក):", "🕘 最近使用的收款账户（来自您已完成的订单）：");
 add("payout.no_recent", "Chưa có tài khoản đã lưu. Anh/chị có thể nhập tài khoản mới hoặc gửi ảnh QR.", "No saved accounts yet. Enter a new account or send a QR.", "មិនទាន់មានគណនីរក្សាទុកទេ។ សូមបញ្ចូលគណនីថ្មី ឬផ្ញើរូបភាព QR។", "暂无已保存账户。请输入新账户或发送 QR 图片。");
 add("payout.new_text", "➕ Tài khoản mới", "➕ New account", "➕ គណនីថ្មី", "➕ 新账户");
@@ -241,7 +241,7 @@ add("bill.received", "✅ Đã nhận biên lai cho đơn <code>{id}</code>. Nh�
 add("bill.error", "❌ Có lỗi khi xử lý biên lai: {error}", "❌ Could not process the receipt: {error}", "❌ មិនអាចដំណើរការបង្កាន់ដៃ: {error}", "❌ 处理回单失败：{error}");
 add("bill.suspicious", "⚠️ <b>Hệ thống phát hiện biên lai có dấu hiệu cần kiểm tra thêm.</b>\nĐơn <code>{id}</code> đã được chuyển sang chế độ bảo mật để Admin kiểm tra trực tiếp.", "⚠️ <b>The receipt shows signs that need extra checking.</b>\nOrder <code>{id}</code> has been moved to secure review for Admin verification.", "⚠️ <b>បង្កាន់ដៃមានសញ្ញាត្រូវពិនិត្យបន្ថែម។</b>\nការបញ្ជាទិញ <code>{id}</code> ត្រូវបានផ្ទេរទៅការពិនិត្យសុវត្ថិភាព។", "⚠️ <b>回单存在需要进一步核实的迹象。</b>\n订单 <code>{id}</code> 已转入安全审核，由管理员直接检查。");
 add("bill.manual_review", "ℹ️ <b>Đã nhận biên lai bổ sung cho đơn {id}.</b>\nĐơn đã được ghi nhận đầy đủ và chuyển Admin kiểm duyệt thủ công.", "ℹ️ <b>Additional receipt received for order {id}.</b>\nThe order is fully recorded and sent to Admin for manual review.", "ℹ️ <b>បានទទួលបង្កាន់ដៃបន្ថែមសម្រាប់ {id}។</b>\nការបញ្ជាទិញត្រូវបានកត់ត្រាពេញលេញ និងផ្ទេរទៅ Admin ពិនិត្យ។", "ℹ️ <b>已收到订单 {id} 的补充回单。</b>\n订单已完整记录，并转交管理员人工审核。");
-add("bill.wait_verify", "✅ Đã nhận được biên lai thanh toán cho đơn <code>{id}</code>.\nAdmin sẽ trực tiếp kiểm tra biến động tài khoản và xác nhận trong giây lát.\nℹ️ Sau khi xác nhận, hệ thống sẽ yêu cầu anh/chị chọn tài khoản nhận tiền.", "✅ Payment receipt received for order <code>{id}</code>.\nAdmin will check the actual account movement and confirm shortly.\nℹ️ After verification, the system will ask you to choose your payout account.", "✅ បានទទួលបង្កាន់ដៃបង់ប្រាក់សម្រាប់ <code>{id}</code>។\nAdmin នឹងពិនិត្យចលនាគណនីជាក់លាក់ និងបញ្ជាក់ឆាប់ៗ។\nℹ️ បន្ទាប់ពីផ្ទៀងផ្ទាត់ ប្រព័ន្ធនឹងសួរអ្នកពីគណនីទទួលប្រាក់។", "✅ 已收到订单 <code>{id}</code> 的付款回单。\n管理员将核实实际账户流水并尽快确认。\nℹ️ 确认后，系统将请您选择收款账户。");
+add("bill.wait_verify", "✅ Đã nhận bill.\nĐang chờ xác nhận thanh toán.", "✅ Receipt received.\nAwaiting payment verification.", "✅ បានទទួលបង្កាន់ដៃ។\nរង់ចាំការផ្ទៀងផ្ទាត់ការទូទាត់។", "✅ 已收到回单。\n正在等待付款确认。");
 add("payout.prompt", "🏦 Để nhận <b>{amount} {currency}</b>, anh/chị vui lòng nhập tài khoản nhận tiền {currency}:", "🏦 To receive <b>{amount} {currency}</b>, please enter your {currency} receiving account:", "🏦 ដើម្បីទទួល <b>{amount} {currency}</b> សូមបញ្ចូលគណនីទទួល {currency}:", "🏦 为接收 <b>{amount} {currency}</b>，请填写您的 {currency} 收款账户：");
 add("support.active_title", "💬 <b>BẠN ĐANG ĐƯỢC NHÂN VIÊN HỖ TRỢ TRỰC TIẾP</b>", "💬 <b>YOU ARE BEING HELPED BY SUPPORT STAFF</b>", "💬 <b>អ្នកកំពុងទទួលជំនួយពីបុគ្គលិក</b>", "💬 <b>客服正在为您服务</b>");
 add("support.active_body", "Anh/chị vui lòng tiếp tục nhắn tin tại khung chat này.\nNhân viên CSKH sẽ phản hồi anh/chị ngay.\n\nMuốn tự đổi tiền theo tỷ giá tự động? Bấm <b>↩️ Quay lại đổi tiền</b>.", "Please continue messaging in this chat.\nA support agent will reply soon.\n\nWant automatic exchange instead? Tap <b>↩️ Back to exchange</b>.", "សូមបន្តផ្ញើសារនៅទីនេះ។\nបុគ្គលិកនឹងឆ្លើយតបឆាប់ៗ។\n\nចង់ផ្លាស់ប្តូរស្វ័យប្រវត្តិ? ចុច <b>↩️ ត្រឡប់ទៅការផ្លាស់ប្តូរ</b>។", "请继续在此聊天留言。\n客服将尽快回复。\n\n若要自动兑换，请点击 <b>↩️ 返回兑换</b>。");
@@ -261,11 +261,24 @@ add("status.WAITING_PAYMENT", "Chờ thanh toán", "Awaiting payment", "រង�
 add("status.CUSTOMER_SENT_BILL", "Đã gửi biên lai", "Receipt sent", "បានផ្ញើបង្កាន់ដៃ", "已发送回单");
 add("status.WAITING_ADMIN_VERIFY", "Chờ đối soát", "Awaiting verification", "រង់ចាំផ្ទៀងផ្ទាត់", "待核对");
 add("status.PAYMENT_CONFIRMED", "Đã xác nhận tiền vào", "Payment confirmed", "បានបញ្ជាក់ការបង់ប្រាក់", "已确认收款");
-add("status.WAITING_PAYOUT", "Chờ chi tiền", "Awaiting payout", "រង់ចាំចំណាយ", "待出款");
+add("status.WAITING_PAYOUT", "Cần thông tin nhận tiền", "Awaiting your bank details", "ត្រូវការព័ត៌មានគណនីទទួល", "待提供收款信息");
 add("status.PAYOUT_SENT", "Đã chi tiền", "Payout sent", "បានចំណាយ", "已出款");
 add("status.MANUAL_REVIEW", "Đang xem xét", "Under review", "កំពុងពិនិត្យ", "人工审核中");
 add("status.SUSPICIOUS", "Cần kiểm tra thêm", "Needs review", "ត្រូវពិនិត្យបន្ថែម", "需进一步检查");
 add("status.COMPLETED", "Hoàn tất", "Completed", "បានបញ្ចប់", "已完成");
 add("status.CANCELLED", "Đã hủy", "Cancelled", "បានលុបចោល", "已取消");
+
+// --- C/P/O simplification + payout fresh-info UX (customer, all locales) ---
+add("payout.verified_prompt", "✅ Đã nhận tiền.\nVui lòng gửi tài khoản hoặc QR nhận tiền.", "✅ Payment verified.\nPlease send your bank account or QR for payout.", "✅ បានទទួលប្រាក់។\nសូមផ្ញើគណនី ឬ QR ទទួលប្រាក់។", "✅ 已确认收款。\n请发送您的收款账户或二维码。");
+add("payout.ask_hint", "Vui lòng gửi tài khoản hoặc QR nhận tiền:", "Please send your bank account or QR:", "សូមផ្ញើគណនី ឬ QR ទទួលប្រាក់:", "请发送收款账户或二维码：");
+add("payout.received_title", "✅ Đã thanh toán.", "✅ Payout sent.", "✅ បានបង់ប្រាក់រួចរាល់។", "✅ 已付款。");
+add("payout.receipt_caption", "Hoá đơn chuyển tiền ở bên dưới.\n📦 #{id}", "Your payout receipt is below.\n📦 #{id}", "វិក្កយបត្របង់ប្រាក់ខាងក្រោម។\n📦 #{id}", "付款凭证如下。\n📦 #{id}");
+add("order.completed_title", "✅ Giao dịch hoàn tất.\n📦 #{id}", "✅ Exchange completed.\n📦 #{id}", "✅ បញ្ចប់ការប្តូរប្រាក់។\n📦 #{id}", "✅ 交易完成。\n📦 #{id}");
+add("order.history_title", "📦 <b>LỊCH SỬ ĐƠN</b>", "📦 <b>ORDER HISTORY</b>", "📦 <b>ប្រវត្តិការបញ្ជាទិញ</b>", "📦 <b>订单历史</b>");
+add("rate.title", "Bạn đánh giá dịch vụ thế nào?", "How would you rate our service?", "តើអ្នកវាយតម្លៃសេវាកម្មយ៉ាងដូចម្តេច?", "您如何评价我们的服务？");
+add("rate.skip", "⏭ Bỏ qua", "⏭ Skip", "⏭ រំលង", "⏭ 跳过");
+add("rate.thanks", "🙏 Cảm ơn phản hồi của bạn!", "🙏 Thanks for your feedback!", "🙏 អរគុណសម្រាប់មតិយោបល់!", "🙏 感谢您的反馈！");
+add("rate.thanks_skip", "👋 Cảm ơn bạn đã sử dụng dịch vụ!", "👋 Thanks for using our service!", "👋 អរគុណសម្រាប់ការប្រើប្រាស់សេវាកម្ម!", "👋 感谢您使用我们的服务！");
+add("quote.summary", "💱 <b>{src} → {tgt}</b>", "💱 <b>{src} → {tgt}</b>", "💱 <b>{src} → {tgt}</b>", "💱 <b>{src} → {tgt}</b>");
 
 export { TRANSLATIONS };

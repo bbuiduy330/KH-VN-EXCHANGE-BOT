@@ -7,6 +7,7 @@ import { prisma, isRealPrismaClient, sanitizeDatabaseError } from "./database/cl
 import { RuntimeConfigService } from "./modules/system-config/runtime-config-service.js";
 import { BackupService } from "./modules/backup/backup-service.js";
 import { startPaymentReminderScheduler, stopPaymentReminderScheduler } from "./modules/orders/payment-reminder-service.js";
+import { PartnerService } from "./modules/partner/partner-service.js";
 
 const app = express();
 app.use(express.json());
@@ -108,6 +109,11 @@ const server = app.listen(PORT, "0.0.0.0", () => {
   // survives restarts because reminder state is re-derived from the database).
   startPaymentReminderScheduler();
 
+  // 2c. Partner/CTV commission reconciliation scheduler (2): DB-derived,
+  // restart-safe HELD→AVAILABLE after hold + missing-commission backstop.
+  // Never auto-pays anything.
+  PartnerService.startReconciliationScheduler();
+
   // 3. Bootstrap Unified Telegram Bot gracefully
   startSingleBot().catch((err) => {
     logger.warn({ err }, "Unified Telegram Bot startup error or token missing");
@@ -119,6 +125,7 @@ process.on("SIGTERM", async () => {
   logger.info("SIGTERM received, gracefully shutting down server and Telegram bot...");
   BackupService.stopScheduler();
   stopPaymentReminderScheduler();
+  PartnerService.stopReconciliationScheduler();
   await stopSingleBot();
   server.close(() => {
     logger.info("HTTP server closed");
@@ -130,6 +137,7 @@ process.on("SIGINT", async () => {
   logger.info("SIGINT received, gracefully shutting down server and Telegram bot...");
   BackupService.stopScheduler();
   stopPaymentReminderScheduler();
+  PartnerService.stopReconciliationScheduler();
   await stopSingleBot();
   server.close(() => {
     logger.info("HTTP server closed");

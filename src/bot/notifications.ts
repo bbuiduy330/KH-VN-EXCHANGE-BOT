@@ -8,6 +8,7 @@ import { MoneyService } from "../modules/money/money-service.js";
 import { OrderService } from "../modules/orders/order-service.js";
 import { getCustomerBillEvidence } from "../modules/orders/bill-evidence.js";
 import { LocalStorageService } from "../modules/storage/local-storage-service.js";
+import { resolveLocale, t } from "../modules/i18n/locales.js";
 
 
 let botInstance: Bot<any> | null = null;
@@ -309,13 +310,22 @@ export async function notifyOrderCreated(order: any, customer: any): Promise<voi
  * PDF document) plus an identity/amount notification. Uses the ONE
  * authoritative evidence reader (getCustomerBillEvidence) so legacy
  * Order.customerBillFileId and evidence-table uploads both resolve.
+ * I — `risk` is an ADMIN-ONLY duplicate/re-upload warning; the customer always
+ * receives a neutral acknowledgment, never an accusation.
  */
-export async function notifyBillReceived(order: any): Promise<void> {
+export async function notifyBillReceived(order: any, opts?: { risk?: "DUPLICATE_BILL" | "ADDITIONAL_BILL" }): Promise<void> {
+  const riskLine =
+    opts?.risk === "DUPLICATE_BILL"
+      ? `⚠️ <b>Bill trùng / bill gửi lại</b> — Vui lòng kiểm tra kỹ trước khi xác nhận.\n`
+      : opts?.risk === "ADDITIONAL_BILL"
+        ? `⚠️ <b>Bill bổ sung / gửi lại</b> — Vui lòng kiểm tra kỹ trước khi xác nhận.\n`
+        : "";
   const text =
     `📷 <b>CÓ BILL MỚI — CHỜ XÁC MINH</b>\n\n` +
     `${customerIdentity(order.customer)}\n` +
     `📦 ${shortId(order.id)}\n` +
     `💱 ${MoneyService.formatMoney(order.sourceAmount, order.sourceCurrency)} → ${MoneyService.formatMoney(order.targetAmount, order.targetCurrency)}\n\n` +
+    riskLine +
     `⚠️ Xử lý tài chính thực hiện trong <b>chat riêng với bot</b> → 🔴 Việc cần xử lý.`;
 
   // GROUP-SAFE READ-ONLY ACTIONS ONLY. ✅ ĐÃ NHẬN TIỀN / ❌ CHƯA NHẬN ĐƯỢC
@@ -364,6 +374,75 @@ export async function notifyBillReceived(order: any): Promise<void> {
   }
 
   await sendToAdminNotificationChat(text, { parse_mode: "HTML", reply_markup: kb });
+}
+
+/**
+ * N — After the Admin's payout evidence is durably stored (PAYOUT_SENT), the
+ * CUSTOMER must receive the actual receipt (photo/image/PDF). Never exposes
+ * filesystem paths. Returns true ONLY if Telegram delivery succeeded.
+ */
+export async function sendPayoutReceiptToCustomer(order: any): Promise<boolean> {
+  const customer = order.customer;
+  if (!customer?.telegramId || !botInstance) return false;
+  const locale = resolveLocale(customer.language);
+  try {
+    const evidenceId = order.payoutBillFileId;
+    if (!evidenceId) {
+      await sendToCustomer(String(customer.telegramId), t(locale, "payout.received_title"), { parse_mode: "HTML" });
+      return false;
+    }
+    const evidence = await prisma.fileEvidence.findUnique({ where: { id: evidenceId } });
+    const buffer = evidence?.filePath ? await LocalStorageService.readFile(evidence.filePath) : null;
+    if (!buffer || buffer.length === 0) {
+      await sendToCustomer(String(customer.telegramId), t(locale, "payout.received_title"), { parse_mode: "HTML" });
+      return false;
+    }
+    const isPdf = (evidence?.mimeType || "").includes("pdf");
+    const chatId = String(customer.telegramId);
+    if (isPdf) {
+      await botInstance.api.sendDocument(chatId, new InputFile(buffer, evidence?.fileName || "receipt.pdf"), {
+        caption: `${t(locale, "payout.received_title")}\n${t(locale, "payout.receipt_caption", { id: order.id })}`,
+        parse_mode: "HTML"
+      });
+    } else {
+      await botInstance.api.sendPhoto(chatId, new InputFile(buffer), {
+        caption: `${t(locale, "payout.received_title")}\n${t(locale, "payout.receipt_caption", { id: order.id })}`,
+        parse_mode: "HTML"
+      });
+    }
+    return true;
+  } catch (err: any) {
+    logger.warn({ err: err?.message, orderRef: order?.id?.slice?.(-6) }, "sendPayoutReceiptToCustomer failed");
+    // Financial state is preserved regardless; tell the customer the money was
+    // sent even when the media could not be delivered.
+    await sendToCustomer(String(customer.telegramId), t(locale, "payout.received_title"), { parse_mode: "HTML" }).catch(() => {});
+    return false;
+  }
+}
+
+/**
+ * O — Completion + optional rating. Rating NEVER blocks financial completion:
+ * the completion message is sent first; rating buttons are pure best-effort
+ * feedback stored as an audit record (no rating schema subsystem).
+ */
+export async function notifyOrderCompletedWithRating(order: any): Promise<void> {
+  const customer = order.customer;
+  if (!customer?.telegramId) return;
+  const locale = resolveLocale(customer.language);
+  const kb = new InlineKeyboard()
+    .text("⭐ 1", `customer:rate:${order.id}:1`)
+    .text("⭐⭐ 2", `customer:rate:${order.id}:2`)
+    .text("⭐⭐⭐ 3", `customer:rate:${order.id}:3`)
+    .row()
+    .text("⭐⭐⭐⭐ 4", `customer:rate:${order.id}:4`)
+    .text("⭐⭐⭐⭐⭐ 5", `customer:rate:${order.id}:5`)
+    .row()
+    .text(t(locale, "rate.skip"), `customer:rate:skip:${order.id}`);
+  await sendToCustomer(
+    String(customer.telegramId),
+    `${t(locale, "order.completed_title", { id: order.id })}\n\n${t(locale, "rate.title")}`,
+    { parse_mode: "HTML", reply_markup: kb }
+  );
 }
 
 /** Event: an order entered WAITING_PAYOUT and Admin must now pay the customer. */
