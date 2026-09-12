@@ -541,6 +541,7 @@ export function previewImportedQr(a: { currency: string; accountNumber?: string;
     lines.push(`🇻🇳 <b>VietQR</b>`);
     lines.push(`🏦 Ngân hàng: <code>${escapeHtml(bank?.bankName || meta.bankBin || "")}</code> (BIN <code>${escapeHtml(meta.bankBin || "")}</code>)`);
     lines.push(`💳 Số TK: <code>${escapeHtml(meta.bankNumber || "")}</code>`);
+    if (meta.service) lines.push(`🧾 Dịch vụ: <code>${escapeHtml(meta.service)}</code>`);
     if (a.accountNumber && meta.bankNumber && String(a.accountNumber) !== String(meta.bankNumber)) {
       lines.push(`⚠️ Số TK trong QR KHÁC số TK của tài khoản này — không thể lưu.`);
     }
