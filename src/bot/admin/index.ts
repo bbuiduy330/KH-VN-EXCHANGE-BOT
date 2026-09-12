@@ -32,7 +32,7 @@ import { adminStaffHandler, handleStaffWizardInput, handleStaffNameInput } from 
 import { adminAiHandler, handleAiKeyInput, handleAiModelInput, handleAiVoiceTestMedia } from "./admin-ai.js";
 import { adminConfigHandler, handleConfigInput } from "./admin-config.js";
 import { adminAuditHandler } from "./admin-audit.js";
-import { adminPartnersHandler, handlePartnerAddInput } from "./admin-partners.js";
+import { adminPartnersHandler, handlePartnerAddInput, handlePartnerBindInput, runPartnerSearch } from "./admin-partners.js";
 import { accountQrMetaHandler, handleAccountQrMetaInput, handleAccountQrImportMedia } from "./account-qr-meta.js";
 
 export const adminOperationsHandler = new Composer<BotContext>();
@@ -105,6 +105,7 @@ export async function handleAdminSessionText(ctx: BotContext, text: string): Pro
     if (kind === "config_edit") return handleConfigInput(ctx, text);
     if (kind === "order_cancel_reason") return handleCancelReasonInput(ctx, text);
     if (kind === "partner_add") return handlePartnerAddInput(ctx, text);
+    if (kind === "partner_bind") return handlePartnerBindInput(ctx, text);
     if (kind.startsWith("qrmeta_")) return handleAccountQrMetaInput(ctx, text);
     if (kind === "account_qr") {
       await ctx.reply("📷 Vui lòng gửi <b>ảnh QR</b> vào khung chat, hoặc gửi /cancel để hủy.", { parse_mode: "HTML" });
@@ -127,6 +128,11 @@ export async function handleAdminSessionText(ctx: BotContext, text: string): Pro
     if (session.searchType === "customer") {
       clearAdminSession(telegramId);
       await runCustomerSearch(ctx, text);
+      return true;
+    }
+    if (session.searchType === "partner") {
+      clearAdminSession(telegramId);
+      await runPartnerSearch(ctx, text);
       return true;
     }
   }

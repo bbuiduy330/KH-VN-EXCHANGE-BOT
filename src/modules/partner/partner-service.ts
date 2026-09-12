@@ -110,6 +110,164 @@ export class PartnerService {
   }
 
   // -----------------------------------------------------------------------
+  // PART C — Authoritative Telegram binding (numeric ID ONLY).
+  // Identity rules: Partner.telegramId is the UNIQUE Telegram login identity;
+  // username/referralCode/Partner.id are NEVER login identity. Binding changes
+  // ONLY the login identity — historical Customer.partnerId / Order.partnerId /
+  // Commission.partnerId / settlements are NEVER rewritten here.
+  // -----------------------------------------------------------------------
+  static isValidTelegramId(raw: string): boolean {
+    return /^\d{4,20}$/.test(String(raw || "").trim());
+  }
+
+  /**
+   * Bind (or rebind) a Partner's Telegram numeric ID.
+   * - Telegram ID can belong to only ONE Partner: a conflicting binding is
+   *   REJECTED with a clear error (never silently reassigned).
+   * - Rebinding an already-bound Partner is allowed ONLY through this
+   *   explicit call (the Admin UI adds its own confirmation step).
+   * - Audited: PARTNER_TELEGRAM_BIND / PARTNER_TELEGRAM_REBIND with internal
+   *   Partner ID + old/new Telegram ID + Admin actor. No secrets logged.
+   */
+  static async bindPartnerTelegram(
+    adminId: string,
+    partnerId: string,
+    newTelegramId: string
+  ): Promise<{ partner: any; rebound: boolean; oldTelegramId: string | null }> {
+    const newTid = String(newTelegramId || "").trim();
+    if (!this.isValidTelegramId(newTid)) {
+      throw new Error("Telegram ID phải là dãy số (4–20 chữ số).");
+    }
+    const partner = await prisma.partner.findUnique({ where: { id: partnerId } });
+    if (!partner) throw new Error("Không tìm thấy CTV.");
+
+    // Conflict: this Telegram ID already belongs to ANOTHER Partner.
+    const existingHolder = await prisma.partner.findUnique({ where: { telegramId: newTid } });
+    if (existingHolder && existingHolder.id !== partnerId) {
+      throw new Error(
+        `Telegram ID ${newTid} đã liên kết với CTV khác (${existingHolder.displayName}). Không thể gán trùng.`
+      );
+    }
+
+    const oldTelegramId = partner.telegramId;
+    if (oldTelegramId === newTid) {
+      return { partner, rebound: false, oldTelegramId }; // no-op, no audit spam
+    }
+    const updated = await prisma.partner.update({
+      where: { id: partnerId },
+      data: { telegramId: newTid }
+    });
+    await AuditService.log({
+      actorId: adminId,
+      actorRole: "ADMIN",
+      action: oldTelegramId ? "PARTNER_TELEGRAM_REBIND" : "PARTNER_TELEGRAM_BIND",
+      targetType: "PARTNER",
+      targetId: partnerId,
+      details: {
+        partnerInternalId: partnerId,
+        oldTelegramId: oldTelegramId ?? null,
+        newTelegramId: newTid,
+        referralCode: partner.referralCode
+      }
+    });
+    return { partner: updated, rebound: Boolean(oldTelegramId), oldTelegramId };
+  }
+
+  /** Remove a Partner's Telegram binding (Admin action, audited). */
+  static async unbindPartnerTelegram(adminId: string, partnerId: string): Promise<any> {
+    const partner = await prisma.partner.findUnique({ where: { id: partnerId } });
+    if (!partner) throw new Error("Không tìm thấy CTV.");
+    const oldTelegramId = partner.telegramId;
+    if (!oldTelegramId) return partner;
+    const updated = await prisma.partner.update({
+      where: { id: partnerId },
+      data: { telegramId: null }
+    });
+    await AuditService.log({
+      actorId: adminId,
+      actorRole: "ADMIN",
+      action: "PARTNER_TELEGRAM_REBIND",
+      targetType: "PARTNER",
+      targetId: partnerId,
+      details: { partnerInternalId: partnerId, oldTelegramId, newTelegramId: null, referralCode: partner.referralCode }
+    });
+    return updated;
+  }
+
+  /** Referred-customer count for the CTV dashboard (aggregate only). */
+  static async countReferredCustomers(partnerId: string): Promise<number> {
+    return prisma.customer.count({ where: { partnerId } });
+  }
+
+  // -----------------------------------------------------------------------
+  // PART J — Partner payout destination (partner-OWN money metadata).
+  // The CTV manages their OWN destination; the Admin views it at settlement.
+  // Audit records the change WITHOUT the full account number (masked).
+  // -----------------------------------------------------------------------
+  static maskAccountNumber(accountNumber: string | null | undefined): string {
+    const n = String(accountNumber || "");
+    if (n.length <= 4) return "****";
+    return `****${n.slice(-4)}`;
+  }
+
+  static async setPayoutDestination(
+    partnerId: string,
+    data: { bankName: string; accountNumber: string; accountName: string }
+  ): Promise<any> {
+    const bank = String(data.bankName || "").trim();
+    const number = String(data.accountNumber || "").trim();
+    const holder = String(data.accountName || "").trim();
+    if (bank.length < 2 || number.length < 4 || holder.length < 2) {
+      throw new Error("Thông tin tài khoản nhận hoa hồng chưa hợp lệ (ngân hàng, số TK, chủ TK).");
+    }
+    const updated = await prisma.partner.update({
+      where: { id: partnerId },
+      data: { payoutBankName: bank, payoutAccountNumber: number, payoutAccountName: holder }
+    });
+    await AuditService.log({
+      actorId: partnerId,
+      actorRole: "SYSTEM",
+      action: "PARTNER_PAYOUT_UPDATED",
+      targetType: "PARTNER",
+      targetId: partnerId,
+      // Never log the full account number:
+      details: { bankName: bank, accountNumberMasked: this.maskAccountNumber(number), accountName: holder }
+    });
+    return updated;
+  }
+
+  static async listPartnerSettlements(partnerId: string, take: number = 10): Promise<any[]> {
+    return prisma.partnerSettlement.findMany({
+      where: { partnerId },
+      orderBy: { createdAt: "desc" },
+      take
+    });
+  }
+
+  /** PART M — search Partners by Telegram ID / referral code / name / short Ref. */
+  static async searchPartners(query: string): Promise<any[]> {
+    const q = String(query || "").trim();
+    if (!q) return [];
+    const upper = q.toUpperCase();
+    const matches = await prisma.partner.findMany({
+      where: {
+        OR: [
+          { telegramId: q },
+          { referralCode: { startsWith: upper } },
+          { displayName: { contains: q } }
+        ]
+      },
+      orderBy: { createdAt: "desc" },
+      take: 10
+    });
+    if (matches.length > 0) return matches;
+    // Short internal Ref (last-6 of the CUID) fallback:
+    const all = await prisma.partner.findMany({ orderBy: { createdAt: "desc" }, take: 100 });
+    return all.filter((p: any) => p.id.toLowerCase().endsWith(q.toLowerCase()));
+  }
+
+
+  // -----------------------------------------------------------------------
   // Referral attribution (T)
   // -----------------------------------------------------------------------
   /**

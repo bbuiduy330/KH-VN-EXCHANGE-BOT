@@ -68,9 +68,13 @@ export async function clearCustomerTelegramChat(customerId: string): Promise<Cle
   });
   // Type-safe collection: Prisma Message.telegramMessageId is Int? (number |
   // null) and the Bot API expects numeric ids — only well-formed integers may
-  // enter the deletion list (null/undefined/invalid are excluded).
+  // enter the deletion list (null/undefined/invalid are excluded). The row
+  // type is EXPLICITLY annotated to the exact Prisma select projection shape
+  // ({ telegramMessageId: number | null }) so the map callback can never
+  // degrade to an implicit-any parameter, even if client types are stale.
+  type TelegramMessageIdRow = { telegramMessageId: number | null };
   const messageIds: number[] = rows
-    .map((row) => row.telegramMessageId)
+    .map((row: TelegramMessageIdRow) => row.telegramMessageId)
     .filter(
       (id): id is number =>
         typeof id === "number" &&

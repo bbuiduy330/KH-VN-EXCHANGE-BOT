@@ -13,7 +13,7 @@
  */
 
 export type AdminSessionMode = "idle" | "search" | "rate_input" | "payout_evidence";
-export type AdminSearchType = "order" | "customer";
+export type AdminSearchType = "order" | "customer" | "partner";
 
 export interface PendingFinancialAction {
   action: "confirm_payment" | "payout" | "complete_payout";
