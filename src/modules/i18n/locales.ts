@@ -125,7 +125,10 @@ add("quote.rate", "• Tỷ giá áp dụng: <b>{rate}</b>", "• Applied rate: 
 add("quote.fee", "• Phí dịch vụ: <b>{fee}</b>", "• Service fee: <b>{fee}</b>", "• ថ្លៃសេវា: <b>{fee}</b>", "• 服务费：<b>{fee}</b>");
 add("quote.expiry", "• Hiệu lực: <i>{minutes} phút</i>", "• Valid for: <i>{minutes} minutes</i>", "• មានសុពលភាព: <i>{minutes} នាទី</i>", "• 有效时间：<i>{minutes} 分钟</i>");
 add("quote.confirm_hint", "Bấm nút dưới đây để tạo đơn và nhận tài khoản chuyển tiền:", "Tap below to create the order and get payment details:", "ចុចខាងក្រោមដើម្បីបង្កើតការបញ្ជាទិញ និងទទួលព័ត៌មានបង់ប្រាក់:", "点击下方创建订单并获取付款信息：");
-add("quote.confirm_btn", "✅ Xác nhận đổi tiền", "✅ Confirm exchange", "✅ បញ្ជាក់ការផ្លាស់ប្តូរ", "✅ 确认兑换");
+// ONE shared customer confirm label — exactly "✅ Confirm" in EVERY locale so
+// customer financial confirm buttons can never drift back to per-locale text.
+add("common.confirm_btn", "✅ Confirm", "✅ Confirm", "✅ Confirm", "✅ Confirm");
+add("quote.confirm_btn", "✅ Confirm", "✅ Confirm", "✅ Confirm", "✅ Confirm");
 
 // Order
 add("order.active_title", "📦 <b>ĐƠN HÀNG CỦA BẠN ĐANG XỬ LÝ</b>", "📦 <b>YOUR ORDER IS IN PROGRESS</b>", "📦 <b>ការបញ្ជាទិញរបស់អ្នកកំពុងដំណើរការ</b>", "📦 <b>您的订单处理中</b>");
@@ -210,7 +213,7 @@ add("payout.preview_account", "• Số tài khoản: <code>{number}</code>", "�
 add("payout.preview_holder", "• Chủ tài khoản: <b>{name}</b>", "• Account holder: <b>{name}</b>", "• ឈ្មោះគណនី: <b>{name}</b>", "• 户名：<b>{name}</b>");
 add("payout.preview_qr", "• Loại: <b>Ảnh QR</b>", "• Type: <b>QR image</b>", "• ប្រភេទ: <b>រូបភាព QR</b>", "• 类型：<b>QR 图片</b>");
 add("payout.confirm_hint", "Anh/chị vui lòng kiểm tra kỹ trước khi xác nhận.", "Please double-check before confirming.", "សូមពិនិត្យម្តងទៀតមុនពេលបញ្ជាក់។", "确认前请仔细核对。");
-add("payout.confirm_btn", "✅ Xác nhận", "✅ Confirm", "✅ បញ្ជាក់", "✅ 确认");
+add("payout.confirm_btn", "✅ Confirm", "✅ Confirm", "✅ Confirm", "✅ Confirm");
 add("payout.edit_btn", "✏️ Sửa", "✏️ Edit", "✏️ កែសម្រួល", "✏️ 修改");
 add("payout.saved", "✅ Đã lưu tài khoản nhận tiền cho đơn <code>{id}</code>.\nNhân viên sẽ chuyển tiền tới tài khoản này.", "✅ Payout account saved for order <code>{id}</code>.\nStaff will send the money to this account.", "✅ បានរក្សាទុកគណនីទទួលប្រាក់សម្រាប់ការបញ្ជាទិញ <code>{id}</code>។\nបុគ្គលិកនឹងផ្ញើប្រាក់ទៅគណនីនេះ។", "✅ 已为订单 <code>{id}</code> 保存收款账户。\n工作人员将向该账户付款。");
 add("payout.qr_attached", "✅ Đã lưu ảnh QR nhận tiền cho đơn <code>{id}</code>.\nNhân viên sẽ dùng QR này khi chuyển tiền cho anh/chị.", "✅ Your QR payout image was saved for order <code>{id}</code>.\nStaff will use this QR when paying you.", "✅ បានរក្សាទុករូបភាព QR ទទួលប្រាក់សម្រាប់ <code>{id}</code>។\nបុគ្គលិកនឹងប្រើ QR នេះពេលផ្ញើប្រាក់។", "✅ 已为订单 <code>{id}</code> 保存收款 QR 图片。\n工作人员付款时将使用此 QR。");
@@ -252,6 +255,19 @@ add("order.status_reply_payout_sent", "Dạ em cảm ơn {name} ạ! Hệ thốn
 // My Orders = ACTIVE ONLY (terminal COMPLETED/CANCELLED never shown; history
 // stays in the DB for audit — this is customer VISIBILITY only).
 add("order.active_empty", "Hiện quý khách không có giao dịch đang xử lý.", "You currently have no transactions in progress.", "បច្ចុប្បន្នអ្នកមិនមានប្រតិបត្តិការកំពុងដំណើរការទេ។", "您目前没有正在处理的交易。");
+// CLEAR CHAT — TELEGRAM MESSAGE CLEANUP ONLY. Never deletes/changes any
+// business record: Customer/Orders/Quotes/FileEvidence/AuditLog/commissions
+// and all backend data remain fully intact (display-only visibility rule).
+add("menu.clearchat", "🧹 Xóa nội dung trò chuyện", "🧹 Clear chat", "🧹 សម្អាតការសន្ទនា", "🧹 清除聊天内容");
+add("clearchat.title", "🧹 <b>Xóa nội dung trò chuyện</b>\n\nBạn muốn làm sạch các tin nhắn trong cuộc trò chuyện này?", "🧹 <b>Clear chat</b>\n\nDo you want to clean up the messages in this conversation?", "🧹 <b>សម្អាតការសន្ទនា</b>\n\nតើអ្នកចង់សម្អាតសារនៅក្នុងការសន្ទនានេះទេ?", "🧹 <b>清除聊天内容</b>\n\n您想清理此对话中的消息吗？");
+add("clearchat.point1", "• Chỉ xóa các tin Telegram mà bot còn có quyền xóa.", "• Only Telegram messages the bot can still delete are removed.", "• លុបតែសារ Telegram ដែល bot នៅអាចលុបបានប៉ុណ្ណោះ។", "• 仅删除机器人仍有权删除的 Telegram 消息。");
+add("clearchat.point2", "• Không hủy giao dịch đang xử lý.", "• In-progress transactions are NOT cancelled.", "• មិនបោះបង់ប្រតិបត្តិការដែលកំពុងដំណើរការទេ។", "• 不会取消正在处理的交易。");
+add("clearchat.point3", "• Hồ sơ giao dịch và dữ liệu đối soát vẫn được hệ thống bảo toàn.", "• Transaction records and reconciliation data remain fully preserved.", "• កំណត់ត្រាប្រតិបត្តិការ និងទិន្នន័យធ្វើឲ្យមានតុល្យភាពនៅតែត្រូវបានរក្សាទុកពេញលេញ។", "• 交易记录和对账数据将完整保留。");
+add("clearchat.btn", "✅ Xóa trò chuyện", "✅ Clear chat", "✅ សម្អាតការសន្ទនា", "✅ 清除聊天");
+add("clearchat.back", "↩️ Quay lại", "↩️ Back", "↩️ ត្រឡប់", "↩️ 返回");
+add("clearchat.done", "✅ Cuộc trò chuyện đã được làm sạch.", "✅ The conversation has been cleaned up.", "✅ ការសន្ទនាត្រូវបានសម្អាតរួចរាល់។", "✅ 对话已清理完毕。");
+add("clearchat.done_partial", "✅ Đã làm sạch các tin nhắn có thể xóa.", "✅ Cleaned up the messages that could be deleted.", "✅ បានសម្អាតសារដែលអាចលុបបាន។", "✅ 已清理可删除的消息。");
+add("clearchat.nothing", "Hiện không có tin nhắn nào có thể xóa.", "There are no messages that can be deleted right now.", "បច្ចុប្បន្នមិនមានសារដែលអាចលុបបានទេ។", "目前没有可删除的消息。");
 add("bill.received", "✅ Đã nhận biên lai cho đơn <code>{id}</code>. Nhân viên sẽ đối soát và phản hồi sớm.", "✅ Receipt received for order <code>{id}</code>. Staff will verify shortly.", "✅ បានទទួលបង្កាន់ដៃសម្រាប់ <code>{id}</code>។ បុគ្គលិកនឹងពិនិត្យឆាប់ៗ។", "✅ 已收到订单 <code>{id}</code> 的回单，工作人员将尽快核对。");
 add("bill.error", "❌ Có lỗi khi xử lý biên lai: {error}", "❌ Could not process the receipt: {error}", "❌ មិនអាចដំណើរការបង្កាន់ដៃ: {error}", "❌ 处理回单失败：{error}");
 add("bill.suspicious", "⚠️ <b>Hệ thống phát hiện biên lai có dấu hiệu cần kiểm tra thêm.</b>\nĐơn <code>{id}</code> đã được chuyển sang chế độ bảo mật để Admin kiểm tra trực tiếp.", "⚠️ <b>The receipt shows signs that need extra checking.</b>\nOrder <code>{id}</code> has been moved to secure review for Admin verification.", "⚠️ <b>បង្កាន់ដៃមានសញ្ញាត្រូវពិនិត្យបន្ថែម។</b>\nការបញ្ជាទិញ <code>{id}</code> ត្រូវបានផ្ទេរទៅការពិនិត្យសុវត្ថិភាព។", "⚠️ <b>回单存在需要进一步核实的迹象。</b>\n订单 <code>{id}</code> 已转入安全审核，由管理员直接检查。");

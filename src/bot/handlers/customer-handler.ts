@@ -18,6 +18,7 @@ import { generateTransferMemo } from "../../modules/orders/transfer-memo.js";
 import { parsePayoutDestinationText, parsePayoutDestinationPipe, parsePayoutDestinationWithAi, decodePayoutQrImage } from "../../modules/orders/payout-destination.js";
 import { getPayoutInputSession, setPayoutInputSession, updatePayoutInputSession, clearPayoutInputSession } from "../state/customer-session.js";
 import { setPendingBillSession, clearPendingBillSession, takePendingBillSession, finishPendingBill } from "../state/pending-bill-session.js";
+import { clearCustomerTelegramChat } from "../../modules/telegram/clear-chat-service.js";
 import { PaymentQrService } from "../../modules/payment-qr/payment-qr-service.js";
 
 /** Mask a payout account number for customer-facing previews (**** + last 4). */
@@ -493,6 +494,59 @@ customerHandler.callbackQuery("customer:menu:quote", async (ctx) => {
     parse_mode: "HTML",
     reply_markup: getCustomerMenuKeyboard(localeQuote)
   });
+});
+
+// 🧹 CLEAR CHAT — TELEGRAM MESSAGE CLEANUP ONLY. Two-step flow: confirmation
+// screen first (explicit bullets), execution only on the explicit ✅ callback.
+// NEVER touches any business record: the only backend operation is a READ of
+// recorded telegramMessageId values; deletions happen via the Telegram API
+// only, on the customer's own private chat.
+customerHandler.callbackQuery("customer:menu:clearchat", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const telegramId = String(ctx.from?.id || "");
+  const customer = await CustomerService.getOrCreateCustomer({ telegramId });
+  const locale = locOf(customer);
+  const kb = new InlineKeyboard()
+    .text(t(locale, "clearchat.btn"), "customer:clearchat:go")
+    .text(t(locale, "clearchat.back"), "customer:clearchat:back");
+  await ctx.reply(
+    t(locale, "clearchat.title") + "\n\n" +
+      t(locale, "clearchat.point1") + "\n" +
+      t(locale, "clearchat.point2") + "\n" +
+      t(locale, "clearchat.point3"),
+    { parse_mode: "HTML", reply_markup: kb }
+  );
+});
+
+customerHandler.callbackQuery("customer:clearchat:back", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const customer = await CustomerService.getOrCreateCustomer({ telegramId: String(ctx.from?.id || "") });
+  const locale = locOf(customer);
+  await ctx.reply(t(locale, "order.active_empty"), { reply_markup: getCustomerMenuKeyboard(locale) }).catch(() => {});
+});
+
+customerHandler.callbackQuery("customer:clearchat:go", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const telegramId = String(ctx.from?.id || "");
+  const customer = await CustomerService.getOrCreateCustomer({ telegramId });
+  const locale = locOf(customer);
+  try {
+    // Telegram-only cleanup: batch-deletes the bot's recorded message ids in
+    // the customer's private chat. Backend rows are READ, never deleted.
+    const result = await clearCustomerTelegramChat(customer.id);
+    if (result.requested === 0) {
+      await ctx.reply(t(locale, "clearchat.nothing"), { reply_markup: getCustomerMenuKeyboard(locale) });
+      return;
+    }
+    // Telegram can refuse older (>48h) messages — the wording only claims what
+    // was actually deleted.
+    const key = result.failed > 0 ? "clearchat.done_partial" : "clearchat.done";
+    await ctx.reply(t(locale, key), { reply_markup: getCustomerMenuKeyboard(locale) });
+  } catch (err: any) {
+    // Failure cleanup must never affect financial data — report and continue.
+    logger.warn({ err: err?.message }, "Clear chat: cleanup failed (business data untouched)");
+    await ctx.reply(t(locale, "clearchat.done_partial"), { reply_markup: getCustomerMenuKeyboard(locale) });
+  }
 });
 
 customerHandler.callbackQuery("customer:menu:orders", async (ctx) => {
@@ -1061,7 +1115,7 @@ export async function handleCustomerTextMessage(ctx: BotContext, text: string) {
               intent.amount
             );
 
-      const keyboard = new InlineKeyboard().text("✅ Xác nhận đổi tiền", `customer:quote:confirm:${quote.id}`);
+      const keyboard = new InlineKeyboard().text(t(locOf(customer), "common.confirm_btn"), `customer:quote:confirm:${quote.id}`);
       const expiryMinutes = RuntimeConfigService.getQuoteExpiryMinutes();
 
       await ctx.reply(renderQuoteCard(quote, expiryMinutes, locOf(customer)), { parse_mode: "HTML", reply_markup: keyboard });
