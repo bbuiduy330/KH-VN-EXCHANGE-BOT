@@ -333,9 +333,15 @@ export class PaymentQrService {
         }
       }
     } catch (err: any) {
-      // Safe warning WITHOUT full account details or QR payloads.
+      // Safe warning WITHOUT full account details or QR payloads. Concise
+      // technical code for server-side diagnostics.
       logger.warn(
-        { err: err?.message, orderRef, currency },
+        {
+          code: currency === "USD" ? "QR_DYNAMIC_KHQR_GENERATION_FAILED" : "QR_DYNAMIC_VIETQR_GENERATION_FAILED",
+          err: err?.message,
+          orderRef,
+          currency
+        },
         "PaymentQr: dynamic generation failed — falling back to configured static QR"
       );
       if (fileBuffer) {
@@ -346,6 +352,14 @@ export class PaymentQrService {
     }
 
     // 2b. No dynamic capability for this currency/account → STATIC fallback.
+    if (currency === "USD" || currency === "VND") {
+      // Concise diagnostic when the FROZEN snapshot lacks dynamic metadata —
+      // this is the exact reason the Admin sees static/text instead of KHQR/VietQR.
+      logger.warn(
+        { code: "QR_DYNAMIC_METADATA_INCOMPLETE", orderRef, currency },
+        "PaymentQr: snapshot lacks dynamic QR metadata — static/text fallback"
+      );
+    }
     if (fileBuffer) {
       return { type: "STATIC", imageBuffer: fileBuffer, amount, currency, memo, orderRef };
     }
