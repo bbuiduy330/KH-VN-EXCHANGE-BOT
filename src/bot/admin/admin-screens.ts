@@ -67,7 +67,8 @@ export async function showRateScreen(ctx: BotContext): Promise<void> {
 export function renderRateDetailText(usdVnd: any): string {
   const lines = ["ℹ️ <b>CHI TIẾT TỶ GIÁ</b>", ""];
   if (!usdVnd) {
-    lines.push("Chưa cấu hình cặp USD/VND.");
+    lines.push("⚠️ Chưa có tỷ giá USD/VND.");
+    lines.push("Vui lòng thiết lập tỷ giá đầu tiên.");
     return lines.join("\n");
   }
   const { effectiveBuy, effectiveSell } = MoneyService.calculateEffectiveRates(usdVnd.baseRate, usdVnd.buyMargin, usdVnd.sellMargin);
