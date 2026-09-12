@@ -8,6 +8,7 @@ import { MoneyService } from "../modules/money/money-service.js";
 import { OrderService } from "../modules/orders/order-service.js";
 import { getCustomerBillEvidence } from "../modules/orders/bill-evidence.js";
 import { LocalStorageService } from "../modules/storage/local-storage-service.js";
+import { FileService } from "../modules/files/file-service.js";
 import { resolveLocale, t } from "../modules/i18n/locales.js";
 import { formatAdminDateTime, formatAdminTime } from "../shared/app-time.js";
 
@@ -553,5 +554,51 @@ export async function notifyLateBillOnCancelledOrder(order: any): Promise<void> 
     .text("📷 Xem bill", `ops:bill:view:${order.id}`)
     .text("📦 Xem đơn", `ops:order:detail:${order.id}`);
   await sendToAdminNotificationChat(text, { parse_mode: "HTML", reply_markup: kb });
+}
+
+
+/**
+ * After Admin marks a settlement PAID (manual, audited — the authoritative
+ * financial action), notify the OWNING CTV only: settlement summary + the
+ * SAME stored payout proof (image → photo, PDF/other → document). No other
+ * CTV or customer ever receives another partner's payout files.
+ */
+export async function notifyPartnerSettlementPaid(settlementId: string): Promise<{ sent: boolean; reason?: string }> {
+  try {
+    const bot = getBotInstance();
+    const settlement = await prisma.partnerSettlement.findUnique({
+      where: { id: settlementId },
+      include: { partner: true }
+    });
+    if (!settlement) return { sent: false, reason: "settlement_missing" };
+    const telegramId = settlement.partner?.telegramId ? String(settlement.partner.telegramId) : "";
+    if (!bot) return { sent: false, reason: "no_bot" };
+    if (!telegramId) return { sent: false, reason: "no_telegram" };
+
+    const text =
+      `💸 <b>HOA HỒNG ĐÃ ĐƯỢC THANH TOÁN</b>\n\n` +
+      `💵 Số tiền: <b>$${Number(settlement.totalUsd ?? 0).toFixed(2)}</b>\n` +
+      `📦 Số hoa hồng: <b>${settlement.itemCount}</b>\n` +
+      `🕒 Thời gian: ${formatAdminDateTime(settlement.paidAt ?? new Date())}\n\n` +
+      `Cảm ơn bạn đã đồng hành! 🤝`;
+    await bot.api.sendMessage(telegramId, text, { parse_mode: "HTML" });
+
+    if (settlement.payoutProofFileId) {
+      const evidence = await prisma.fileEvidence.findUnique({ where: { id: settlement.payoutProofFileId } });
+      const buffer = evidence?.filePath ? await FileService.getFile(evidence.filePath) : null;
+      if (buffer && buffer.length > 0) {
+        const file = new InputFile(buffer, evidence!.fileName || `settlement_${settlement.id.slice(-6)}`);
+        if (String(evidence!.mimeType || "").startsWith("image/")) {
+          await bot.api.sendPhoto(telegramId, file, { caption: "🧾 Bằng chứng chuyển tiền hoa hồng (tham khảo)." });
+        } else {
+          await bot.api.sendDocument(telegramId, file, { caption: "🧾 Bằng chứng chuyển tiền hoa hồng (tham khảo)." });
+        }
+      }
+    }
+    return { sent: true };
+  } catch (err: any) {
+    logger.warn({ err: err?.message, settlementId }, "notifyPartnerSettlementPaid failed");
+    return { sent: false, reason: "error" };
+  }
 }
 

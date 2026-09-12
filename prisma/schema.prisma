@@ -395,6 +395,10 @@ model Partner {
   payoutBankName      String?
   payoutAccountNumber String?
   payoutAccountName   String?
+  // V2 free-form payout destination + reference QR image (FileEvidence id).
+  // Reference information only — Admin manually reviews and pays.
+  payoutDestinationText String?
+  payoutQrFileId        String?
   createdAt           DateTime            @default(now())
   updatedAt           DateTime            @updatedAt
   commissions         Commission[]
@@ -432,6 +436,12 @@ model PartnerSettlement {
   paidAt      DateTime?
   createdBy   String
   note        String?
+  // FROZEN destination used for THIS settlement (never retroactively changed
+  // when the Partner later edits their payout information).
+  payoutDestinationSnapshot Json?
+  // Admin payout proof (FileEvidence id) — reference only, Admin action
+  // (markSettlementPaid) remains the authoritative financial verification.
+  payoutProofFileId String?
   createdAt   DateTime     @default(now())
   updatedAt   DateTime     @updatedAt
   commissions Commission[]
