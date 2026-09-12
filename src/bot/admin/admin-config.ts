@@ -162,7 +162,11 @@ export async function toggleBackup(ctx: BotContext): Promise<void> {
 }
 
 adminConfigHandler.callbackQuery("ops:config", (ctx) => showConfig(ctx));
+// D fix: the Config screen emits BOTH edit buttons — each must have a handler.
+// "ops:config:edit:transfer_memo" was emitted by the keyboard but never
+// registered, so real Telegram answered "chức năng không còn khả dụng".
 adminConfigHandler.callbackQuery("ops:config:edit:notify_chat", (ctx) => startConfigEdit(ctx, "notify_chat"));
+adminConfigHandler.callbackQuery("ops:config:edit:transfer_memo", (ctx) => startConfigEdit(ctx, "transfer_memo"));
 adminConfigHandler.callbackQuery("ops:config:confirm", (ctx) => confirmConfigSave(ctx));
 adminConfigHandler.callbackQuery("ops:config:cancel", (ctx) => cancelConfigWizard(ctx));
 adminConfigHandler.callbackQuery("ops:config:backup:toggle", (ctx) => toggleBackup(ctx));

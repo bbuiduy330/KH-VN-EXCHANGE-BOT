@@ -2,6 +2,7 @@ import { Composer, InlineKeyboard, InputFile } from "grammy";
 import { BotContext } from "../middleware/identity.js";
 import { env } from "../../config/env.js";
 import { logger } from "../../shared/logger.js";
+import { prisma } from "../../database/client.js";
 import { CustomerService } from "../../modules/customer/customer-service.js";
 import { QuoteService } from "../../modules/quotes/quote-service.js";
 import { OrderService } from "../../modules/orders/order-service.js";
@@ -216,7 +217,8 @@ customerHandler.command("help", async (ctx) => {
   });
 });
 
-// /orders command (Postgres direct with pagination)
+// /orders command — P SIMPLIFICATION: concise history (active Order is shown
+// first by /start). Max 5 short lines, friendly localized status labels.
 customerHandler.command("orders", async (ctx) => {
   const telegramId = String(ctx.from?.id || "");
   const customer = await CustomerService.getOrCreateCustomer({ telegramId });
@@ -229,19 +231,15 @@ customerHandler.command("orders", async (ctx) => {
     });
   }
 
-  let msg = `${t(locale, "order.list_title")}\n\n`;
+  let msg = `${t(locale, "order.history_title")}\n\n`;
   for (const o of myOrders.slice(0, 5)) {
     const srcAmt = MoneyService.formatAmount(o.sourceAmount, o.sourceCurrency);
     const tgtAmt = MoneyService.formatAmount(o.targetAmount, o.targetCurrency);
-    msg +=
-      `• ${t(locale, "order.id", { id: o.id })}\n` +
-      `${t(locale, "order.exchange", { src: `${srcAmt} ${o.sourceCurrency}`, tgt: `${tgtAmt} ${o.targetCurrency}` })}\n` +
-      `${t(locale, "order.status", { status: t(locale, `status.${o.status}`) })}\n` +
-      `${t(locale, "order.date", { date: new Date(o.createdAt).toLocaleString("vi-VN") })}\n\n`;
+    msg += `#${o.id.slice(-6)} · ${srcAmt} ${o.sourceCurrency} → ${tgtAmt} ${o.targetCurrency} · ${t(locale, `status.${o.status}`)}\n`;
   }
 
   // E: active unpaid orders keep their full action set reachable from
-  // "My Orders" (💳 info / 📷 bill / 💬 support / ❌ cancel).
+  // history (💳 info / 📷 bill / 💬 support / ❌ cancel).
   const actionable = myOrders.find((o: any) => OrderService.canCustomerCancel(o).allowed);
   await ctx.reply(msg, {
     parse_mode: "HTML",
@@ -505,17 +503,13 @@ customerHandler.callbackQuery("customer:menu:orders", async (ctx) => {
     return ctx.reply(t(locale, "order.list_empty"), { reply_markup: getCustomerMenuKeyboard(locale) });
   }
 
-  let msg = `${t(locale, "order.list_recent_title")}\n\n`;
+  // P — concise history lines (active Order is shown first via /start).
+  let msg = `${t(locale, "order.history_title")}\n\n`;
   for (const o of myOrders.slice(0, 5)) {
     const srcAmt = MoneyService.formatAmount(o.sourceAmount, o.sourceCurrency);
     const tgtAmt = MoneyService.formatAmount(o.targetAmount, o.targetCurrency);
-    msg +=
-      `• ${t(locale, "order.id", { id: o.id })}\n` +
-      `${t(locale, "order.exchange", { src: `${srcAmt} ${o.sourceCurrency}`, tgt: `${tgtAmt} ${o.targetCurrency}` })}\n` +
-      `${t(locale, "order.status", { status: t(locale, `status.${o.status}`) })}\n\n`;
+    msg += `#${o.id.slice(-6)} · ${srcAmt} ${o.sourceCurrency} → ${tgtAmt} ${o.targetCurrency} · ${t(locale, `status.${o.status}`)}\n`;
   }
-  // E: active unpaid orders keep their full action set reachable from
-  // "My Orders" (💳 info / 📷 bill / 💬 support / ❌ cancel).
   const actionable = myOrders.find((o: any) => OrderService.canCustomerCancel(o).allowed);
   await ctx.reply(msg, {
     parse_mode: "HTML",
@@ -870,6 +864,11 @@ export async function handleCustomerTextMessage(ctx: BotContext, text: string) {
   if (payoutSession) {
     const handled = await handlePayoutTextInput(ctx, customer, payoutSession, text);
     if (handled) return;
+  } else if (await tryBindPayoutTextInputFromState(ctx, customer, text)) {
+    // L — session-loss safe: a plain bank line ("vcb 0123456789 nguyen van a")
+    // sent right after payment verification is parsed deterministically and
+    // bound to the ONE eligible WAITING_PAYOUT order via DB state.
+    return;
   }
 
   const conv = await ConversationService.getOrCreateConversation(customer.id);
@@ -1120,24 +1119,21 @@ async function processBillUpload(
   }
 
   if (result.status === "SUSPICIOUS") {
-    await ctx.reply(t(locale, "bill.suspicious", { id: orderId }), { parse_mode: "HTML" });
-
-    await sendToAdminNotificationChat(
-      `🚨 <b>CẢNH BÁO BẢO MẬT: BIÊN LAI TRÙNG LẶP / BẤT THƯỜNG</b>\n` +
-        `• Mã đơn: <code>${orderId}</code>\n` +
-        `. Telegram: <code>${telegramId}</code>\n` +
-        `. Cảnh báo: <b>${result.flagReason}</b>\n` +
-        `Admin vui lòng kiểm tra đối soát thủ công!`,
-      {
-        parse_mode: "HTML",
-        reply_markup: new InlineKeyboard().text("🔍 Kiểm tra đơn", `admin:order:detail:${orderId}`)
-      }
-    );
+    // I — DUPLICATE/RISKY BILL: the customer gets a NEUTRAL success message
+    // (no accusation, no "duplicate" wording). The risk flag is an ADMIN-ONLY
+    // signal in the bill notification; all evidence and flags are preserved.
+    await ctx.reply(t(locale, "bill.wait_verify", { id: orderId }), { parse_mode: "HTML" });
+    const suspiciousOrder = await OrderService.getOrder(orderId);
+    if (suspiciousOrder) {
+      await notifyBillReceived(suspiciousOrder, { risk: "DUPLICATE_BILL" });
+    }
   } else if (result.status === "MANUAL_REVIEW") {
-    await ctx.reply(t(locale, "bill.manual_review", { id: orderId }), { parse_mode: "HTML" });
+    // I — additional/re-uploaded bill: neutral customer message; Admin-only
+    // additional-bill warning. Evidence preserved (MANUAL_REVIEW state).
+    await ctx.reply(t(locale, "bill.wait_verify", { id: orderId }), { parse_mode: "HTML" });
     const additionalBillOrder = await OrderService.getOrder(orderId);
     if (additionalBillOrder) {
-      await notifyBillReceived(additionalBillOrder);
+      await notifyBillReceived(additionalBillOrder, { risk: "ADDITIONAL_BILL" });
     }
   } else if (result.status === "LATE_BILL_CANCELLED") {
     // Late bill after auto-cancel (requirement E): acknowledge locally, the
@@ -1215,38 +1211,30 @@ function payoutPreviewKeyboard(orderId: string, locale: SupportedLocale): Inline
     .text(t(locale, "payout.support_btn"), `customer:payout:support:${orderId}`);
 }
 
-/** Chooser: recent destinations + new text + new QR + support, bound to ONE order. */
+/**
+ * Chooser — B SIMPLIFICATION: NO recent/saved accounts, NO history
+ * suggestions. Every Order requests FRESH payout information after incoming
+ * payment is verified. Historical Order payout snapshots stay in the DB for
+ * audit/history only. Customer options are exactly:
+ *   ⌨️ Gửi tài khoản nhận / 📷 Gửi QR nhận / 💬 Hỗ trợ
+ */
 async function buildPayoutChooser(
   order: any,
   customer: { id: string; username?: string | null; telegramId?: string | null },
   locale: SupportedLocale
 ): Promise<{ text: string; kb: InlineKeyboard }> {
-  const recent = await OrderService.getRecentPayoutDestinations(customer.id, 3);
+  void customer;
   const kb = new InlineKeyboard();
-  const lines = [
-    t(locale, "payout.awaiting_info", { id: order.id, currency: order.targetCurrency }),
-    ""
-  ];
-
-  if (recent.length === 0) {
-    lines.push(t(locale, "payout.no_recent"));
-  } else {
-    lines.push(t(locale, "payout.recent_header"));
-    let idx = 0;
-    for (const dest of recent) {
-      const label = destinationLabel(dest);
-      lines.push(label);
-      kb.text(label.length > 60 ? label.slice(0, 60) : label, `customer:payout:use:${order.id}:${idx}`).row();
-      idx++;
-    }
-  }
+  const text =
+    `${t(locale, "payout.choose_title")}\n\n` +
+    `${t(locale, "payout.ask_hint")}`;
 
   kb.text(t(locale, "payout.new_text"), `customer:payout:newtext:${order.id}`)
     .text(t(locale, "payout.new_qr"), `customer:payout:newqr:${order.id}`)
     .row()
     .text(t(locale, "payout.support_btn"), `customer:payout:support:${order.id}`);
 
-  return { text: `${t(locale, "payout.choose_title")}\n\n${lines.join("\n")}`, kb };
+  return { text, kb };
 }
 
 /**
@@ -1313,57 +1301,10 @@ customerHandler.callbackQuery(/^customer:payout:choose:([a-zA-Z0-9_-]+)$/, async
   await ctx.reply(chooser.text, { parse_mode: "HTML", reply_markup: chooser.kb });
 });
 
-/** Select a recent (historical, COMPLETED-order) destination → confirmation preview. */
-customerHandler.callbackQuery(/^customer:payout:use:([a-zA-Z0-9_-]+):(\d+)$/, async (ctx) => {
-  await ctx.answerCallbackQuery();
-  const orderId = ctx.match?.[1] ?? "";
-  const idx = Number(ctx.match?.[2] ?? "-1");
-  const telegramId = String(ctx.from?.id || "");
-  const customer = await CustomerService.getOrCreateCustomer({ telegramId });
-  const locale = locOf(customer);
-  const order = await OrderService.getOrder(orderId);
-
-  if (!order || order.customerId !== customer.id || order.status !== "WAITING_PAYOUT" || OrderService.isPayoutReady(order as any)) {
-    return ctx.reply(t(locale, "payout.not_ready"));
-  }
-
-  const recent = await OrderService.getRecentPayoutDestinations(customer.id, 3);
-  const dest = recent[idx];
-  if (!dest) return ctx.reply(t(locale, "payout.session_expired"));
-
-  // Snapshot the EXACT historical destination into the CURRENT order only
-  // after the customer confirms — historical orders are never mutated.
-  if (dest.type === "qr") {
-    updatePayoutInputSession(telegramId, {
-      orderId,
-      kind: "qr",
-      pendingPreview: {
-        type: "qr",
-        qrFileId: dest.qrFileId || "",
-        qrFilePath: dest.qrFilePath || "",
-        qrSha256: dest.qrSha256,
-        mimeType: dest.mimeType || "image/png"
-      }
-    });
-  } else {
-    updatePayoutInputSession(telegramId, {
-      orderId,
-      kind: "text",
-      pendingPreview: {
-        type: "text",
-        currency: dest.currency || order.targetCurrency,
-        bankName: dest.bankName || "",
-        accountNumber: dest.accountNumber || "",
-        accountName: dest.accountName || ""
-      }
-    });
-  }
-
-  await ctx.reply(renderPayoutDestinationPreview(dest as any, locale), {
-    parse_mode: "HTML",
-    reply_markup: payoutPreviewKeyboard(orderId, locale)
-  });
-});
+// B REMOVAL: the historical "recent destination" chooser
+// (customer:payout:use) is intentionally GONE from the runtime flow.
+// Every Order collects FRESH payout info; snapshots remain in the DB for
+// audit/history only.
 
 /** Customer chose "new text" → bind session to this order and prompt. */
 customerHandler.callbackQuery(/^customer:payout:newtext:([a-zA-Z0-9_-]+)$/, async (ctx) => {
@@ -1515,6 +1456,48 @@ async function sendPayoutDestinationPromptToCustomerCtx(
  * structured-extraction fallback; ALWAYS a confirmation preview; persistence
  * happens ONLY on the explicit ✅ Confirm callback.
  */
+/**
+ * L — DB-state binding for payout TEXT input when no explicit session exists.
+ * Conservative: only fires when the DETERMINISTIC parser matches AND this
+ * customer has EXACTLY ONE eligible (WAITING_PAYOUT, no destination) order.
+ * Never guesses across multiple orders; never persists without the ✅ preview.
+ * Returns true when the message was consumed.
+ */
+async function tryBindPayoutTextInputFromState(
+  ctx: BotContext,
+  customer: { id: string; telegramId: string; language?: string | null },
+  text: string
+): Promise<boolean> {
+  const parsed = parsePayoutDestinationText(text) || parsePayoutDestinationPipe(text);
+  if (!parsed) return false;
+
+  const eligible = await getEligiblePayoutOrdersForCustomer(customer.id);
+  if (eligible.length === 0) return false;
+
+  const locale = locOf(customer);
+  const telegramId = String(customer.telegramId);
+
+  if (eligible.length > 1) {
+    const kb = new InlineKeyboard();
+    const lines = [t(locale, "payout.choose_title"), "", t(locale, "bill.multi_hint")];
+    for (const o of eligible.slice(0, 5)) {
+      const amount = `${MoneyService.formatAmount(o.targetAmount, o.targetCurrency)} ${o.targetCurrency}`;
+      lines.push(`📦 #${o.id.slice(-6)} · ${amount}`);
+      kb.text(`⌨️ 📦 #${o.id.slice(-6)} (${amount})`, `customer:payout:newtext:${o.id}`).row();
+    }
+    kb.row().text(t(locale, "payout.support_btn"), "customer:menu:support");
+    await ctx.reply(lines.join("\n"), { parse_mode: "HTML", reply_markup: kb });
+    return true;
+  }
+
+  setPayoutInputSession(telegramId, { orderId: eligible[0].id, kind: "text" });
+  const session = getPayoutInputSession(telegramId);
+  if (session) {
+    await handlePayoutTextInput(ctx, customer, session, text);
+  }
+  return true;
+}
+
 async function handlePayoutTextInput(
   ctx: BotContext,
   customer: { id: string; telegramId: string; language?: string | null },
@@ -1574,29 +1557,30 @@ async function handlePayoutTextInput(
 }
 
 /**
- * State-aware payout QR upload. Deterministic decoding is unavailable, so the
+ * Core payout-QR attach used by BOTH the explicit session path and the
+ * DB-state fallback path (K). Deterministic decoding is unavailable, so the
  * ORIGINAL QR image is kept as the authoritative payout destination (no AI
- * fabrication). Attached only when the session binds it to an eligible order.
+ * fabrication). Re-validates ownership + WAITING_PAYOUT + not-ready.
  */
-async function handlePayoutQrUpload(
+async function attachPayoutQrImage(
   ctx: BotContext,
   customer: { id: string; telegramId: string; language?: string | null },
-  session: { orderId: string; kind: string }
+  order: any,
+  clearSession: boolean
 ): Promise<void> {
   const telegramId = String(customer.telegramId);
   const locale = locOf(customer);
 
-  const order = await OrderService.getOrder(session.orderId);
-  if (!order || order.customerId !== customer.id || order.status !== "WAITING_PAYOUT" || OrderService.isPayoutReady(order as any)) {
-    clearPayoutInputSession(telegramId);
+  // Authoritative re-check (K): ownership + WAITING_PAYOUT + no confirmed
+  // destination. A stale path must never overwrite payout details.
+  const fresh = await OrderService.getOrder(order.id);
+  if (!fresh || fresh.customerId !== customer.id || fresh.status !== "WAITING_PAYOUT" || OrderService.isPayoutReady(fresh as any)) {
+    if (clearSession) clearPayoutInputSession(telegramId);
     await ctx.reply(t(locale, "payout.not_ready"));
     return;
   }
+  order = fresh;
 
-  // Requirement I: while the customer is EXPLICITLY in a payout-QR session,
-  // both Telegram photos AND image documents are treated as payout QR. The
-  // message is consumed here and can never fall through to bill handling.
-  // A non-image document is rejected (stays in session) — never routed as bill.
   const photo = ctx.message?.photo?.length ? ctx.message.photo[ctx.message.photo.length - 1] : undefined;
   const document = (ctx.message as any)?.document as any;
   if (!photo && !document) return;
@@ -1662,7 +1646,7 @@ async function handlePayoutQrUpload(
       qrSha256: evidence.sha256,
       mimeType
     });
-    clearPayoutInputSession(telegramId);
+    if (clearSession) clearPayoutInputSession(telegramId);
 
     await ctx.reply(t(locale, "payout.qr_attached", { id: order.id }), { parse_mode: "HTML" });
     if (shouldNotifyPayoutReady(updated)) {
@@ -1673,6 +1657,87 @@ async function handlePayoutQrUpload(
     await ctx.reply(t(locale, "payout.qr_invalid"), { parse_mode: "HTML" });
   }
 }
+
+/**
+ * K — Explicit payout-QR session path (kept for wizard-bound uploads).
+ */
+async function handlePayoutQrUpload(
+  ctx: BotContext,
+  customer: { id: string; telegramId: string; language?: string | null },
+  session: { orderId: string; kind: string }
+): Promise<void> {
+  const telegramId = String(customer.telegramId);
+  const locale = locOf(customer);
+
+  const order = await OrderService.getOrder(session.orderId);
+  if (!order || order.customerId !== customer.id || order.status !== "WAITING_PAYOUT" || OrderService.isPayoutReady(order as any)) {
+    clearPayoutInputSession(telegramId);
+    await ctx.reply(t(locale, "payout.not_ready"));
+    return;
+  }
+
+  // Requirement I: while the customer is EXPLICITLY in a payout-QR session,
+  // both Telegram photos AND image documents are treated as payout QR. The
+  // message is consumed here and can never fall through to bill handling.
+  await attachPayoutQrImage(ctx, customer, order, true);
+}
+
+// S/X — Partner/CTV self-service: aggregate-only, NO customer data exposed.
+// Invisible to normal customers (silent no-op) — attribution stays private.
+customerHandler.command("ctv", async (ctx) => {
+  const telegramId = String(ctx.from?.id || "");
+  const { PartnerService } = await import("../../modules/partner/partner-service.js");
+  const { getBotInstance } = await import("../notifications.js");
+  const partner = await PartnerService.getPartnerByTelegramId(telegramId);
+  if (!partner || partner.status !== "ACTIVE") {
+    return; // non-partners: fully silent
+  }
+  const summary = await PartnerService.partnerSummary(partner.id);
+  const me = (getBotInstance() as any)?.botInfo?.username as string | undefined;
+  const link = me ? `https://t.me/${me}?start=${PartnerService.referralPayload(partner)}` : null;
+  const usd = (d: any) => `$${Number(d ?? 0).toFixed(2)}`;
+  await ctx.reply(
+    `🤝 <b>CTV CỦA TÔI</b>\n\n` +
+      `📦 Đơn hoàn tất đủ điều kiện: <b>${summary.eligibleCompleted}</b>\n` +
+      `💵 Hoa hồng HELD: <b>${usd(summary.held)}</b>\n` +
+      `💵 AVAILABLE: <b>${usd(summary.available)}</b>\n` +
+      `💵 PAID: <b>${usd(summary.paid)}</b>\n\n` +
+      (link ? `🔗 Link giới thiệu:\n<code>${link}</code>` : `🔗 Link giới thiệu: liên hệ Admin.`),
+    { parse_mode: "HTML" }
+  );
+});
+
+// O — OPTIONAL post-completion rating (never blocks financial completion).
+// Stored as a best-effort audit record (no rating schema subsystem).
+customerHandler.callbackQuery(/^customer:rate:skip:([a-zA-Z0-9_-]+)$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const locale = locOf(await CustomerService.getOrCreateCustomer({ telegramId: String(ctx.from?.id || "") }));
+  await ctx.reply(t(locale, "rate.thanks_skip"), { parse_mode: "HTML" }).catch(() => {});
+});
+
+customerHandler.callbackQuery(/^customer:rate:([a-zA-Z0-9_-]+):([1-5])$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const orderId = ctx.match?.[1] || "";
+  const rating = Number(ctx.match?.[2] || "0");
+  const telegramId = String(ctx.from?.id || "");
+  const customer = await CustomerService.getOrCreateCustomer({ telegramId });
+  const locale = locOf(customer);
+  try {
+    await prisma.auditLog.create({
+      data: {
+        actorId: telegramId,
+        actorRole: "CUSTOMER",
+        action: "CUSTOMER_RATING",
+        targetType: "ORDER",
+        targetId: orderId,
+        details: { rating }
+      }
+    });
+  } catch {
+    // Rating is best-effort only — never blocks or corrupts financial state.
+  }
+  await ctx.reply(t(locale, "rate.thanks"), { parse_mode: "HTML" }).catch(() => {});
+});
 
 // Customer photo or document handler (Safe Bill Target Selection)
 //
@@ -1699,7 +1764,30 @@ export async function handleCustomerPhoto(ctx: BotContext) {
 
   const locale = locOf(customer);
 
-  // 2. Reserved bill evidence routing (beats the generic HUMAN relay).
+  // 2. K — DB-STATE payout routing (session-loss safe). If the customer has
+  // exactly ONE Order in WAITING_PAYOUT without a confirmed destination, an
+  // incoming safe image IS the payout QR — even if the in-memory session was
+  // lost (restart). Never falls into bill handling or the "no billable order"
+  // dead end. Multiple eligible orders → explicit selection, no guessing.
+  const payoutEligible = await getEligiblePayoutOrdersForCustomer(customer.id);
+  if (payoutEligible.length === 1) {
+    await attachPayoutQrImage(ctx, customer as any, payoutEligible[0], false);
+    return;
+  }
+  if (payoutEligible.length > 1) {
+    const kb = new InlineKeyboard();
+    const lines = [t(locale, "payout.choose_title"), "", t(locale, "bill.multi_hint")];
+    for (const o of payoutEligible.slice(0, 5)) {
+      const amount = `${MoneyService.formatAmount(o.targetAmount, o.targetCurrency)} ${o.targetCurrency}`;
+      lines.push(`📦 #${o.id.slice(-6)} · ${amount}`);
+      kb.text(`📷 📦 #${o.id.slice(-6)} (${amount})`, `customer:payout:newqr:${o.id}`).row();
+    }
+    kb.row().text(t(locale, "payout.support_btn"), "customer:menu:support");
+    await ctx.reply(lines.join("\n"), { parse_mode: "HTML", reply_markup: kb });
+    return;
+  }
+
+  // 3. Reserved bill evidence routing (beats the generic HUMAN relay).
   const awaitingOrders = await OrderService.getOrdersAwaitingBill(customer.id);
 
   if (awaitingOrders.length > 0) {

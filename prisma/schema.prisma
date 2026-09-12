@@ -116,18 +116,22 @@ model PaymentAccountVersion {
 }
 
 model Customer {
-  id           String               @id @default(cuid())
-  telegramId   String               @unique
-  username     String?
-  fullName     String?
-  phone        String?
-  language     String               @default("vi")
-  createdAt    DateTime             @default(now())
-  updatedAt    DateTime             @updatedAt
-  payoutBanks  CustomerPayoutBank[]
-  orders       Order[]
-  quotes       Quote[]
-  conversation Conversation?
+  id                String               @id @default(cuid())
+  telegramId        String               @unique
+  username          String?
+  fullName          String?
+  phone             String?
+  language          String               @default("vi")
+  // Partner/CTV attribution (S/T): nullable, assigned only via referral claim
+  // or Admin reassignment; NEVER overwritten by a second referral link.
+  partnerId         String?
+  partnerAssignedAt DateTime?
+  createdAt         DateTime             @default(now())
+  updatedAt         DateTime             @updatedAt
+  payoutBanks       CustomerPayoutBank[]
+  orders            Order[]
+  quotes            Quote[]
+  conversation      Conversation?
 }
 
 model CustomerPayoutBank {
@@ -147,6 +151,9 @@ model Order {
   id                       String              @id @default(cuid())
   customerId               String
   customer                 Customer            @relation(fields: [customerId], references: [id])
+  // T — immutable attribution snapshot taken at Order creation; history never
+  // changes even if the customer's assignment is later corrected by Admin.
+  partnerId                String?
   sourceCurrency           String
   targetCurrency           String
   sourceAmount             Decimal             @db.Decimal(18, 6)
@@ -177,6 +184,7 @@ model Order {
 
   @@index([status])
   @@index([customerId])
+  @@index([partnerId])
 }
 
 model OrderStateHistory {
@@ -348,4 +356,67 @@ model AdminInputSession {
 
   @@index([staffId])
   @@index([expiresAt])
+}
+
+// ===========================================================================
+// Partner / CTV core (S–W). Attribution-only: Partners NEVER see customer
+// financial/private data. Commissions are created idempotently on COMPLETED
+// orders (unique orderId) and settled in Admin batches.
+// ===========================================================================
+model Partner {
+  id                  String              @id @default(cuid())
+  referralCode        String              @unique
+  telegramId          String?             @unique
+  displayName         String
+  status              String              @default("ACTIVE") // ACTIVE | DISABLED
+  // Commission configuration (U). spreadSharePercent is reserved for the
+  // DEFERRED spread bonus; commission engine currently applies base only.
+  baseCommissionUsd   Decimal             @default(1) @db.Decimal(18, 6)
+  spreadSharePercent  Decimal             @default(0) @db.Decimal(9, 4)
+  holdHours           Int                 @default(72)
+  // Partner's OWN payout metadata (safe — this is partner money, not
+  // customer data).
+  payoutBankName      String?
+  payoutAccountNumber String?
+  payoutAccountName   String?
+  createdAt           DateTime            @default(now())
+  updatedAt           DateTime            @updatedAt
+  commissions         Commission[]
+  settlements         PartnerSettlement[]
+}
+
+model Commission {
+  id                String            @id @default(cuid())
+  orderId           String            @unique
+  partnerId         String
+  partner           Partner           @relation(fields: [partnerId], references: [id])
+  baseCommissionUsd Decimal           @db.Decimal(18, 6)
+  spreadBonusUsd    Decimal           @default(0) @db.Decimal(18, 6)
+  totalUsd          Decimal           @db.Decimal(18, 6)
+  status            String            @default("HELD") // HELD | AVAILABLE | PAID | REVERSED
+  availableAt       DateTime?
+  riskFlag          String?
+  settlementId      String?
+  settlement        PartnerSettlement? @relation(fields: [settlementId], references: [id])
+  paidAt            DateTime?
+  reversedReason    String?
+  createdAt         DateTime          @default(now())
+  updatedAt         DateTime          @updatedAt
+
+  @@index([partnerId, status])
+}
+
+model PartnerSettlement {
+  id          String       @id @default(cuid())
+  partnerId   String
+  partner     Partner      @relation(fields: [partnerId], references: [id])
+  totalUsd    Decimal      @db.Decimal(18, 6)
+  itemCount   Int
+  status      String       @default("PENDING") // PENDING | PAID
+  paidAt      DateTime?
+  createdBy   String
+  note        String?
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+  commissions Commission[]
 }

@@ -12,14 +12,15 @@ import { env } from "../../config/env.js";
 import { OrderService } from "../../modules/orders/order-service.js";
 import { FileService } from "../../modules/files/file-service.js";
 import { MoneyService } from "../../modules/money/money-service.js";
-import { sendToCustomer, notifyPayoutReady, notifyAwaitingPayoutInfo, shouldNotifyPayoutReady, notifyOrderCancelledByAdmin, customerIdentity } from "../notifications.js";
+import { sendToCustomer, notifyPayoutReady, notifyAwaitingPayoutInfo, shouldNotifyPayoutReady, notifyOrderCancelledByAdmin, customerIdentity, sendPayoutReceiptToCustomer, notifyOrderCompletedWithRating } from "../notifications.js";
 import { escapeHtml, STATUS_VI } from "../menus/cskh-panel.js";
 import { customerLabel, shortOrderId, maskAccountNumber } from "./admin-panel.js";
 import { sendPayoutDestinationPromptToCustomer } from "../handlers/customer-handler.js";
-import { getCustomerBillEvidence } from "../../modules/orders/bill-evidence.js";
+import { getCustomerBillEvidence, hasCustomerBillEvidence } from "../../modules/orders/bill-evidence.js";
 import { clearAdminSession, clearPendingFinancialAction, getAdminSession, setPendingFinancialAction, setPayoutEvidenceSession, setPendingAction, consumePendingAction, startWizard, clearWizard } from "./admin-session.js";
 import { ADMIN_CANCEL_REASONS, adminCancelReasonLabel } from "../../modules/orders/order-safety.js";
 import { resolveLocale, t } from "../../modules/i18n/locales.js";
+import { AuditService } from "../../modules/audit/audit-service.js";
 
 export const adminActionsHandler = new Composer<BotContext>();
 
@@ -400,10 +401,15 @@ export async function handleAdminPayoutEvidenceMedia(ctx: BotContext): Promise<b
   try {
     const updated = await OrderService.submitPayoutBill(orderId, telegramId, buffer, `payout_${orderId}.${ext}`, mimeType);
     clearAdminSession(telegramId);
+    // N — the CUSTOMER must receive the exact payout receipt that was stored.
+    const receiptDelivered = await sendPayoutReceiptToCustomer(updated).catch(() => false);
     const kb = new InlineKeyboard().text("✅ Hoàn tất đơn", `ops:payout:complete:preview:${updated.id}`);
     await ctx.reply(
       `📤 <b>ĐÃ GHI NHẬN BẰNG CHỨNG CHI TRẢ</b>\n\n` +
         `📦 ${shortOrderId(updated.id)} → <b>Đã chi tiền (PAYOUT_SENT)</b>\n` +
+        (receiptDelivered
+          ? `📨 Hoá đơn đã gửi cho khách.\n`
+          : `⚠️ KHÔNG gửi được hoá đơn cho khách — khách đã nhận thông báo "đã thanh toán"; vui lòng kiểm tra.\n`) +
         `Bấm <b>✅ Hoàn tất đơn</b> để kết thúc.`,
       { parse_mode: "HTML", reply_markup: kb }
     );
@@ -478,13 +484,8 @@ export async function confirmCompletePayout(ctx: BotContext, orderId: string): P
   try {
     const completed = await OrderService.completePayout(orderId, adminId);
     clearPendingFinancialAction(adminId);
-    const customer = completed.customer;
-    if (customer) {
-      await sendToCustomer(
-        customer.telegramId,
-        `🎉 <b>GIAO DỊCH HOÀN TẤT!</b>\n\nĐơn ${shortOrderId(completed.id)} đã hoàn tất. Cảm ơn bạn đã sử dụng dịch vụ!`
-      );
-    }
+    // O — localized completion + OPTIONAL rating (never blocks completion).
+    await notifyOrderCompletedWithRating(completed).catch(() => {});
     await ctx.reply(`🎉 <b>ĐƠN HÀNG HOÀN TẤT</b>\n\n📦 ${shortOrderId(completed.id)} → <b>COMPLETED</b>`, { parse_mode: "HTML" });
   } catch (err: any) {
     await ctx.reply(`❌ Hoàn tất thất bại: ${escapeHtml(err?.message || "Lỗi không xác định")}`, { parse_mode: "HTML" }).catch(() => {});
@@ -678,6 +679,108 @@ async function confirmCancelOrder(ctx: BotContext, orderId: string): Promise<voi
   }
 }
 
+// ===========================================================================
+// J — Review-state resolution (SUSPICIOUS / MANUAL_REVIEW / PAYMENT_MISMATCH).
+// Uses the audited manualFinancialOverride: preview → final confirm, strict
+// actor+reason audit, original evidence/risk flags preserved in history.
+// ===========================================================================
+
+const REVIEW_CONFIRM_REASON = "Admin xác nhận đã nhận tiền sau kiểm tra thủ công (bằng chứng hợp lệ)";
+const REVIEW_NOTRECEIVED_REASON = "Admin xác nhận CHƯA nhận tiền sau kiểm tra thủ công — huỷ giữ nguyên bằng chứng";
+
+function reviewKeyboard(orderId: string, kind: "confirm" | "notreceived"): InlineKeyboard {
+  return new InlineKeyboard()
+    .text("✅ XÁC NHẬN THỰC HIỆN", `ops:review:${kind}:go:${orderId}`)
+    .row()
+    .text("❌ KHÔNG", `ops:order:detail:${orderId}`);
+}
+
+async function showReviewResolvePreview(ctx: BotContext, orderId: string, kind: "confirm" | "notreceived"): Promise<void> {
+  await ctx.answerCallbackQuery();
+  if (!(await requirePermission(ctx, "payment.verify"))) return;
+  if (!isPrivate(ctx)) return denyNotPrivate(ctx);
+
+  const order = await OrderService.getOrder(orderId);
+  if (!order) {
+    await ctx.reply("❌ Không tìm thấy đơn hàng.").catch(() => {});
+    return;
+  }
+  if (!["MANUAL_REVIEW", "SUSPICIOUS", "PAYMENT_MISMATCH", "CUSTOMER_SENT_BILL"].includes(order.status)) {
+    await ctx.reply(`⚠️ Đơn không còn ở trạng thái xem xét (hiện tại: <b>${STATUS_VI[order.status] || order.status}</b>).`, { parse_mode: "HTML" }).catch(() => {});
+    return;
+  }
+
+  const text =
+    `⚠️ <b>${kind === "confirm" ? "XÁC NHẬN TIỀN SAU KIỂM TRA" : "CHƯA NHẬN TIỀN — GIỮ BẰNG CHỨNG, HUỶ ĐƠN"}</b>\n\n` +
+    `${customerIdentity(order.customer)}\n` +
+    `📦 ${shortOrderId(order.id)}\n` +
+    `📷 Bill: ${hasCustomerBillEvidence(order) ? "CÓ (giữ nguyên trong kho lưu trữ)" : "Không"}\n` +
+    `📍 Hiện tại: <b>${STATUS_VI[order.status] || order.status}</b>\n\n` +
+    (kind === "confirm"
+      ? `Sau xác nhận: <b>Chờ giải ngân (WAITING_PAYOUT)</b> — khách sẽ được hỏi tài khoản nhận tiền.\n`
+      : `Sau xác nhận: <b>Đã huỷ (CANCELLED)</b> — mọi bằng chứng/cờ rủi ro được GIỮ NGUYÊN trong lịch sử.\n`) +
+    `📝 Lý do ghi vào audit: <i>${kind === "confirm" ? REVIEW_CONFIRM_REASON : REVIEW_NOTRECEIVED_REASON}</i>\n\n` +
+    `Xác nhận thực hiện?`;
+
+  const kb = reviewKeyboard(orderId, kind);
+  if (ctx.callbackQuery) {
+    try {
+      await ctx.editMessageText(text, { parse_mode: "HTML", reply_markup: kb });
+      return;
+    } catch {
+      /* fall through */
+    }
+  }
+  await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb });
+}
+
+async function confirmReviewResolve(ctx: BotContext, orderId: string, kind: "confirm" | "notreceived"): Promise<void> {
+  await ctx.answerCallbackQuery();
+  if (!(await requirePermission(ctx, "payment.verify"))) return;
+  if (!isPrivate(ctx)) return denyNotPrivate(ctx);
+  const adminId = String(ctx.from?.id || "");
+
+  const order = await OrderService.getOrder(orderId);
+  if (!order || !["MANUAL_REVIEW", "SUSPICIOUS", "PAYMENT_MISMATCH", "CUSTOMER_SENT_BILL"].includes(order.status)) {
+    await ctx.reply("⚠️ Đơn không còn ở trạng thái xem xét — không thể can thiệp.").catch(() => {});
+    return;
+  }
+
+  try {
+    const updated = await OrderService.manualFinancialOverride({
+      orderId,
+      actorId: adminId,
+      actorRole: "ADMIN",
+      targetStatus: kind === "confirm" ? "WAITING_PAYOUT" : "CANCELLED",
+      reason: kind === "confirm" ? REVIEW_CONFIRM_REASON : REVIEW_NOTRECEIVED_REASON
+    });
+
+    const customer = updated?.customer || order.customer;
+    if (kind === "confirm") {
+      if (customer?.telegramId) {
+        const locale = resolveLocale(customer.language);
+        await sendToCustomer(String(customer.telegramId), t(locale, "payout.verified_prompt", { id: order.id }), { parse_mode: "HTML" });
+      }
+      await notifyAwaitingPayoutInfo(updated).catch(() => {});
+    } else if (customer?.telegramId) {
+      const locale = resolveLocale(customer.language);
+      await sendToCustomer(String(customer.telegramId), t(locale, "order.cancelled_by_admin", { id: orderId, reason: "Kiểm tra thanh toán không thành công" }), { parse_mode: "HTML" }).catch(() => {});
+    }
+
+    await ctx.reply(
+      `✅ <b>ĐÃ XỬ LÝ ${shortOrderId(orderId)}</b> → <b>${kind === "confirm" ? "WAITING_PAYOUT" : "CANCELLED"}</b>\n📝 Lý do + actor đã ghi audit; bằng chứng giữ nguyên.`,
+      { parse_mode: "HTML" }
+    ).catch(() => {});
+  } catch (err: any) {
+    await ctx.reply(`❌ Can thiệp thất bại: ${escapeHtml(err?.message || "Lỗi không xác định")}`, { parse_mode: "HTML" }).catch(() => {});
+  }
+}
+
+adminActionsHandler.callbackQuery(/^ops:review:confirm:([a-zA-Z0-9_-]+)$/, (ctx) => showReviewResolvePreview(ctx, ctx.match?.[1] || "", "confirm"));
+adminActionsHandler.callbackQuery(/^ops:review:notreceived:([a-zA-Z0-9_-]+)$/, (ctx) => showReviewResolvePreview(ctx, ctx.match?.[1] || "", "notreceived"));
+adminActionsHandler.callbackQuery(/^ops:review:confirm:go:([a-zA-Z0-9_-]+)$/, (ctx) => confirmReviewResolve(ctx, ctx.match?.[1] || "", "confirm"));
+adminActionsHandler.callbackQuery(/^ops:review:notreceived:go:([a-zA-Z0-9_-]+)$/, (ctx) => confirmReviewResolve(ctx, ctx.match?.[1] || "", "notreceived"));
+
 adminActionsHandler.callbackQuery(/^ops:cancel:reason:(.+)$/, (ctx) => showCancelReasonChoice(ctx, ctx.match?.[1] || ""));
 adminActionsHandler.callbackQuery(/^ops:cancel:custom:([a-zA-Z0-9_-]+)$/, async (ctx) => {
   await ctx.answerCallbackQuery();
@@ -728,6 +831,45 @@ adminActionsHandler.callbackQuery(/^ops:payout:nudge:(.+)$/, async (ctx) => {
 });
 adminActionsHandler.callbackQuery(/^ops:payout:complete:preview:(.+)$/, (ctx) => showCompletePayoutPreview(ctx, ctx.match?.[1] || ""));
 adminActionsHandler.callbackQuery(/^ops:payout:complete:confirm:(.+)$/, (ctx) => confirmCompletePayout(ctx, ctx.match?.[1] || ""));
+
+// 7 — Receipt resend (operational, non-financial):
+// reload Order → require stored payout evidence → FileService read → send the
+// EXACT stored receipt. Changes NO amounts, NO Order state, NO payout; safe
+// even after COMPLETED. Private Admin only; attempt + result audited.
+adminActionsHandler.callbackQuery(/^ops:receipt:resend:([a-zA-Z0-9_-]+)$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  if (!(await requirePermission(ctx, "payout.approve"))) return;
+  if (!isPrivate(ctx)) return denyNotPrivate(ctx);
+  const adminId = String(ctx.from?.id || "");
+  const order = await OrderService.getOrder(ctx.match?.[1] || "");
+  if (!order) {
+    await ctx.reply("❌ Không tìm thấy đơn hàng.").catch(() => {});
+    return;
+  }
+  if (!order.payoutBillFileId) {
+    await ctx.reply("⚠️ Đơn không có hoá đơn chi trả nào đã lưu.").catch(() => {});
+    return;
+  }
+  const delivered = await sendPayoutReceiptToCustomer(order).catch(() => false);
+  try {
+    await AuditService.log({
+      actorId: adminId,
+      actorRole: "ADMIN",
+      action: "PAYOUT_RECEIPT_RESEND",
+      targetType: "ORDER",
+      targetId: order.id,
+      details: { delivered, payoutBillFileId: order.payoutBillFileId }
+    });
+  } catch {
+    // audit best-effort; delivery result is still reported to the Admin
+  }
+  await ctx.reply(
+    delivered
+      ? `✅ Đã gửi lại hoá đơn cho khách (đơn ${shortOrderId(order.id)}).`
+      : `⚠️ KHÔNG gửi được hoá đơn cho khách (đơn ${shortOrderId(order.id)}). Trạng thái tài chính không đổi; kiểm tra kết nối/khách block bot.`,
+    { parse_mode: "HTML" }
+  ).catch(() => {});
+});
 
 
 

@@ -203,16 +203,18 @@ export function getOperationsCenterKeyboard(): InlineKeyboard {
     .text("👥 Khách hàng", "ops:customers")
     .text("💬 CSKH", "ops:cskh")
     .row()
+    .text("🤝 CTV", "ops:partners")
     .text("💱 Tỷ giá", "ops:rates")
+    .row()
     .text("🏦 Tài khoản thanh toán", "ops:accounts")
-    .row()
     .text("👨‍💼 Nhân viên", "ops:staff")
+    .row()
     .text("🤖 AI", "ops:ai")
-    .row()
     .text("⚙️ Cấu hình", "ops:config")
-    .text("📜 Nhật ký", "ops:audit")
     .row()
+    .text("📜 Nhật ký", "ops:audit")
     .text("❓ Hướng dẫn", "ops:help")
+    .row()
     .text("⌨️ Lệnh nâng cao", "ops:advanced");
 }
 

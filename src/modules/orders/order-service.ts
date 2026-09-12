@@ -88,11 +88,20 @@ export class OrderService {
         }
       : null;
 
+    // T — immutable Partner attribution snapshot at Order creation: taken from
+    // the customer's CURRENT assignment once, so later corrections never
+    // rewrite historical attribution.
+    const customerRow = await prisma.customer.findUnique({
+      where: { id: customerId },
+      select: { partnerId: true }
+    });
+
     const order = await prisma.$transaction(async (tx: any) => {
       const created = await tx.order.create({
         data: {
           id: orderId,
           customerId,
+          partnerId: customerRow?.partnerId ?? null,
           sourceCurrency: quote.sourceCurrency,
           targetCurrency: quote.targetCurrency,
           sourceAmount: quote.sourceAmount,
@@ -760,6 +769,7 @@ export class OrderService {
    * PAYOUT_SENT -> COMPLETED
    */
   static async completePayout(orderId: string, adminId: string) {
+    const { PartnerService } = await import("../partner/partner-service.js");
     const updated = await prisma.$transaction(async (tx: any) => {
       const result = await tx.order.updateMany({
         where: {
@@ -800,6 +810,13 @@ export class OrderService {
         tx
       );
 
+      // 1 — in-transaction ATTEMPT (fail-safe): the Order COMPLETED transition
+      // and the commission attempt share the transaction, but commission
+      // errors are swallowed by onOrderCompleted, so the Order still commits
+      // successfully even if affiliate accounting fails. The authoritative
+      // guarantee is reconcileMissingCommissions() (eventual consistency).
+      await PartnerService.onOrderCompleted(orderId, tx).catch(() => {});
+
       return tx.order.findUnique({
         where: { id: orderId },
         include: { customer: true }
@@ -810,6 +827,11 @@ export class OrderService {
     LocalStorageService.archiveFullOrder(orderId).catch((err) => {
       logger.warn({ err, orderId }, "Failed to archive full order on completion");
     });
+
+    // Approach B backstop: also run the idempotent reconciliation for THIS
+    // order (covers any swallowed commission error above). No-op when the
+    // same-transaction creation already succeeded.
+    await PartnerService.onOrderCompleted(orderId).catch(() => {});
 
     return updated;
   }

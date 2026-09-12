@@ -74,6 +74,18 @@ mainRouter.command("start", async (ctx) => {
     return;
   }
 
+  // S/T — Partner/CTV referral claim (invisible to the customer unless the
+  // link is invalid — no customer-facing attribution UX, no partner exposure).
+  if (match && match.startsWith("ref_")) {
+    try {
+      const { PartnerService } = await import("../modules/partner/partner-service.js");
+      await PartnerService.claimReferral(match.trim(), telegramId);
+    } catch {
+      // Non-blocking: a bad/expired referral link must never break /start.
+    }
+    // Fall through to the normal role routing below.
+  }
+
   // Route based on UserType
   const userType = ctx.identity?.userType;
   if (userType === "SUPER_ADMIN" || userType === "ADMIN") {
