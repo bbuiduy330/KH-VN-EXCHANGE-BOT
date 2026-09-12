@@ -118,12 +118,13 @@ mainRouter.on("message:photo", async (ctx) => {
   }
   // Per-admin payout-evidence session (before generic staff media relay).
   if (userType === "ADMIN" || userType === "SUPER_ADMIN") {
+    // 📷 QR import wizard MUST be intercepted FIRST — an active qrmeta_import
+    // session is never starved by the other Admin media handlers.
+    if (await handleAccountQrImportMedia(ctx)) return;
     // SYSTEM receiving-account QR sessions (add-wizard QR step + account QR
     // update) take precedence — they are bound to the selected account.
     if (await handleAccountAddQrMedia(ctx)) return;
     if (await handleAccountQrUpdateMedia(ctx)) return;
-    // 📷 QR import wizard (upload existing bank QR → decode → configure).
-    if (await handleAccountQrImportMedia(ctx)) return;
     if (await handleAdminPayoutEvidenceMedia(ctx)) return;
   }
   // Staff media must NEVER be interpreted as customer bill evidence.

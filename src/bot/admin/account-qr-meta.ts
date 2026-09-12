@@ -558,11 +558,37 @@ export function previewImportedQr(a: { currency: string; accountNumber?: string;
  * are rejected before download); PNG/JPEG magic bytes validated by the local
  * decoder. NO external HTTP decoding service — decode is in-process.
  */
+/**
+ * Router-level intake for the 📷 QR import wizard (photo OR document).
+ *
+ * NEVER-SILENT: returns `true` for any update it consumes and ALWAYS replies
+ * with either a preview or an explicit Vietnamese error — an unexpected
+ * exception is caught in the wrapper below and surfaced to the Admin too.
+ * Intake precedence: called FIRST among the Admin media handlers (see router)
+ * so an active qrmeta_import wizard can never be starved by the generic
+ * Admin/CSKH/customer media relay.
+ */
 export async function handleAccountQrImportMedia(ctx: BotContext): Promise<boolean> {
+  try {
+    return await runQrImportMediaFlow(ctx);
+  } catch (err: any) {
+    logger.error({ err: err?.message }, "QR import: unexpected failure during media intake");
+    await ctx.reply(
+      `❌ Có lỗi khi xử lý ảnh QR: ${escapeHtml(err?.message || "lỗi không xác định")}.\nVui lòng thử gửi lại ảnh, hoặc gửi /cancel để hủy.`,
+      { parse_mode: "HTML" }
+    ).catch(() => {});
+    return true;
+  }
+}
+
+async function runQrImportMediaFlow(ctx: BotContext): Promise<boolean> {
   const adminId = String(ctx.from?.id || "");
   const session = getAdminSession(adminId);
   if (!session.wizard || session.wizard.kind !== "qrmeta_import") return false;
-  await ctx.answerCallbackQuery().catch(() => {});
+  // NOTE (runtime silence fix): a photo/document update has NO callback query.
+  // The previous `ctx.answerCallbackQuery()` call here could throw/escape on
+  // message updates, killing the handler before ANY reply — the reported
+  // total silence for both KHQR and VietQR images. It is removed.
   if (ctx.chat?.type !== "private") {
     // QR/account configuration is a private-chat financial-config action.
     await ctx.reply("⚠️ Vui lòng thực hiện cấu hình QR trong <b>chat riêng với bot</b>.", { parse_mode: "HTML" }).catch(() => {});
@@ -588,6 +614,11 @@ export async function handleAccountQrImportMedia(ctx: BotContext): Promise<boole
     await ctx.reply("❌ Vui lòng gửi ẢNH QR (PNG/JPG) — tệp này không phải ảnh.").catch(() => {});
     return true;
   }
+
+  // NEVER-SILENT contract: every failure path below replies with an explicit
+  // Vietnamese Admin message; the outer catch logs the technical reason
+  // server-side (no secrets) so an unexpected failure can never vanish.
+  logger.info({ adminId, accountId: session.wizard.data.accountId }, "QR import: media intake reached");
 
   const accountId = String(session.wizard.data.accountId || "");
   const a = await PaymentAccountService.getAccountById(accountId);
