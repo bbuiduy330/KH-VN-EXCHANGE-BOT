@@ -2097,6 +2097,25 @@ customerHandler.callbackQuery("ctv:payout:confirm:go", async (ctx) => {
   }
 });
 
+// 🔔 Marketing opt-out (C9) — controls ONLY Broadcast/outreach messages.
+// Order status, payment verification, payout, support and security
+// notifications are NEVER suppressed by this setting.
+customerHandler.callbackQuery("customer:menu:marketing", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const telegramId = String(ctx.from?.id || "");
+  const customer = await CustomerService.getOrCreateCustomer({ telegramId });
+  const locale = locOf(customer);
+  const next = customer.marketingEnabled === false; // currently off → turn on
+  await prisma.customer.update({
+    where: { id: customer.id },
+    data: { marketingEnabled: next }
+  });
+  await ctx.reply(
+    t(locale, next ? "marketing.toggled_on" : "marketing.toggled_off"),
+    { parse_mode: "HTML", reply_markup: getCustomerMenuKeyboard(locale) }
+  );
+});
+
 // O — OPTIONAL post-completion rating (never blocks financial completion).
 // Stored as a best-effort audit record (no rating schema subsystem).
 customerHandler.callbackQuery(/^customer:rate:skip:([a-zA-Z0-9_-]+)$/, async (ctx) => {

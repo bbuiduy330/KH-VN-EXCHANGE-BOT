@@ -26,7 +26,9 @@ export function getCustomerMenuKeyboard(locale: SupportedLocale | string = DEFAU
     .text(t(loc, "menu.orders"), "customer:menu:orders")
     .row()
     .text(t(loc, "menu.support"), "customer:menu:support")
-    .text(t(loc, "menu.language"), "customer:menu:language");
+    .text(t(loc, "menu.language"), "customer:menu:language")
+    .row()
+    .text(t(loc, "menu.marketing"), "customer:menu:marketing");
 }
 
 /** Language selector keyboard (vi/en/km/zh). */

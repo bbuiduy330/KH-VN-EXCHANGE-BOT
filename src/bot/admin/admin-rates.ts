@@ -123,6 +123,8 @@ export function getRateManagementKeyboard(hasRate = true): InlineKeyboard {
     .row()
     .text("⚡ Điều chỉnh nhanh", "ops:rate:quick:menu")
     .row()
+    .text("📣 Thông báo tỷ giá", "ops:broadcast:rate")
+    .row()
     .text("ℹ️ Chi tiết tỷ giá", "ops:rates:detail")
     .text("🏠 Menu Admin", "ops:home");
 }

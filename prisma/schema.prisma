@@ -134,6 +134,10 @@ model Customer {
   fullName          String?
   phone             String?
   language          String               @default("vi")
+  // Broadcast/marketing reachability (C9/C2): marketing opt-out suppresses
+  // ONLY Broadcast campaigns — never order/payment/payout/support messages.
+  marketingEnabled  Boolean              @default(true)
+  telegramReachable Boolean              @default(true)
   // Partner/CTV attribution (S/T): nullable, assigned only via referral claim
   // or Admin reassignment; NEVER overwritten by a second referral link.
   partnerId         String?
@@ -445,4 +449,50 @@ model PartnerSettlement {
   createdAt   DateTime     @default(now())
   updatedAt   DateTime     @updatedAt
   commissions Commission[]
+}
+
+// ---------------------------------------------------------------------------
+// Broadcast / customer outreach (Part C) — additive only.
+// Audience is SNAPSHOTTED into BroadcastRecipient rows BEFORE sending so the
+// campaign target can never change midway. No Telegram secrets are stored.
+// ---------------------------------------------------------------------------
+model BroadcastCampaign {
+  id                  String    @id @default(cuid())
+  title               String?
+  createdByTelegramId String
+  // DRAFT | READY | SENDING | COMPLETED | CANCELLED | FAILED (String-status
+  // convention, consistent with the rest of the project).
+  status              String    @default("DRAFT")
+  // ALL | FILTER | LIST | ONE_CUSTOMER
+  audienceType        String
+  audienceFilter      Json?
+  content             Json
+  totalRecipients     Int       @default(0)
+  sentCount           Int       @default(0)
+  failedCount         Int       @default(0)
+  blockedCount        Int       @default(0)
+  createdAt           DateTime  @default(now())
+  confirmedAt         DateTime?
+  startedAt           DateTime?
+  completedAt         DateTime?
+  recipients          BroadcastRecipient[]
+}
+
+model BroadcastRecipient {
+  id         String            @id @default(cuid())
+  campaignId String
+  campaign   BroadcastCampaign @relation(fields: [campaignId], references: [id])
+  customerId String
+  // Snapshot at snapshot-time (never re-resolved mid-campaign):
+  telegramId String
+  locale     String?
+  // PENDING | SENT | FAILED | BLOCKED
+  status     String            @default("PENDING")
+  attempts   Int               @default(0)
+  lastError  String?
+  sentAt     DateTime?
+  createdAt  DateTime          @default(now())
+
+  @@unique([campaignId, customerId])
+  @@index([campaignId, status])
 }

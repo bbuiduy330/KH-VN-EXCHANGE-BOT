@@ -124,6 +124,7 @@ mainRouter.on("message:photo", async (ctx) => {
     if (await handleAccountAddQrMedia(ctx)) return;
     if (await handleAccountQrUpdateMedia(ctx)) return;
     if (await handleSettlementProofMedia(ctx)) return;
+    if (await handleBroadcastComposerPhoto(ctx)) return;
     if (await handleAdminPayoutEvidenceMedia(ctx)) return;
   }
   // Staff media must NEVER be interpreted as customer bill evidence.
@@ -155,6 +156,7 @@ mainRouter.on("message:document", async (ctx) => {
     // 📷 QR import wizard also accepts QR images sent as documents.
     if (await handleAccountQrImportMedia(ctx)) return;
     if (await handleSettlementProofMedia(ctx)) return;
+    if (await handleBroadcastComposerPhoto(ctx)) return;
     if (await handleAdminPayoutEvidenceMedia(ctx)) return;
   }
   if (userType === "ADMIN" || userType === "SUPER_ADMIN" || userType === "CSKH") {
