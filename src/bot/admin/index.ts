@@ -33,11 +33,12 @@ import { adminAiHandler, handleAiKeyInput, handleAiModelInput, handleAiVoiceTest
 import { adminConfigHandler, handleConfigInput } from "./admin-config.js";
 import { adminAuditHandler } from "./admin-audit.js";
 import { adminPartnersHandler, handlePartnerAddInput, handlePartnerBindInput, runPartnerSearch, handleSettlementProofMedia } from "./admin-partners.js";
+import { adminBroadcastHandler, handleBroadcastComposerText, handleBroadcastComposerPhoto } from "./admin-broadcast.js";
 import { accountQrMetaHandler, handleAccountQrMetaInput, handleAccountQrImportMedia } from "./account-qr-meta.js";
 
 export const adminOperationsHandler = new Composer<BotContext>();
 
-export { handleAdminPayoutEvidenceMedia, handleAiVoiceTestMedia, showOperationsCenter, handleAccountAddQrMedia, handleAccountQrUpdateMedia, handleAccountQrImportMedia, handleSettlementProofMedia };
+export { handleAdminPayoutEvidenceMedia, handleAiVoiceTestMedia, showOperationsCenter, handleAccountAddQrMedia, handleAccountQrUpdateMedia, handleAccountQrImportMedia, handleSettlementProofMedia, handleBroadcastComposerPhoto };
 
 adminOperationsHandler.use(adminOrdersHandler);
 adminOperationsHandler.use(adminActionsHandler);
@@ -52,6 +53,7 @@ adminOperationsHandler.use(adminStaffHandler);
 adminOperationsHandler.use(adminAiHandler);
 adminOperationsHandler.use(adminConfigHandler);
 adminOperationsHandler.use(adminAuditHandler);
+adminOperationsHandler.use(adminBroadcastHandler);
 
 adminOperationsHandler.callbackQuery("ops:home", (ctx) => showOperationsCenter(ctx));
 
@@ -106,6 +108,7 @@ export async function handleAdminSessionText(ctx: BotContext, text: string): Pro
     if (kind === "order_cancel_reason") return handleCancelReasonInput(ctx, text);
     if (kind === "partner_add") return handlePartnerAddInput(ctx, text);
     if (kind === "partner_bind") return handlePartnerBindInput(ctx, text);
+    if (kind === "broadcast_compose") return handleBroadcastComposerText(ctx, text);
     if (kind.startsWith("qrmeta_")) return handleAccountQrMetaInput(ctx, text);
     if (kind === "account_qr") {
       await ctx.reply("📷 Vui lòng gửi <b>ảnh QR</b> vào khung chat, hoặc gửi /cancel để hủy.", { parse_mode: "HTML" });

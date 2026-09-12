@@ -15,7 +15,13 @@ import { customerLabel, shortOrderId } from "./admin-panel.js";
 import { customerIdentity } from "../notifications.js";
 import { setAdminSearch } from "./admin-session.js";
 import { clearSelectedCustomer, getSelectedCustomer, setSelectedCustomer } from "../state/staff-chat-session.js";
-import { formatAdminDate } from "../../shared/app-time.js";
+import { formatAdminDate, formatAdminDateTime } from "../../shared/app-time.js";
+import {
+  computeCrmStats,
+  computeCompletedVolume,
+  computeRiskLevel,
+  orderStatusIcon
+} from "../../modules/crm/customer-crm.js";
 
 export const adminCustomersHandler = new Composer<BotContext>();
 
@@ -81,20 +87,60 @@ export function customerDetailKeyboard(customer: any, latestOrder: any): InlineK
   return kb;
 }
 
+/**
+ * Customer mini-CRM overview (Part B) — computed on demand from authoritative
+ * DB rows; advisory UI only (never blocks an Order, never financial authority).
+ */
+export function renderCrmOverview(orders: any[], lastTransactionAt: Date | string | null): string {
+  const stats = computeCrmStats(orders);
+  const rate = stats.cancellationRatePct === null ? "—" : `${stats.cancellationRatePct}%`;
+  const vol = computeCompletedVolume(orders);
+  const risk = computeRiskLevel(orders);
+  const riskLabel =
+    risk.level === "HIGH" ? "🔴 Rủi ro cao" : risk.level === "WATCH" ? "🟡 Cần theo dõi" : "🟢 Bình thường";
+  const lines = [
+    "📊 <b>GIAO DỊCH</b>",
+    `✅ Hoàn tất: <b>${stats.completed}</b> · ❌ Đã hủy: <b>${stats.cancelled}</b> · ⏳ Active: <b>${stats.active}</b>`,
+    `📉 Tỷ lệ hủy: <b>${rate}</b>`,
+    "",
+    "💰 <b>Khối lượng hoàn tất</b>",
+    `USD → VND: <b>${vol.usdToVnd ? `${MoneyService.formatAmount(vol.usdToVnd, "USD")} USD` : "—"}</b>`,
+    `VND → USD: <b>${vol.vndToUsd ? `${MoneyService.formatAmount(vol.vndToUsd, "VND")} VND` : "—"}</b>`,
+    "",
+    riskLabel,
+    ...risk.reasons.map((r) => `• ${escapeHtml(r)}`),
+    "",
+    `🕒 Giao dịch gần nhất: ${lastTransactionAt ? escapeHtml(formatAdminDateTime(lastTransactionAt)) : "—"}`
+  ];
+  return lines.join("\n");
+}
+
 export async function showCustomerDetail(ctx: BotContext, customerId: string): Promise<void> {
   const customer = await prisma.customer.findUnique({ where: { id: customerId } });
   if (!customer) {
     await ctx.reply("❌ Không tìm thấy khách hàng.").catch(() => {});
     return;
   }
-  const [conv, latestOrder, latestQuote] = await Promise.all([
+  const [conv, latestOrder, latestQuote, crmOrders] = await Promise.all([
     prisma.conversation.findUnique({ where: { customerId } }),
     OrderService.getLatestActiveOrderForCustomer(customerId),
-    QuoteService.getLatestActiveQuote(customerId)
+    QuoteService.getLatestActiveQuote(customerId),
+    prisma.order.findMany({
+      where: { customerId },
+      orderBy: { createdAt: "desc" },
+      take: 200,
+      select: { status: true, sourceCurrency: true, sourceAmount: true, createdAt: true }
+    })
   ]);
+  const lastTransactionAt = crmOrders.length > 0 ? crmOrders[0].createdAt : null;
 
-  const text = renderCustomerDetailText(customer, conv, latestOrder, latestQuote);
+  const text =
+    renderCustomerDetailText(customer, conv, latestOrder, latestQuote) +
+    "\n\n" +
+    renderCrmOverview(crmOrders, lastTransactionAt);
   const kb = customerDetailKeyboard(customer, latestOrder);
+  // 📨 Gửi thông báo → Broadcast composer preselected for THIS customer (C11).
+  kb.row().text("📨 Gửi thông báo", `ops:bcast:one:${customer.id}`);
 
   if (ctx.callbackQuery) {
     await ctx.answerCallbackQuery();
@@ -108,24 +154,48 @@ export async function showCustomerDetail(ctx: BotContext, customerId: string): P
   await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb });
 }
 
-export async function showCustomerHistory(ctx: BotContext, customerId: string): Promise<void> {
+export async function showCustomerHistory(
+  ctx: BotContext,
+  customerId: string,
+  filter: string = "all"
+): Promise<void> {
   await ctx.answerCallbackQuery();
+  const where: any = { customerId };
+  if (filter === "completed") where.status = "COMPLETED";
+  else if (filter === "cancelled") where.status = "CANCELLED";
+  else if (filter === "active") {
+    where.status = {
+      in: ["WAITING_PAYMENT", "CUSTOMER_SENT_BILL", "WAITING_ADMIN_VERIFY", "PAYMENT_CONFIRMED", "WAITING_PAYOUT", "PAYOUT_SENT", "PAYMENT_MISMATCH", "MANUAL_REVIEW", "SUSPICIOUS"]
+    };
+  }
   const orders = await prisma.order.findMany({
-    where: { customerId },
+    where,
     orderBy: { createdAt: "desc" },
     take: 10
   });
-  const lines = ["🕘 <b>LỊCH SỬ ĐƠN HÀNG</b>", ""];
+  const filterLabel = filter === "completed" ? "✅ Thành công" : filter === "cancelled" ? "❌ Đã hủy" : filter === "active" ? "⏳ Đang xử lý" : "📦 Tất cả";
+  const lines = [`🕘 <b>LỊCH SỬ ĐƠN HÀNG</b> · ${filterLabel}`, ""];
   const kb = new InlineKeyboard();
   if (orders.length === 0) {
     lines.push("Chưa có đơn hàng nào.");
   } else {
     for (const o of orders) {
-      lines.push(`📦 ${shortOrderId(o.id)} · ${MoneyService.formatMoney(o.sourceAmount, o.sourceCurrency)} → ${MoneyService.formatMoney(o.targetAmount, o.targetCurrency)}`);
-      kb.row().text(`📦 ${shortOrderId(o.id)}`, `ops:order:detail:${o.id}`);
+      // Compact row: status visible WITHOUT opening the detail (B4).
+      lines.push(
+        `${orderStatusIcon(o.status)} ${formatAdminDateTime(o.createdAt)} · ${shortOrderId(o.id)} · ${MoneyService.formatMoney(o.sourceAmount, o.sourceCurrency)} → ${MoneyService.formatMoney(o.targetAmount, o.targetCurrency)}`
+      );
+      kb.row().text(`${orderStatusIcon(o.status)} ${shortOrderId(o.id)}`, `ops:order:detail:${o.id}`);
     }
   }
-  kb.row().text("🏠 Menu Admin", "ops:home");
+  kb.row()
+    .text(`⏳ Đang xử lý`, `ops:customer:history:${customerId}:active`)
+    .text(`✅ Thành công`, `ops:customer:history:${customerId}:completed`)
+    .row()
+    .text(`❌ Đã hủy`, `ops:customer:history:${customerId}:cancelled`)
+    .text(`📦 Tất cả`, `ops:customer:history:${customerId}:all`)
+    .row()
+    .text("⬅️ Chi tiết khách", `ops:customer:detail:${customerId}`)
+    .text("🏠 Menu Admin", "ops:home");
   await ctx.reply(lines.join("\n"), { parse_mode: "HTML", reply_markup: kb });
 }
 
@@ -187,7 +257,14 @@ adminCustomersHandler.callbackQuery(/^ops:customer:detail:(.+)$/, async (ctx) =>
   if (!(await requirePermission(ctx, "customer.view"))) return;
   await showCustomerDetail(ctx, ctx.match?.[1] || "");
 });
-adminCustomersHandler.callbackQuery(/^ops:customer:history:(.+)$/, (ctx) => showCustomerHistory(ctx, ctx.match?.[1] || ""));
+adminCustomersHandler.callbackQuery(/^ops:customer:history:(.+)$/, (ctx) => {
+  const raw = ctx.match?.[1] || "";
+  const sep = raw.lastIndexOf(":");
+  const hasFilter = ["active", "completed", "cancelled", "all"].includes(raw.slice(sep + 1));
+  const customerId = hasFilter ? raw.slice(0, sep) : raw;
+  const filter = hasFilter ? raw.slice(sep + 1) : "all";
+  return showCustomerHistory(ctx, customerId, filter);
+});
 
 // ---------------------------------------------------------------------------
 // Admin → customer direct support (reuses existing C3 claim/selected-chat)

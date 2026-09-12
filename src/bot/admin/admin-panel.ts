@@ -209,6 +209,8 @@ export function getOperationsCenterKeyboard(): InlineKeyboard {
     .text("🏦 Tài khoản thanh toán", "ops:accounts")
     .text("🧩 QR động", "ops:qrmeta")
     .row()
+    .text("📣 Chăm sóc khách hàng", "ops:broadcast")
+    .row()
     .text("👨‍💼 Nhân viên", "ops:staff")
     .text("🤖 AI", "ops:ai")
     .text("⚙️ Cấu hình", "ops:config")

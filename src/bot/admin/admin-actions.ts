@@ -19,7 +19,12 @@ import { sendPayoutDestinationPromptToCustomer } from "../handlers/customer-hand
 import { getCustomerBillEvidence, hasCustomerBillEvidence } from "../../modules/orders/bill-evidence.js";
 import { formatAdminDateTime } from "../../shared/app-time.js";
 import { clearAdminSession, clearPendingFinancialAction, getAdminSession, setPendingFinancialAction, setPayoutEvidenceSession, setPendingAction, consumePendingAction, startWizard, clearWizard } from "./admin-session.js";
-import { ADMIN_CANCEL_REASONS, adminCancelReasonLabel } from "../../modules/orders/order-safety.js";
+import {
+  sanitizeAdminCancelReason,
+  adminCancelSource,
+  incomingPaymentVerified,
+  payoutSentEvidence
+} from "../../modules/orders/order-safety.js";
 import { resolveLocale, t } from "../../modules/i18n/locales.js";
 import { AuditService } from "../../modules/audit/audit-service.js";
 
@@ -552,7 +557,7 @@ export async function confirmCompletePayout(ctx: BotContext, orderId: string): P
 // scheduler (requirement L). Confirmed-money states are never simple-cancelled.
 // ===========================================================================
 
-/** Step 1: reason selection (preset buttons or free-text "other reason"). */
+/** Step 1: Admin opens cancel flow — free-form reason input (no presets). */
 export async function showCancelReasonChoice(ctx: BotContext, orderId: string): Promise<void> {
   await ctx.answerCallbackQuery();
   if (!(await requirePermission(ctx, "payment.verify"))) return;
@@ -566,59 +571,49 @@ export async function showCancelReasonChoice(ctx: BotContext, orderId: string): 
   const decision = OrderService.canAdminCancel(order);
   if (!decision.allowed) {
     let hint: string;
-    if (decision.code === "PAYMENT_CONFIRMED") {
+    if (decision.code === "PAYOUT_SENT") {
       hint =
-        "Đơn đã XÁC NHẬN TIỀN VÀO hoặc đã giải ngân — KHÔNG thể huỷ trực tiếp. " +
-        "Dùng Manual Override / xem xét thủ công nếu chắc chắn có sự cố.";
-    } else if (decision.code === "BILL_EXISTS") {
-      hint =
-        "⛔ Đơn này ĐÃ CÓ bill/chứng cứ chuyển tiền — tiền CÓ THỂ đã vào tài khoản. " +
-        "KHÔNG thể huỷ đơn thông thường (evidence sẽ bị bỏ ngỏ). " +
-        "Hãy dùng luồng an toàn hiện có: <b>❌ Chưa nhận được tiền</b> hoặc " +
-        "<b>Manual Override (xem xét thủ công)</b>. Mọi chứng cứ được giữ nguyên.";
+        "💸 Đơn này ĐÃ GIẢI NGÂN / đã chuyển tiền cho khách — KHÔNG thể huỷ trực tiếp. " +
+        "Sử dụng luồng đối soát / xử lý thủ công nếu có sự cố.";
+    } else if (decision.code === "COMPLETED") {
+      hint = "✅ Đơn đã COMPLETED — không thể huỷ.";
     } else {
       hint =
         `⛔ Đơn ở trạng thái <b>${STATUS_VI[order.status] || order.status}</b> — ` +
-        "đây là vùng xem xét thủ công (manual review), KHÔNG thể huỷ thông thường. " +
-        "Dùng <b>❌ Chưa nhận được tiền</b> hoặc Manual Override nếu cần xử lý.";
+        "hiện không thể huỷ trực tiếp.";
     }
     await ctx.reply(hint, { parse_mode: "HTML" }).catch(() => {});
     return;
   }
 
-  const kb = new InlineKeyboard();
-  for (const r of ADMIN_CANCEL_REASONS) {
-    kb.text(r.label, `ops:cancel:preview:${order.id}:${r.key}`).row();
-  }
-  kb.text("✍️ Lý do khác (nhập text)", `ops:cancel:custom:${order.id}`);
-
+  startWizard(String(ctx.from?.id || ""), "order_cancel_reason", { orderId });
   await ctx.reply(
     `❌ <b>HUỶ ĐƠN ${shortOrderId(order.id)}</b>\n\n` +
       `${customerIdentity(order.customer)}\n` +
       `📍 Trạng thái: <b>${STATUS_VI[order.status] || order.status}</b>\n\n` +
-      `Chọn lý do huỷ đơn:`,
-    { parse_mode: "HTML", reply_markup: kb }
+      `✍️ Nhập <b>lý do hủy đơn</b> (tự do, 3–300 ký tự):\nGửi /cancel để thoát.`,
+    { parse_mode: "HTML" }
   );
 }
 
-/** Custom reason input (wizard-bound, one admin at a time). */
+/** Reason input (wizard-bound, one admin at a time). Free-form only (A2). */
 export async function handleCancelReasonInput(ctx: BotContext, text: string): Promise<boolean> {
   const adminId = String(ctx.from?.id || "");
   const session = getAdminSession(adminId);
   if (session.wizard?.kind !== "order_cancel_reason") return false;
   const orderId = String(session.wizard.data?.orderId || "");
-  const reason = text.trim();
-  if (orderId && reason.length >= 3) {
+  const reason = sanitizeAdminCancelReason(text);
+  if (orderId && reason && reason.length >= 3) {
     clearWizard(adminId);
-    await showCancelPreviewWithReason(ctx, orderId, "custom", reason);
+    await showCancelPreview(ctx, orderId, reason);
   } else {
-    await ctx.reply("⚠️ Lý do phải từ 3 ký tự trở lên. Gửi lại lý do, hoặc /cancel để thoát.").catch(() => {});
+    await ctx.reply("⚠️ Lý do phải từ 3 đến 300 ký tự (không ký tự điều khiển). Gửi lại lý do, hoặc /cancel để thoát.").catch(() => {});
   }
   return true;
 }
 
-/** Step 2: preview (NO mutation) with the chosen reason. */
-async function showCancelPreviewWithReason(ctx: BotContext, orderId: string, reasonKey: string, customReason?: string): Promise<void> {
+/** Step 2: preview (NO mutation) with the free-form reason + payment/payout flags. */
+async function showCancelPreview(ctx: BotContext, orderId: string, reason: string): Promise<void> {
   const adminId = String(ctx.from?.id || "");
   // Reload the authoritative order BEFORE showing the preview.
   const order = await OrderService.getOrder(orderId);
@@ -632,15 +627,16 @@ async function showCancelPreviewWithReason(ctx: BotContext, orderId: string, rea
     return;
   }
 
-  const reason = adminCancelReasonLabel(reasonKey, customReason);
+  const sanitized = sanitizeAdminCancelReason(reason) || reason;
   // Persist the reason with the pending action so the final confirm is
   // self-contained (and stale/expired confirmations are rejected).
-  setPendingAction(adminId, "cancel_order", orderId, { reason });
+  setPendingAction(adminId, "cancel_order", orderId, { reason: sanitized });
 
-  const warning = decision.billWarning
-    ? "⚠️ <b>ĐƠN ĐÃ CÓ BILL/CHỨNG CỨ CHUYỂN TIỀN.</b> Tiền CÓ THỂ đã vào tài khoản. Sau khi huỷ, hãy xem xét biên lai gốc và hoàn tiền thủ công nếu cần.\n\n"
+  const verified = incomingPaymentVerified(order);
+  const payoutSent = payoutSentEvidence(order);
+  const warning = verified
+    ? "⚠️ <b>Đơn này đã ghi nhận thanh toán từ khách.</b>\nNếu hủy, khoản tiền đã nhận cần được xử lý hoàn trả/thủ công.\n\n"
     : "";
-  const evidenceLine = decision.billWarning ? "✅ Có bill" : "— Không có bill";
 
   const text =
     `⚠️ <b>XEM TRƯỚC KHI HUỶ ĐƠN</b>\n\n` +
@@ -648,8 +644,9 @@ async function showCancelPreviewWithReason(ctx: BotContext, orderId: string, rea
     `📦 Mã: ${shortOrderId(order.id)}\n` +
     `💱 ${escapeHtml(MoneyService.formatMoney(order.sourceAmount, order.sourceCurrency))} → ${escapeHtml(MoneyService.formatMoney(order.targetAmount, order.targetCurrency))}\n` +
     `📍 Trạng thái: <b>${STATUS_VI[order.status] || order.status}</b>\n` +
-    `📷 Bill: ${evidenceLine}\n` +
-    `📝 Lý do: <b>${escapeHtml(reason)}</b>\n\n` +
+    `💵 Thanh toán đã xác nhận: <b>${verified ? "CÓ" : "KHÔNG"}</b>\n` +
+    `💸 Payout đã gửi: <b>${payoutSent ? "CÓ" : "KHÔNG"}</b>\n` +
+    `📝 Lý do: <b>${escapeHtml(sanitized)}</b>\n\n` +
     warning +
     `Xác nhận huỷ?`;
 
@@ -701,18 +698,26 @@ async function confirmCancelOrder(ctx: BotContext, orderId: string): Promise<voi
   }
 
   try {
+    // Audit source distinguishes UNPAID vs AFTER-PAYMENT cancels (A4).
+    const source = adminCancelSource(order);
+    const verified = incomingPaymentVerified(order);
     const updated = await OrderService.cancelOrder(orderId, adminId, "ADMIN", reason, {
-      source: "ADMIN_CANCELLED",
-      metadata: { adminTelegramId: adminId }
+      source,
+      metadata: { adminTelegramId: adminId, paymentVerified: verified }
     });
 
     // Localized customer notice (safe wording — money may already have moved).
+    // NEVER claims a refund — only a neutral "recorded, staff will handle it".
     const customer = updated?.customer || order.customer;
     if (customer?.telegramId) {
       const locale = resolveLocale(customer.language);
+      let notice = t(locale, "order.cancelled_by_admin", { id: orderId, reason });
+      if (verified) {
+        notice += "\n\n" + t(locale, "order.cancelled_by_admin_payment_note");
+      }
       await sendToCustomer(
         String(customer.telegramId),
-        t(locale, "order.cancelled_by_admin", { id: orderId, reason }),
+        notice,
         { parse_mode: "HTML" }
       );
     }
@@ -725,7 +730,7 @@ async function confirmCancelOrder(ctx: BotContext, orderId: string): Promise<voi
     );
 
     await ctx.reply(
-      `❌ <b>ĐÃ HUỶ ĐƠN ${shortOrderId(orderId)}</b>\n📝 Lý do: ${escapeHtml(reason)}`,
+      `❌ <b>ĐÃ HUỶ ĐƠN ${shortOrderId(orderId)}</b>\n📝 Lý do: ${escapeHtml(reason)}\n🔖 Nguồn ghi nhận: ${source}`,
       { parse_mode: "HTML" }
     ).catch(() => {});
   } catch (err: any) {
@@ -836,23 +841,6 @@ adminActionsHandler.callbackQuery(/^ops:review:confirm:go:([a-zA-Z0-9_-]+)$/, (c
 adminActionsHandler.callbackQuery(/^ops:review:notreceived:go:([a-zA-Z0-9_-]+)$/, (ctx) => confirmReviewResolve(ctx, ctx.match?.[1] || "", "notreceived"));
 
 adminActionsHandler.callbackQuery(/^ops:cancel:reason:(.+)$/, (ctx) => showCancelReasonChoice(ctx, ctx.match?.[1] || ""));
-adminActionsHandler.callbackQuery(/^ops:cancel:custom:([a-zA-Z0-9_-]+)$/, async (ctx) => {
-  await ctx.answerCallbackQuery();
-  if (!(await requirePermission(ctx, "payment.verify"))) return;
-  if (!isPrivate(ctx)) return denyNotPrivate(ctx);
-  const adminId = String(ctx.from?.id || "");
-  startWizard(adminId, "order_cancel_reason", { orderId: ctx.match?.[1] || "" });
-  await ctx.reply(
-    "✍️ Nhập <b>lý do huỷ đơn</b> (tối thiểu 3 ký tự).\nGửi /cancel để thoát.",
-    { parse_mode: "HTML" }
-  ).catch(() => {});
-});
-adminActionsHandler.callbackQuery(/^ops:cancel:preview:([a-zA-Z0-9_-]+):([a-z_]+)$/, async (ctx) => {
-  const orderId = ctx.match?.[1] || "";
-  const reasonKey = ctx.match?.[2] || "";
-  if (!(await requirePermission(ctx, "payment.verify"))) return;
-  await showCancelPreviewWithReason(ctx, orderId, reasonKey);
-});
 adminActionsHandler.callbackQuery(/^ops:cancel:confirm:([a-zA-Z0-9_-]+)$/, (ctx) => confirmCancelOrder(ctx, ctx.match?.[1] || ""));
 
 adminActionsHandler.callbackQuery(/^ops:bill:view:(.+)$/, (ctx) => showBillView(ctx, ctx.match?.[1] || ""));

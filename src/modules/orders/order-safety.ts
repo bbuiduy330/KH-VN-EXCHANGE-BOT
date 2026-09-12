@@ -20,6 +20,7 @@ export type CancellationCode =
   | "NOT_FOUND"
   | "ALREADY_CANCELLED"
   | "COMPLETED"
+  | "PAYOUT_SENT"
   | "PAYMENT_CONFIRMED"
   | "BILL_EXISTS"
   | "NOT_CANCELLABLE";
@@ -146,24 +147,59 @@ export function canCustomerCancel(
 // ---------------------------------------------------------------------------
 
 /**
- * FINAL RULE (financial safety audit): a normal Admin "❌ Huỷ đơn" is ONLY
- * allowed for a SAFELY UNPAID order — the same authoritative financial-safety
- * principle as the customer rule:
+ * FINAL RULE (ADMIN OPERATIONS EXPANSION): Admin normal-cancel is a POWERFUL
+ * operational tool — it covers fake/invalid bills, suspicious transactions,
+ * operational problems and wrong customer info. It is allowed for EVERY state
+ * BEFORE the payout has actually been sent, and BLOCKED once money left:
  *
- *   status === WAITING_PAYMENT
- *   AND no bill/evidence (no customerBillFileId, no orderBillEvidence rows)
- *   AND no verifiedAt (incoming payment NOT confirmed)
- *   AND no payoutAt / completedAt
+ *   ALLOWED:  WAITING_PAYMENT, CUSTOMER_SENT_BILL, WAITING_ADMIN_VERIFY,
+ *             PAYMENT_MISMATCH, MANUAL_REVIEW, SUSPICIOUS, PAYMENT_CONFIRMED,
+ *             WAITING_PAYOUT (incl. verified payment / payout destination set)
+ *   BLOCKED:  PAYOUT_SENT, COMPLETED, and ANY order with authoritative
+ *             payout-sent evidence (payoutAt / payoutBillFileId) even if a
+ *             stale status somehow says otherwise.
+ *   CANCELLED remains idempotent (handled by the caller/service).
  *
- * For every state where payment evidence exists or money may already have
- * arrived (CUSTOMER_SENT_BILL, WAITING_ADMIN_VERIFY, PAYMENT_MISMATCH,
- * MANUAL_REVIEW, SUSPICIOUS, PAYMENT_CONFIRMED, WAITING_PAYOUT, PAYOUT_SENT,
- * COMPLETED) a normal CANCELLED transition is BLOCKED. Admin must use the
- * existing safe flows instead:
- *   - "❌ Chưa nhận được tiền" (ops:pay:not_received) for bill-present states,
- *   - manualFinancialOverride (manual review) for confirmed-money states.
- * All evidence and financial history is preserved — nothing is discarded.
+ * Customer cancellation policy is UNCHANGED (unpaid + no evidence only).
+ * When money was already verified but not yet paid out, the caller MUST warn
+ * the Admin (see adminCancelSource / verified flags) — no automatic refund and
+ * no automatic financial reversal ever happens here.
  */
+export const ADMIN_CANCELLABLE_STATUSES = [
+  "WAITING_PAYMENT",
+  "CUSTOMER_SENT_BILL",
+  "WAITING_ADMIN_VERIFY",
+  "PAYMENT_MISMATCH",
+  "MANUAL_REVIEW",
+  "SUSPICIOUS",
+  "PAYMENT_CONFIRMED",
+  "WAITING_PAYOUT"
+] as const;
+
+export function isAdminCancellableStatus(status: string | null | undefined): boolean {
+  return (ADMIN_CANCELLABLE_STATUSES as readonly string[]).includes(String(status || ""));
+}
+
+/**
+ * True when the authoritative record proves the payout was ALREADY sent —
+ * blocks a normal cancel even if the status is stale.
+ */
+export function payoutSentEvidence(order: OrderSafetyInfo | null | undefined): boolean {
+  if (!order) return false;
+  return Boolean(order.payoutAt) || Boolean(order.payoutBillFileId) || order.status === "PAYOUT_SENT";
+}
+
+/**
+ * True when the incoming payment was verified / recorded (Admin verified it,
+ * or the status itself implies verification). Used for the strong preview
+ * warning and for choosing the audit source — never for auto-refunds.
+ */
+export function incomingPaymentVerified(order: OrderSafetyInfo | null | undefined): boolean {
+  if (!order) return false;
+  if (order.verifiedAt) return true;
+  return ["PAYMENT_CONFIRMED", "WAITING_PAYOUT", "PAYOUT_SENT"].includes(String(order.status || ""));
+}
+
 export function canAdminCancel(
   order: OrderSafetyInfo | null | undefined
 ): CancellationDecision {
@@ -178,45 +214,46 @@ export function canAdminCancel(
   if (order.status === "COMPLETED") {
     return { allowed: false, code: "COMPLETED", billWarning };
   }
-  // Confirmed incoming money — never a normal cancel. The existing financial
-  // workflow for these states is manualFinancialOverride / manual review.
-  if (["PAYMENT_CONFIRMED", "WAITING_PAYOUT", "PAYOUT_SENT"].includes(order.status) || order.verifiedAt || order.payoutAt) {
-    return { allowed: false, code: "PAYMENT_CONFIRMED", billWarning };
+  // Payout already sent (status OR authoritative evidence) — never a normal
+  // cancel. Money has left; use the payout/reconciliation flows instead.
+  if (payoutSentEvidence(order)) {
+    return { allowed: false, code: "PAYOUT_SENT", billWarning };
   }
-  // Evidence exists (bill submitted / mismatch) — money MAY have arrived:
-  // a normal cancel must never silently discard the evidence. Route Admin to
-  // the existing manual-review / not-received flow instead.
-  if (billWarning) {
-    return { allowed: false, code: "BILL_EXISTS", billWarning: true };
+  if (!isAdminCancellableStatus(order.status)) {
+    return { allowed: false, code: "NOT_CANCELLABLE", billWarning };
   }
-  if (order.status === "WAITING_PAYMENT") {
-    return { allowed: true, code: "ALLOWED", billWarning: false };
-  }
-  // CUSTOMER_SENT_BILL / WAITING_ADMIN_VERIFY / PAYMENT_MISMATCH /
-  // MANUAL_REVIEW / SUSPICIOUS (without promoted evidence) — manual-review
-  // territory, never an ordinary cancellation.
-  return { allowed: false, code: "NOT_CANCELLABLE", billWarning };
+  return { allowed: true, code: "ALLOWED", billWarning };
 }
 
-// ---------------------------------------------------------------------------
-// Admin cancel reason presets (operational UI stays Vietnamese)
-// ---------------------------------------------------------------------------
+/**
+ * Operational audit distinction (A4): UNPAID vs AFTER-PAYMENT admin cancels.
+ * Pure metadata/source choice — no financial records are touched here.
+ */
+export function adminCancelSource(order: OrderSafetyInfo | null | undefined): string {
+  return incomingPaymentVerified(order) ? "ADMIN_CANCELLED_AFTER_PAYMENT" : "ADMIN_CANCELLED_UNPAID";
+}
 
-export const ADMIN_CANCEL_REASONS: { key: string; label: string }[] = [
-  { key: "customer_request", label: "Khách yêu cầu hủy đơn" },
-  { key: "wrong_rate", label: "Tạo nhầm đơn / tỷ giá sai" },
-  { key: "no_payment", label: "Khách không chuyển tiền" },
-  { key: "test_order", label: "Đơn thử nghiệm" }
-];
+/**
+ * Free-form Admin cancel reason sanitizer (A2): trim, strip control chars,
+ * cap length. Returns null when empty/oversized (caller prompts again).
+ */
+export const ADMIN_CANCEL_REASON_MAX_LEN = 300;
 
-export function adminCancelReasonLabel(key: string, customReason?: string): string {
-  if (key === "custom") return customReason?.trim() || "Lý do khác";
-  return ADMIN_CANCEL_REASONS.find((r) => r.key === key)?.label || customReason?.trim() || key;
+export function sanitizeAdminCancelReason(raw: string): string | null {
+  const cleaned = String(raw || "")
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "")
+    .replace(/\r\n/g, "\n")
+    .trim();
+  if (!cleaned) return null;
+  if (cleaned.length > ADMIN_CANCEL_REASON_MAX_LEN) return null;
+  return cleaned;
 }
 
 /** Human-readable source tags persisted in audit/state history metadata. */
 export const CANCELLATION_SOURCES = {
   CUSTOMER: "CUSTOMER_CANCELLED",
   ADMIN: "ADMIN_CANCELLED",
+  ADMIN_UNPAID: "ADMIN_CANCELLED_UNPAID",
+  ADMIN_AFTER_PAYMENT: "ADMIN_CANCELLED_AFTER_PAYMENT",
   AUTO_TIMEOUT: "ORDER_AUTO_CANCELLED_PAYMENT_TIMEOUT"
 } as const;

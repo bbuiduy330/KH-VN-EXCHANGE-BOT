@@ -13,6 +13,7 @@ import {
   isOrderPaymentReminderEligible,
   isOrderSafelyAutoCancellable,
   hasValidPaymentEvidence,
+  adminCancelSource,
   CANCELLATION_SOURCES
 } from "./order-safety.js";
 import { logger } from "../../shared/logger.js";
@@ -1020,7 +1021,7 @@ export class OrderService {
         throw new Error("Order đã thay đổi trạng thái, vui lòng thử lại.");
       }
 
-      const source = options?.source || (actorRole === "CUSTOMER" ? CANCELLATION_SOURCES.CUSTOMER : CANCELLATION_SOURCES.ADMIN);
+      const source = options?.source || (actorRole === "CUSTOMER" ? CANCELLATION_SOURCES.CUSTOMER : adminCancelSource(order));
 
       await tx.orderStateHistory.create({
         data: {

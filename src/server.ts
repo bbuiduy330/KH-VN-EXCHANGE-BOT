@@ -7,6 +7,7 @@ import { prisma, isRealPrismaClient, sanitizeDatabaseError } from "./database/cl
 import { RuntimeConfigService } from "./modules/system-config/runtime-config-service.js";
 import { BackupService } from "./modules/backup/backup-service.js";
 import { startPaymentReminderScheduler, stopPaymentReminderScheduler } from "./modules/orders/payment-reminder-service.js";
+import { startBroadcastScheduler, stopBroadcastScheduler } from "./modules/broadcast/broadcast-service.js";
 import { PartnerService } from "./modules/partner/partner-service.js";
 
 const app = express();
@@ -131,6 +132,10 @@ const server = app.listen(PORT, "0.0.0.0", () => {
   // Never auto-pays anything.
   PartnerService.startReconciliationScheduler();
 
+  // 2d. Broadcast delivery worker: durable DB queue, small batches,
+  // restart-safe (READY/SENDING campaigns resume; PENDING recipients persist).
+  startBroadcastScheduler();
+
   // 3. Bootstrap Unified Telegram Bot gracefully
   startSingleBot().catch((err) => {
     logger.warn({ err }, "Unified Telegram Bot startup error or token missing");
@@ -142,6 +147,7 @@ process.on("SIGTERM", async () => {
   logger.info("SIGTERM received, gracefully shutting down server and Telegram bot...");
   BackupService.stopScheduler();
   stopPaymentReminderScheduler();
+  stopBroadcastScheduler();
   PartnerService.stopReconciliationScheduler();
   await stopSingleBot();
   server.close(() => {
@@ -154,6 +160,7 @@ process.on("SIGINT", async () => {
   logger.info("SIGINT received, gracefully shutting down server and Telegram bot...");
   BackupService.stopScheduler();
   stopPaymentReminderScheduler();
+  stopBroadcastScheduler();
   PartnerService.stopReconciliationScheduler();
   await stopSingleBot();
   server.close(() => {
