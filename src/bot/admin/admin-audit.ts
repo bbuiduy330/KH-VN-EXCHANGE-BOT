@@ -1,13 +1,16 @@
 /**
  * Admin audit log — readable recent operational events with category filters.
- * Uses the existing AuditLog model; never shows keys/tokens/payloads.
+ * Rendering is SYNCED with the shared audit view (audit-view.ts): exact
+ * Asia/Ho_Chi_Minh timestamp primary (relative age only secondary), human
+ * customer identity (display name + Telegram numeric ID) where available,
+ * short internal Order refs, and 👤 Xem khách shortcuts. AuditLog storage and
+ * historical timestamps are never altered.
  */
 import { Composer, InlineKeyboard } from "grammy";
 import { BotContext } from "../middleware/identity.js";
 import { requirePermission } from "../middleware/permissions.js";
 import { prisma } from "../../database/client.js";
-import { escapeHtml } from "../menus/cskh-panel.js";
-import { shortOrderId, timeAgo } from "./admin-panel.js";
+import { renderAuditRows } from "./audit-view.js";
 
 export const adminAuditHandler = new Composer<BotContext>();
 
@@ -21,31 +24,22 @@ const AUDIT_FILTERS: { id: string; label: string; match: RegExp }[] = [
   { id: "config", label: "⚙️ Cấu hình", match: /config|setting|backup/i }
 ];
 
-function shortRef(action: string, targetId: string): string {
-  const lower = action.toLowerCase();
-  if (lower.includes("order") || lower.includes("payment") || lower.includes("payout")) {
-    return shortOrderId(targetId);
-  }
-  return "";
-}
-
 export async function showAudit(ctx: BotContext, filter: string = "all"): Promise<void> {
   if (!(await requirePermission(ctx, "audit.view"))) return;
   const logs = await prisma.auditLog.findMany({ orderBy: { createdAt: "desc" }, take: 40 });
   const cfg = AUDIT_FILTERS.find((f) => f.id === filter) || AUDIT_FILTERS[0]!;
   const filtered = logs.filter((l: any) => cfg.match.test(l.action || ""));
 
+  const kb = new InlineKeyboard();
   const lines = ["📜 <b>NHẬT KÝ</b>", ""];
   if (filtered.length === 0) {
     lines.push("Không có bản ghi nào.");
   } else {
-    for (const l of filtered) {
-      const ref = shortRef(l.action, l.targetId);
-      lines.push(`🕒 ${timeAgo(l.createdAt)} · ${escapeHtml(l.actorRole)} ${escapeHtml(l.actorId)} · ${escapeHtml(l.action)}${ref ? ` · ${ref}` : ""}`);
-    }
+    // Shared rendering: exact GMT+7 time primary, customer name + Telegram ID,
+    // short ref, action summary, 👤 Xem khách buttons (appended into kb).
+    lines.push(...(await renderAuditRows(filtered, kb)));
   }
 
-  const kb = new InlineKeyboard();
   for (let i = 0; i < AUDIT_FILTERS.length; i++) {
     const f = AUDIT_FILTERS[i]!;
     kb.text(f.label, `ops:audit:filter:${f.id}`);
