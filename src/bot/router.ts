@@ -1,5 +1,6 @@
 import { Composer } from "grammy";
 import { BotContext, identityMiddleware } from "./middleware/identity.js";
+import { logger } from "../shared/logger.js";
 import { customerHandler, showCustomerStart, handleCustomerTextMessage, handleCustomerPhoto, handleCustomerVoice } from "./handlers/customer-handler.js";
 import { cskhHandler, showCskhStart, handleStaffMedia, handleStaffTextMessage } from "./handlers/cskh-handler.js";
 import { adminHandler, showAdminStart, handleAdminPhoto, handleAdminTextMessage } from "./handlers/admin-handler.js";
