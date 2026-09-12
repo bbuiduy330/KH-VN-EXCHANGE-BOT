@@ -60,14 +60,23 @@ export async function clearCustomerTelegramChat(customerId: string): Promise<Cle
 
   // READ-ONLY backend access: only recorded telegram ids are read.
   const conv = await ConversationService.getOrCreateConversation(customerId);
-  const tracked = await prisma.message.findMany({
+  const rows = await prisma.message.findMany({
     where: { conversationId: conv.id, telegramMessageId: { not: null } },
     orderBy: { createdAt: "desc" },
     take: MAX_TRACKED_MESSAGES,
     select: { telegramMessageId: true }
   });
-  // Defensive: only well-formed numeric ids (null/undefined never reach Telegram).
-  const ids = [...new Set(tracked.map((m: any) => m.telegramMessageId as number).filter((id): id is number => typeof id === "number"))];
+  // Type-safe collection: Prisma Message.telegramMessageId is Int? (number |
+  // null) and the Bot API expects numeric ids — only well-formed integers may
+  // enter the deletion list (null/undefined/invalid are excluded).
+  const messageIds: number[] = rows
+    .map((row) => row.telegramMessageId)
+    .filter(
+      (id): id is number =>
+        typeof id === "number" &&
+        Number.isInteger(id)
+    );
+  const ids = [...new Set<number>(messageIds)];
   result.requested = ids.length;
   if (ids.length === 0) return result;
 
