@@ -217,10 +217,14 @@ export function customerIdentity(customer: {
 } | null | undefined): string {
   if (!customer) return "👤 Khách";
   const lines: string[] = [];
-  if (customer.username) {
-    lines.push(`👤 @${customer.username}`);
-  } else if ((customer.fullName || "").trim()) {
-    lines.push(`👤 ${customer.fullName.trim()}`);
+  // Deliberate narrowing: username → display name → generic label.
+  // Never renders "undefined"/"null"; never calls string methods un-narrowed.
+  const username = customer.username?.trim();
+  const fullName = customer.fullName?.trim();
+  if (username) {
+    lines.push(`👤 @${username}`);
+  } else if (fullName) {
+    lines.push(`👤 ${fullName}`);
   } else {
     lines.push("👤 Khách");
   }

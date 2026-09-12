@@ -75,13 +75,30 @@ async function maybeSuggestLanguageSwitch(
 
 
 /**
+ * Staff/Admin-facing display label: @username → display name → Telegram ID.
+ * Uses the persisted Customer.telegramId (Prisma: String, non-nullable);
+ * never falls back to the internal CUID.
+ */
+function staffCustomerLabel(customer: {
+  fullName?: string | null;
+  username?: string | null;
+  telegramId: string;
+}): string {
+  const username = customer.username?.trim();
+  const fullName = customer.fullName?.trim();
+  if (username) return `@${username}`;
+  if (fullName) return fullName;
+  return `Telegram ID ${customer.telegramId || "không có"}`;
+}
+
+/**
  * HUMAN-mode media relay to the assigned staff only.
  * Uses Telegram-native copyMessage (no download/re-upload/OCR/STT).
  * If no staff is claimed, acknowledges waiting — never broadcasts.
  */
 async function relayCustomerMediaToStaff(
   ctx: BotContext,
-  customer: { id: string; fullName?: string | null; username?: string | null; language?: string | null },
+  customer: { id: string; fullName?: string | null; username?: string | null; telegramId: string; language?: string | null },
   kind: "photo" | "voice" | "document"
 ): Promise<boolean> {
   const conv = await ConversationService.getOrCreateConversation(customer.id);
@@ -95,7 +112,7 @@ async function relayCustomerMediaToStaff(
     // Notify staff with a short text header, then native-copy the media.
     await sendToStaff(
       conv.claimedById,
-      `📎 <b>Media (${kind}) từ khách ${customer.fullName || (customer.username ? "@" + customer.username : `Telegram ID ${(customer as any).telegramId || "?"}`)}:</b>\n` +
+      `📎 <b>Media (${kind}) từ khách ${staffCustomerLabel(customer)}:</b>\n` +
         `Trả lời trực tiếp trong khung chat riêng với bot.`,
       { parse_mode: "HTML" }
     );
@@ -1786,7 +1803,7 @@ async function downloadVoiceBuffer(ctx: BotContext): Promise<Buffer | null> {
 }
 
 /** HUMAN: original audio is primary; STT is assistive enrichment only. */
-async function handleHumanVoice(ctx: BotContext, customer: { id: string; fullName?: string | null; username?: string | null }, locale: string): Promise<void> {
+async function handleHumanVoice(ctx: BotContext, customer: { id: string; fullName?: string | null; username?: string | null; telegramId: string }, locale: string): Promise<void> {
   const conv = await ConversationService.getOrCreateConversation(customer.id);
 
   if (conv.claimedById) {
@@ -1797,12 +1814,12 @@ async function handleHumanVoice(ctx: BotContext, customer: { id: string; fullNam
     const messageId = ctx.message?.message_id;
     const fromChatId = ctx.chat?.id;
     const adminChatId = SystemConfigService.getAdminNotificationChatId();
-    const name = customer.fullName || (customer.username ? "@" + customer.username : `Telegram ID ${customer.telegramId}`);
+    const name = staffCustomerLabel(customer);
     if (messageId && fromChatId && adminChatId) {
       await copyMessageToChat(fromChatId, messageId, adminChatId);
     }
     await sendToAdminNotificationChat(
-      `🎙 <b>Ghi âm từ khách ${escapeHtmlText(name)} · 🆔 Telegram ID ${customer.telegramId}</b>`,
+      `🎙 <b>Ghi âm từ khách ${escapeHtmlText(name)} · 🆔 Telegram ID ${customer.telegramId || "không có"}</b>`,
       {
         parse_mode: "HTML",
         reply_markup: new InlineKeyboard()
@@ -1824,8 +1841,8 @@ async function handleHumanVoice(ctx: BotContext, customer: { id: string; fullNam
     const fresh = await ConversationService.getOrCreateConversation(customer.id);
     if (fresh.mode !== "HUMAN" || !fresh.claimedById) return;
 
-    const name = customer.fullName || (customer.username ? "@" + customer.username : `Telegram ID ${customer.telegramId}`);
-    let assist = `🎙 <b>GHI ÂM TỪ KHÁCH</b>\n👤 <b>${escapeHtmlText(name)}</b>\n🆔 Telegram ID: <code>${customer.telegramId}</code>\n🔖 Ref: #${customer.id.slice(-6).toUpperCase()}\n\n📝 Nội dung nhận diện:\n<i>"${escapeHtmlText(transcript.transcript)}"</i>`;
+    const name = staffCustomerLabel(customer);
+    let assist = `🎙 <b>GHI ÂM TỪ KHÁCH</b>\n👤 <b>${escapeHtmlText(name)}</b>\n🆔 Telegram ID: <code>${customer.telegramId || "không có"}</code>\n🔖 Ref: #${customer.id.slice(-6).toUpperCase()}\n\n📝 Nội dung nhận diện:\n<i>"${escapeHtmlText(transcript.transcript)}"</i>`;
     if ((transcript.detectedLanguage || "vi") !== "vi") {
       try {
         const translated = await AiProvider.translateText(transcript.transcript, "vi");
