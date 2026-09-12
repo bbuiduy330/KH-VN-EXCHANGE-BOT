@@ -9,6 +9,7 @@ import {
   PAYOUT_DESTINATION_MAX_LEN
 } from "../src/bot/state/partner-session.js";
 import { setBotInstance } from "../src/bot/notifications.js";
+import type { Bot } from "grammy";
 
 /**
  * CTV payout destination V2 — free-form destination + reference QR +
@@ -224,21 +225,37 @@ describe("Admin payout proof + PAID notification to the OWNING CTV only", () => 
       data: { payoutProofFileId: proof.id }
     });
 
-    const sendMessage = vi.fn(async () => ({ message_id: 1 }));
-    const sendPhoto = vi.fn(async () => ({ message_id: 2 }));
-    const sendDocument = vi.fn(async () => ({ message_id: 3 }));
-    setBotInstance({ botInfo: { username: "testbot" }, api: { sendMessage, sendPhoto, sendDocument } } as any);
+    // Mocks typed with their REAL call signatures so `mock.calls` is a proper
+    // tuple (no zero-arg inference, no `as any`).
+    const sendMessage = vi.fn(
+      async (_chatId: string, _text: string, _options?: Record<string, unknown>) => ({ message_id: 1 })
+    );
+    const sendPhoto = vi.fn(
+      async (_chatId: string, _photo: unknown, _options?: Record<string, unknown>) => ({ message_id: 2 })
+    );
+    const sendDocument = vi.fn(
+      async (_chatId: string, _document: unknown, _options?: Record<string, unknown>) => ({ message_id: 3 })
+    );
+    const fakeBot = {
+      botInfo: { username: "testbot" },
+      api: { sendMessage, sendPhoto, sendDocument }
+    } as unknown as Bot<any>;
+    setBotInstance(fakeBot);
 
     const { notifyPartnerSettlementPaid } = await import("../src/bot/notifications.js");
     const result = await notifyPartnerSettlementPaid(settlement.id);
     expect(result.sent).toBe(true);
 
-    // Summary went to the OWNER only.
+    // Summary went to the OWNER only (missing call handled explicitly).
     expect(sendMessage).toHaveBeenCalledTimes(1);
-    expect(sendMessage.mock.calls[0][0]).toBe("777001");
+    const firstMessage = sendMessage.mock.calls[0];
+    expect(firstMessage).toBeDefined();
+    expect(firstMessage?.[0]).toBe("777001");
     // Proof image went to the OWNER only (jpeg → sendPhoto).
     expect(sendPhoto).toHaveBeenCalledTimes(1);
-    expect(sendPhoto.mock.calls[0][0]).toBe("777001");
+    const firstPhoto = sendPhoto.mock.calls[0];
+    expect(firstPhoto).toBeDefined();
+    expect(firstPhoto?.[0]).toBe("777001");
     expect(sendDocument).not.toHaveBeenCalled();
     // The outsider's Telegram id must never appear anywhere.
     for (const call of [...sendMessage.mock.calls, ...sendPhoto.mock.calls]) {
