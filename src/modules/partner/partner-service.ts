@@ -24,10 +24,19 @@
  * Order). Inventing arithmetic would fabricate profit — so spreadBonus stays
  * 0 and the column/field is ready for a future authoritative snapshot.
  */
-import Decimal from "decimal.js";
+import { Decimal } from "decimal.js";
 import { prisma } from "../../database/client.js";
 import { AuditService } from "../audit/audit-service.js";
 import { logger } from "../../shared/logger.js";
+
+/**
+ * Minimal projection row for the reconciliation fallback walk — only the
+ * Order id is needed. Keeps `orders`/`o`/`last` fully typed under strict TS
+ * (noUncheckedIndexedAccess + implicit-any) without broad casts.
+ */
+type ReconciliationOrderRow = {
+  id: string;
+};
 
 export const COMMISSION_LARGE_ORDER_USD = 500;
 
@@ -329,14 +338,17 @@ export class PartnerService {
     }
 
     // Fallback: paged oldest-first walk, stops at the per-run work limit.
+    // Only the id is needed — select a minimal, explicitly typed projection so
+    // `orders`/`o`/`last` are fully inferred under strict TS (no implicit any).
     const missing: string[] = [];
     let cursorId: string | undefined = undefined;
     const pageSize = 100;
     for (;;) {
-      const orders = await prisma.order.findMany({
+      const orders: ReconciliationOrderRow[] = await prisma.order.findMany({
         where: { status: "COMPLETED", partnerId: { not: null } },
         orderBy: [{ completedAt: "asc" }, { id: "asc" }],
         take: pageSize,
+        select: { id: true },
         ...(cursorId ? { skip: 1, cursor: { id: cursorId } } : {})
       });
       if (orders.length === 0) break;
@@ -353,7 +365,7 @@ export class PartnerService {
         }
       }
       if (missing.length >= workLimit) break;
-      const last = orders[orders.length - 1];
+      const last: ReconciliationOrderRow | undefined = orders[orders.length - 1];
       if (!last || orders.length < pageSize) break;
       cursorId = last.id;
     }
