@@ -1,0 +1,14 @@
+-- Legacy cleanup: completes the storage transition of commit a118417
+-- ("feat(storage): replace Google Drive with local VPS storage"), which
+-- removed the DriveSyncJob model from prisma/schema.prisma when evidence
+-- storage moved to the local VPS file system. That removal predates the
+-- migration chain and was only ever materialised via db push, so:
+--   * 20260901_init_baseline re-creates the HISTORICAL DriveSyncJob table
+--     (exact pre-20260907 shape) because 20260907 creates an index on it;
+--   * THIS migration performs the historical removal so a fresh
+--     `prisma migrate deploy` chain ends exactly at the current schema.
+-- IF EXISTS is REQUIRED for correctness here (not cosmetic): databases that
+-- were db-push migrated to the current schema no longer contain the legacy
+-- table, and this statement must be a no-op there. No application code
+-- references this table (verified: 0 references in src/).
+DROP TABLE IF EXISTS "DriveSyncJob";

@@ -158,7 +158,10 @@ CREATE TABLE IF NOT EXISTS "Message" (
   "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
   CONSTRAINT "Message_pkey" PRIMARY KEY ("id")
 );
-CREATE INDEX IF NOT EXISTS "Message_conversationId_idx" ON "Message"("conversationId");
+-- NOTE: "Message_conversationId_idx" is intentionally NOT created here.
+-- 20260908_production_hardening creates it with a plain (non-idempotent)
+-- CREATE INDEX; creating it in the baseline as well would make that
+-- historical migration fail with `relation already exists` on a fresh DB.
 
 CREATE TABLE IF NOT EXISTS "InternalNote" (
   "id" TEXT NOT NULL,
@@ -213,6 +216,7 @@ CREATE TABLE IF NOT EXISTS "FileEvidence" (
   "id" TEXT NOT NULL,
   "fileName" TEXT NOT NULL,
   "filePath" TEXT NOT NULL,
+  "storageRelativePath" TEXT,
   "fileType" TEXT NOT NULL,
   "fileSize" INTEGER NOT NULL,
   "mimeType" TEXT NOT NULL,
@@ -222,9 +226,40 @@ CREATE TABLE IF NOT EXISTS "FileEvidence" (
 );
 CREATE INDEX IF NOT EXISTS "FileEvidence_sha256_idx" ON "FileEvidence"("sha256");
 
+-- HISTORICAL TABLE (pre-20260907 state — commit 21d1e29 schema evidence).
+-- DriveSyncJob existed in the manually-bootstrapped database BEFORE the
+-- 20260907 migration ran (which creates "DriveSyncJob_status_idx" on it).
+-- It was later REMOVED from the schema by the local-storage transition
+-- (commit a118417); 20260914_drop_legacy_drive_sync_job performs that
+-- historical removal so the chain ends at the current prisma/schema.prisma.
+-- EXACT historical shape (no invented fields — from 21d1e29:prisma/schema.prisma):
+CREATE TABLE IF NOT EXISTS "DriveSyncJob" (
+  "id" TEXT NOT NULL,
+  "orderId" TEXT,
+  "jobType" TEXT NOT NULL,
+  "fileEvidenceId" TEXT,
+  "status" TEXT NOT NULL DEFAULT 'PENDING',
+  "attempts" INTEGER NOT NULL DEFAULT 0,
+  "maxAttempts" INTEGER NOT NULL DEFAULT 5,
+  "lastError" TEXT,
+  "nextRetryAt" TIMESTAMP(3),
+  "driveFileId" TEXT,
+  "driveFolderId" TEXT,
+  "payload" JSONB,
+  "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  "updatedAt" TIMESTAMP(3) NOT NULL,
+  CONSTRAINT "DriveSyncJob_pkey" PRIMARY KEY ("id")
+);
+
+-- BackupRun base shape: requestedBy/requestedAt/backupType/repositoryType are
+-- ADDED by 20260908_production_hardening (plain ADD COLUMN — must NOT pre-exist
+-- here). startedAt/finishedAt + the status index belong to the local-storage
+-- transition (a118417) that no historical migration covers → created here.
 CREATE TABLE IF NOT EXISTS "BackupRun" (
   "id" TEXT NOT NULL,
   "status" TEXT NOT NULL DEFAULT 'QUEUED',
+  "startedAt" TIMESTAMP(3),
+  "finishedAt" TIMESTAMP(3),
   "snapshotId" TEXT,
   "filesCount" INTEGER,
   "error" TEXT,
@@ -232,6 +267,7 @@ CREATE TABLE IF NOT EXISTS "BackupRun" (
   "updatedAt" TIMESTAMP(3) NOT NULL,
   CONSTRAINT "BackupRun_pkey" PRIMARY KEY ("id")
 );
+CREATE INDEX IF NOT EXISTS "BackupRun_status_idx" ON "BackupRun"("status");
 
 CREATE TABLE IF NOT EXISTS "SystemSecret" (
   "id" TEXT NOT NULL,
