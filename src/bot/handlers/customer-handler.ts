@@ -17,6 +17,7 @@ import { SystemConfigService } from "../../modules/system-config/system-config-s
 import { generateTransferMemo } from "../../modules/orders/transfer-memo.js";
 import { parsePayoutDestinationText, parsePayoutDestinationPipe, parsePayoutDestinationWithAi, decodePayoutQrImage } from "../../modules/orders/payout-destination.js";
 import { getPayoutInputSession, setPayoutInputSession, updatePayoutInputSession, clearPayoutInputSession } from "../state/customer-session.js";
+import { PaymentQrService } from "../../modules/payment-qr/payment-qr-service.js";
 
 /** Mask a payout account number for customer-facing previews (**** + last 4). */
 function maskPayoutAccount(accountNumber: string): string {
@@ -594,27 +595,11 @@ customerHandler.callbackQuery(/^customer:order:payinfo:([a-zA-Z0-9_-]+)$/, async
     }), { parse_mode: "HTML" });
   }
 
-  const recv = order.receivingAccountSnapshot as any;
-  const memo = generateTransferMemo(SystemConfigService.getTransferMemoTemplate(), {
-    orderId: order.id,
-    username: customer.username,
-    telegramId: customer.telegramId
-  });
-  const amount = MoneyService.formatAmount(order.sourceAmount, order.sourceCurrency);
-
-  await ctx.reply(
-    `${t(locale, "order.payinfo_hint", { id: order.id })}\n\n` +
-      `${t(locale, "order.transfer_amount", { amount, currency: order.sourceCurrency })}\n` +
-      `${t(locale, "order.pay_bank", { bank: recv?.bankName || "N/A" })}\n` +
-      `${t(locale, "order.pay_number", { number: recv?.accountNumber || "N/A" })}\n` +
-      `${t(locale, "order.pay_name", { name: recv?.accountName || "N/A" })}\n` +
-      `${t(locale, "order.pay_memo", { memo })}\n` +
-      `${t(locale, "order.pay_memo_hint")}`,
-    {
-      parse_mode: "HTML",
-      reply_markup: getActiveOrderActionKeyboard(order as any, locale)
-    }
-  );
+  // Dynamic Payment QR V1 — the 💳 re-display uses the SAME shared renderer
+  // as quote confirmation: one message with the Order QR (dynamic/static) and
+  // the FROZEN Order.transferMemo — never a regenerated memo from current
+  // SystemSetting.
+  await sendOrderPaymentCard(ctx, order as any, locale);
 });
 
 /** 📷 Send bill — localized instruction (Telegram UX cannot open a file picker). */
@@ -649,49 +634,13 @@ customerHandler.callbackQuery(/^(?:customer:quote:confirm:|confirm_quote:)(.+)$/
     const confirmedQuote = await QuoteService.confirmQuote(quoteId, customer.id);
     const order = await OrderService.createOrderFromQuote(customer.id, confirmedQuote);
 
-    const receivingSnapshot = order.receivingAccountSnapshot as any;
     const locale = locOf(customer);
-    const formattedSrc = MoneyService.formatAmount(confirmedQuote.sourceAmount, confirmedQuote.sourceCurrency);
 
-    // Deterministic Admin-configured transfer reference (memo). Never AI-
-    // generated, never contains bank/account data. The customer must copy
-    // this EXACT memo into the transfer note.
-    const memo = generateTransferMemo(SystemConfigService.getTransferMemoTemplate(), {
-      orderId: order.id,
-      username: customer.username,
-      telegramId: customer.telegramId
-    });
-
-    const msg =
-      `${t(locale, "order.created_title")}\n` +
-      `${t(locale, "order.id", { id: order.id })}\n\n` +
-      `${t(locale, "order.transfer_amount", { amount: formattedSrc, currency: confirmedQuote.sourceCurrency })}\n` +
-      `${t(locale, "order.pay_to")}\n` +
-      `${t(locale, "order.pay_bank", { bank: receivingSnapshot?.bankName || "N/A" })}\n` +
-      `${t(locale, "order.pay_number", { number: receivingSnapshot?.accountNumber || "N/A" })}\n` +
-      `${t(locale, "order.pay_name", { name: receivingSnapshot?.accountName || "N/A" })}\n` +
-      `${t(locale, "order.pay_memo", { memo })}\n` +
-      `${t(locale, "order.pay_memo_hint")}\n\n` +
-      `${t(locale, "order.pay_bill_hint")}\n\n` +
-      t(locale, "order.pay_later_note", { currency: order.targetCurrency });
-
-    // E: the payment card MUST carry the active-order inline actions
-    // (💳 transfer info / 📷 send bill / 💬 support / ❌ cancel) immediately —
-    // canCustomerCancel(order) == allowed ⇔ the ❌ button appears NOW, not
-    // after bill/payment verification.
-    await ctx.reply(msg, {
-      parse_mode: "HTML",
-      reply_markup: getActiveOrderActionKeyboard(order as any, locale)
-    });
-
-    if (receivingSnapshot?.qrFilePath) {
-      const qrBuffer = await FileService.getFile(receivingSnapshot.qrFilePath);
-      if (qrBuffer) {
-        await ctx.replyWithPhoto(new InputFile(qrBuffer), {
-          caption: t(locale, "order.pay_qr_caption", { id: order.id })
-        });
-      }
-    }
+    // Dynamic Payment QR V1 — confirming the quote IMMEDIATELY generates and
+    // sends the Order's payment QR as ONE message (photo + concise caption,
+    // or the text card when no QR is available). NO separate "Get QR" step.
+    // Memo/amount come from the FROZEN Order (Order.transferMemo/sourceAmount).
+    await sendOrderPaymentQrOnConfirm(ctx, order as any, locale);
 
     // Notify admins (order already durably created + audited above).
     await notifyOrderCreated(order, customer);
@@ -1739,7 +1688,66 @@ customerHandler.callbackQuery(/^customer:rate:([a-zA-Z0-9_-]+):([1-5])$/, async 
   await ctx.reply(t(locale, "rate.thanks"), { parse_mode: "HTML" }).catch(() => {});
 });
 
-// Customer photo or document handler (Safe Bill Target Selection)
+// Dynamic Payment QR V1 — SHARED one-message payment card renderer.
+// Used by BOTH quote confirmation and 💳 payment-info re-display.
+// If a QR image is available (dynamic KHQR/VietQR or configured static QR),
+// the card is sent as the photo CAPTION — one single message, no extra
+// "Get QR" step. Without a QR it degrades to the concise text card.
+export async function sendOrderPaymentCard(ctx: BotContext, order: any, locale: SupportedLocale): Promise<void> {
+  const qr = await PaymentQrService.generateForOrder(order.id).catch(() => null);
+  const memo = qr?.memo || (await OrderService.getOrderTransferMemo(order).catch(() => ""));
+  const snap = (order.receivingAccountSnapshot || {}) as Record<string, any>;
+  const ref = `#${order.id.slice(-6).toUpperCase()}`;
+  const amount = qr?.amount || MoneyService.formatAmount(order.sourceAmount, order.sourceCurrency);
+  const kb = getActiveOrderActionKeyboard(order as any, locale);
+
+  const lines: string[] = [
+    `💳 <b>${ref}</b>`,
+    t(locale, "paymentqr.pay_line", { amount, currency: order.sourceCurrency })
+  ];
+  if (snap.bankName) lines.push(t(locale, "order.pay_bank", { bank: snap.bankName }));
+  if (snap.accountNumber) lines.push(t(locale, "order.pay_number", { number: snap.accountNumber }));
+  lines.push(t(locale, "paymentqr.memo_line", { memo }));
+  lines.push("", t(locale, "paymentqr.send_bill_hint"));
+  const caption = lines.join("\n");
+
+  // EXPIRED safety: after the Order payment deadline the bot presents NO
+  // payment method — no dynamic QR, no static QR, no account details. The
+  // 💳 payinfo recovery action obeys the same rule via this shared renderer.
+  if (qr?.type === "EXPIRED") {
+    await ctx.reply(t(locale, "paymentqr.expired", { ref }), { parse_mode: "HTML" });
+    return;
+  }
+
+  if (qr?.imageBuffer) {
+    // QR message carries a MINIMAL keyboard: the customer already HAS the QR —
+    // only ❌ cancel (when safe) and 💬 support are useful here. No redundant
+    // "payment-info/Get-QR" action under the QR itself. The 💳 payinfo
+    // recovery action remains on the TEXT fallback card and /start view.
+    const qrKb = new InlineKeyboard();
+    if (OrderService.canCustomerCancel(order as any).allowed) {
+      qrKb.text(t(locale, "order.cancel_btn"), `customer:order:cancel:${order.id}`);
+      qrKb.text(t(locale, "menu.support"), "customer:menu:support");
+    } else {
+      qrKb.text(t(locale, "menu.support"), "customer:menu:support");
+    }
+    await ctx.replyWithPhoto(new InputFile(qr.imageBuffer), {
+      caption,
+      parse_mode: "HTML",
+      reply_markup: qrKb
+    });
+    return;
+  }
+  // Text fallback keeps the FULL action keyboard (incl. 💳 payinfo recovery).
+  await ctx.reply(caption, { parse_mode: "HTML", reply_markup: kb });
+}
+
+// Dynamic Payment QR V1 — quote confirmation: IMMEDIATELY generate and send
+// the Order's payment QR (no extra "Get QR"/"Show QR" step exists).
+export async function sendOrderPaymentQrOnConfirm(ctx: BotContext, order: any, locale: SupportedLocale): Promise<void> {
+  await sendOrderPaymentCard(ctx, order, locale);
+}
+
 //
 // J — RESERVED FINANCIAL ROUTING PRECEDENCE:
 //   1. Active payout-QR session  -> payout QR (never bill, never CSKH relay)

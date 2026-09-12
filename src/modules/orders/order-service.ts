@@ -25,6 +25,28 @@ export class OrderService {
   static canCustomerCancel(order: any) {
     return canCustomerCancel(order as any);
   }
+
+  /**
+   * Dynamic QR V1 — authoritative memo accessor.
+   * Uses the FROZEN Order.transferMemo when present; legacy/null rows fall
+   * back to the deterministic generator (legacy compatibility only — new
+   * Orders always have the memo persisted).
+   */
+  static async getOrderTransferMemo(order: {
+    id: string;
+    transferMemo?: string | null;
+    customer?: { username?: string | null; telegramId?: string | null } | null;
+  }): Promise<string> {
+    const stored = String(order.transferMemo || "").trim();
+    if (stored) return stored;
+    const { generateTransferMemo } = await import("./transfer-memo.js");
+    const { SystemConfigService } = await import("../system-config/system-config-service.js");
+    return generateTransferMemo(SystemConfigService.getTransferMemoTemplate(), {
+      orderId: order.id,
+      username: order.customer?.username ?? null,
+      telegramId: order.customer?.telegramId ?? null
+    });
+  }
   static canAdminCancel(order: any) {
     return canAdminCancel(order as any);
   }
@@ -76,7 +98,17 @@ export class OrderService {
       qrVersion: receivingAccount.qrVersion,
       qrFileId: receivingAccount.qrFileId,
       qrFilePath: receivingAccount.qrFilePath,
-      qrSha256: receivingAccount.qrSha256
+      qrSha256: receivingAccount.qrSha256,
+      // Dynamic payment QR V1 — FROZEN QR metadata: the Order's QR can always
+      // be reproduced from the snapshot even if Admin later edits the account.
+      qrProvider: receivingAccount.qrProvider ?? null,
+      bankBin: receivingAccount.bankBin ?? null,
+      khqrMode: receivingAccount.khqrMode ?? null,
+      khqrBakongAccountId: receivingAccount.khqrBakongAccountId ?? null,
+      khqrMerchantName: receivingAccount.khqrMerchantName ?? null,
+      khqrMerchantCity: receivingAccount.khqrMerchantCity ?? null,
+      khqrMerchantId: receivingAccount.khqrMerchantId ?? null,
+      khqrAcquiringBank: receivingAccount.khqrAcquiringBank ?? null
     };
 
     const payoutBankSnapshot = payoutBank
@@ -93,7 +125,18 @@ export class OrderService {
     // rewrite historical attribution.
     const customerRow = await prisma.customer.findUnique({
       where: { id: customerId },
-      select: { partnerId: true }
+      select: { partnerId: true, username: true, telegramId: true }
+    });
+
+    // Dynamic QR V1 — FROZEN transfer memo: generated ONCE at Order creation
+    // from the THEN-CURRENT template. Later SystemSetting edits never rewrite
+    // an existing Order's payment instructions (legacy-null fallback below).
+    const { generateTransferMemo } = await import("./transfer-memo.js");
+    const { SystemConfigService } = await import("../system-config/system-config-service.js");
+    const transferMemo = generateTransferMemo(SystemConfigService.getTransferMemoTemplate(), {
+      orderId,
+      username: customerRow?.username ?? null,
+      telegramId: customerRow?.telegramId ?? null
     });
 
     const order = await prisma.$transaction(async (tx: any) => {
@@ -102,6 +145,7 @@ export class OrderService {
           id: orderId,
           customerId,
           partnerId: customerRow?.partnerId ?? null,
+          transferMemo,
           sourceCurrency: quote.sourceCurrency,
           targetCurrency: quote.targetCurrency,
           sourceAmount: quote.sourceAmount,

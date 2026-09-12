@@ -25,6 +25,9 @@
   "dependencies": {
     "@google/genai": "^1.0.0",
     "@grammyjs/runner": "^2.0.2",
+    "bakong-khqr": "^1.0.20",
+    "qrcode": "^1.5.4",
+    "vietnam-qr-pay": "^1.5.1",
     "@prisma/adapter-pg": "^7.10.0",
     "@prisma/client": "^7.10.0",
     "@types/express": "^5.0.6",
@@ -40,6 +43,7 @@
   "devDependencies": {
     "@types/node": "^22.0.0",
     "@types/pg": "^8.15.0",
+    "@types/qrcode": "^1.5.5",
     "tsx": "^4.20.0",
     "typescript": "^5.8.0",
     "vitest": "^3.2.0"

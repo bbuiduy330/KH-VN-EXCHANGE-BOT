@@ -281,4 +281,14 @@ add("rate.thanks", "🙏 Cảm ơn phản hồi của bạn!", "🙏 Thanks for 
 add("rate.thanks_skip", "👋 Cảm ơn bạn đã sử dụng dịch vụ!", "👋 Thanks for using our service!", "👋 អរគុណសម្រាប់ការប្រើប្រាស់សេវាកម្ម!", "👋 感谢您使用我们的服务！");
 add("quote.summary", "💱 <b>{src} → {tgt}</b>", "💱 <b>{src} → {tgt}</b>", "💱 <b>{src} → {tgt}</b>", "💱 <b>{src} → {tgt}</b>");
 
+// --- Dynamic payment QR V1 (customer card, all locales) ---
+add("paymentqr.pay_line", "Chuyển: <b>{amount} {currency}</b>", "Transfer: <b>{amount} {currency}</b>", "ផ្ទេរ: <b>{amount} {currency}</b>", "转账：<b>{amount} {currency}</b>");
+add("paymentqr.memo_line", "Nội dung: <code>{memo}</code>", "Reference: <code>{memo}</code>", "ខ្លឹមសារ: <code>{memo}</code>", "附言：<code>{memo}</code>");
+add("paymentqr.send_bill_hint", "Sau khi chuyển, gửi bill vào đây.", "After paying, send the receipt here.", "បន្ទាប់ពីបង់ សូមផ្ញើបង្កាន់ដៃនៅទីនេះ។", "付款后，请在此发送回单。");
+add("paymentqr.expired",
+  "⏰ Đơn {ref} đã hết thời gian thanh toán.\nVui lòng tạo đơn mới để nhận tỷ giá và QR mới.",
+  "⏰ Order {ref} has passed its payment deadline.\nPlease create a new order to receive a fresh rate and QR.",
+  "⏰ ការបញ្ជាទិញ {ref} ផុតកំណត់ពេលបង់ប្រាក់។\nសូមបង្កើតការបញ្ជាទិញថ្មី ដើម្បីទទួលអត្រា និង QR ថ្មី។",
+  "⏰ 订单 {ref} 已超过付款期限。\n请创建新订单以获取新汇率和新二维码。");
+
 export { TRANSLATIONS };
