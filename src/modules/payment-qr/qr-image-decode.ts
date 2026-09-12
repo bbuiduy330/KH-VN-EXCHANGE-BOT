@@ -79,10 +79,20 @@ export function resampleRgba(pixels: ImagePixels, targetMaxDim: number): ImagePi
       for (let yy = y0; yy < y1; yy++) {
         for (let xx = x0; xx < x1; xx++) {
           const idx = (yy * pixels.width + xx) * 4;
-          r += pixels.data[idx];
-          g += pixels.data[idx + 1];
-          b += pixels.data[idx + 2];
-          a += pixels.data[idx + 3];
+          // noUncheckedIndexedAccess: explicit bounds check — an unexpected
+          // out-of-range RGBA index fails loudly instead of silently
+          // averaging `undefined` into the pixel data.
+          const rC = pixels.data[idx];
+          const gC = pixels.data[idx + 1];
+          const bC = pixels.data[idx + 2];
+          const aC = pixels.data[idx + 3];
+          if (rC === undefined || gC === undefined || bC === undefined || aC === undefined) {
+            throw new Error("Dữ liệu ảnh RGBA không hợp lệ (chỉ số pixel ngoài phạm vi).");
+          }
+          r += rC;
+          g += gC;
+          b += bC;
+          a += aC;
           count++;
         }
       }
