@@ -12,13 +12,27 @@ import { escapeHtml, STATUS_VI } from "../menus/cskh-panel.js";
 import { customerLabel, shortOrderId, timeAgo, maskAccountNumber, BILL_AWAITING_VERIFY_STATUSES, WARNING_REVIEW_STATUSES } from "./admin-panel.js";
 import { customerIdentity } from "../notifications.js";
 import { hasCustomerBillEvidence } from "../../modules/orders/bill-evidence.js";
+import { formatShortDateTime, formatAdminDateTime } from "../../shared/app-time.js";
 import { setAdminSearch } from "./admin-session.js";
 
 export const adminOrdersHandler = new Composer<BotContext>();
 
 const NEED_ACTION_STATUSES = ["WAITING_ADMIN_VERIFY", "CUSTOMER_SENT_BILL", "MANUAL_REVIEW", "SUSPICIOUS", "WAITING_PAYOUT", "PAYOUT_SENT"];
-const PROCESSING_STATUSES = ["WAITING_PAYMENT", "PAYMENT_CONFIRMED"];
+/** 🔴 Đang xử lý = EVERY non-terminal operational status (state-machine truth). */
+const PROCESSING_STATUSES = [
+  "WAITING_PAYMENT",
+  "CUSTOMER_SENT_BILL",
+  "WAITING_ADMIN_VERIFY",
+  "PAYMENT_CONFIRMED",
+  "PAYMENT_MISMATCH",
+  "MANUAL_REVIEW",
+  "SUSPICIOUS",
+  "WAITING_PAYOUT",
+  "PAYOUT_SENT"
+];
+/** ✅ Thành công = COMPLETED ONLY. */
 const DONE_STATUSES = ["COMPLETED"];
+/** ❌ Đã hủy = CANCELLED ONLY. */
 const CANCELLED_STATUSES = ["CANCELLED"];
 
 export type OrderGroup = "need_action" | "processing" | "done" | "cancelled";
@@ -107,6 +121,37 @@ export function orderRowText(order: any): string {
   return lines.join("\n");
 }
 
+/**
+ * Status badge for transaction rows: status must be obvious WITHOUT opening
+ * the Order. ✅ = COMPLETED only, ❌ = CANCELLED only, 🔴 = non-terminal.
+ */
+export function statusBadge(status: string): string {
+  if (status === "COMPLETED") return "✅";
+  if (status === "CANCELLED") return "❌";
+  return "🔴";
+}
+
+/**
+ * ONE compact transaction row (scale UX): exact GMT+7 short timestamp, short
+ * Order reference, amount pair and a STABLE customer identity — the Telegram
+ * numeric ID (usernames can change and are NOT identity; long Customer CUIDs
+ * are never primary). Display name included when present; username secondary.
+ * Example: `🔴 12/09 15:42 · #MTY4XTC7 · 100 USD → 2.530.000 VND · TG 123456789`
+ */
+export function transactionRowText(order: any): string {
+  const c = order.customer || {};
+  const tgId = String(c.telegramId || "").trim();
+  const identity = tgId
+    ? `TG ${escapeHtml(tgId)}${(c.fullName || "").trim() ? ` · ${escapeHtml((c.fullName || "").trim())}` : ""}`
+    : escapeHtml(customerLabel(c));
+  return (
+    `${statusBadge(order.status)} ${formatShortDateTime(order.createdAt)} · ` +
+    `${shortOrderId(order.id)} · ` +
+    `${escapeHtml(orderExchangeLine(order))} · ` +
+    identity
+  );
+}
+
 export function renderOrderDetailText(order: any): string {
   const receiving = order.receivingAccountSnapshot as any;
   const payout = order.payoutBankSnapshot as any;
@@ -156,12 +201,13 @@ export function renderOrderDetailText(order: any): string {
   lines.push(
     "",
     `📷 Bill khách: ${hasCustomerBillEvidence(order) ? "Đã gửi" : "Chưa gửi"}`,
+    `🧾 Hóa đơn chi trả: ${order.payoutBillFileId ? "Đã lưu (xem bằng nút 🧾)" : "Chưa có"}`,
     `💸 Trạng thái: <b>${orderStatusLabel(order.status)}</b>`,
     "",
-    `🕒 Tạo: ${timeAgo(order.createdAt)}`,
-    order.verifiedAt ? `🕒 Xác nhận tiền: ${timeAgo(order.verifiedAt)}` : "",
-    order.payoutAt ? `🕒 Chi tiền: ${timeAgo(order.payoutAt)}` : "",
-    order.completedAt ? `🕒 Hoàn tất: ${timeAgo(order.completedAt)}` : ""
+    `🕒 Tạo: ${formatAdminDateTime(order.createdAt)} (GMT+7)`,
+    order.verifiedAt ? `🕒 Xác nhận tiền: ${formatAdminDateTime(order.verifiedAt)} (GMT+7)` : "",
+    order.payoutAt ? `🕒 Chi tiền: ${formatAdminDateTime(order.payoutAt)} (GMT+7)` : "",
+    order.completedAt ? `🕒 Hoàn tất: ${formatAdminDateTime(order.completedAt)} (GMT+7)` : ""
   );
 
   return lines.filter(Boolean).join("\n");
@@ -205,6 +251,13 @@ export function orderDetailKeyboard(order: any): InlineKeyboard {
     if (order.payoutBillFileId) {
       kb.row().text("📤 Gửi lại hóa đơn cho khách", `ops:receipt:resend:${order.id}`);
     }
+  }
+
+  // Admin payout receipt: view the EXACT stored transfer evidence Admin
+  // uploaded (FileEvidence via Order.payoutBillFileId). Never regenerated or
+  // substituted. No fake action when no payout receipt exists.
+  if (order.payoutBillFileId) {
+    kb.row().text("🧾 Xem hóa đơn chuyển tiền", `ops:payout:view:${order.id}`);
   }
 
   // Requirement B: explicit two-step Admin cancel (reason → preview → confirm).
@@ -389,29 +442,25 @@ export async function showOrderList(ctx: BotContext, group: OrderGroup = "need_a
   const title =
     group === "need_action" ? "CẦN XỬ LÝ" :
     group === "processing" ? "ĐANG XỬ LÝ" :
-    group === "cancelled" ? "ĐÃ HỦY" : "HOÀN THÀNH";
-  const lines = [`📦 <b>ĐƠN HÀNG · ${title} (${orders.length})</b>`, ""];
+    group === "cancelled" ? "ĐÃ HỦY" : "THÀNH CÔNG";
+  const lines = [`📦 <b>GIAO DỊCH · ${title} (${orders.length})</b>`, ""];
   const kb = new InlineKeyboard();
 
   if (orders.length === 0) {
-    lines.push("Không có đơn hàng nào.");
+    lines.push("Không có giao dịch nào.");
   } else {
+    // Scale UX: EVERY row already shows badge + exact GMT+7 time + short ref +
+    // amount pair + customer identity — status is obvious WITHOUT opening.
     for (const o of orders) {
-      lines.push(
-        `👤 ${escapeHtml(customerLabel(o.customer))}`,
-        `💱 ${escapeHtml(orderExchangeLine(o))}`,
-        `📦 ${shortOrderId(o.id)} · 📍 ${orderStatusLabel(o.status)} · 🕒 ${timeAgo(o.createdAt)}`
-      );
-      kb.row().text(`📦 ${shortOrderId(o.id)}`, `ops:order:detail:${o.id}`);
-      lines.push("");
+      lines.push(transactionRowText(o));
+      kb.row().text(`📦 ${shortOrderId(o.id)} · ${orderStatusLabel(o.status)}`, `ops:order:detail:${o.id}`);
     }
   }
 
-  kb.row().text("🔴 Cần xử lý", "ops:orders:filter:need_action")
-    .text("🟡 Đang xử lý", "ops:orders:filter:processing");
-  kb.row().text("✅ Hoàn thành", "ops:orders:filter:done")
+  kb.row().text("🔴 Đang xử lý", "ops:orders:filter:processing");
+  kb.row().text("✅ Thành công", "ops:orders:filter:done")
     .text("❌ Đã hủy", "ops:orders:filter:cancelled");
-  kb.row().text("🔎 Tìm đơn", "ops:orders:search").text("🏠 Menu Admin", "ops:home");
+  kb.row().text("🔎 Tìm giao dịch", "ops:orders:search").text("🏠 Menu Admin", "ops:home");
 
   await replyOrEdit(ctx, lines.join("\n"), kb);
 }

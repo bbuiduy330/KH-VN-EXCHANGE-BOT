@@ -1176,6 +1176,36 @@ export class OrderService {
     });
   }
 
+  /**
+   * Customer-visible ACTIVE Orders (My Orders UX).
+   * Terminal/archival statuses (COMPLETED, CANCELLED) are NEVER shown to the
+   * customer — history stays in the DB for audit/disputes, this is visibility
+   * only. Uses the AUTHORITATIVE state machine (prisma OrderStatus enum) as
+   * the source: every non-terminal operational status is "active".
+   */
+  static readonly CUSTOMER_ACTIVE_ORDER_STATUSES = [
+    "WAITING_PAYMENT",
+    "CUSTOMER_SENT_BILL",
+    "WAITING_ADMIN_VERIFY",
+    "PAYMENT_CONFIRMED",
+    "WAITING_PAYOUT",
+    "PAYOUT_SENT",
+    "PAYMENT_MISMATCH",
+    "MANUAL_REVIEW",
+    "SUSPICIOUS"
+  ] as const;
+
+  static async getActiveOrdersForCustomer(customerId: string, limit: number = 10) {
+    return prisma.order.findMany({
+      where: {
+        customerId,
+        status: { in: [...OrderService.CUSTOMER_ACTIVE_ORDER_STATUSES] }
+      },
+      orderBy: { createdAt: "desc" },
+      take: limit
+    });
+  }
+
   static async getOrdersAwaitingBill(customerId: string) {
     // BILL INTAKE eligibility = EXACTLY the statuses submitCustomerBill()
     // accepts (WAITING_PAYMENT first bill + CUSTOMER_SENT_BILL /

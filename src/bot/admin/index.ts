@@ -33,11 +33,11 @@ import { adminAiHandler, handleAiKeyInput, handleAiModelInput, handleAiVoiceTest
 import { adminConfigHandler, handleConfigInput } from "./admin-config.js";
 import { adminAuditHandler } from "./admin-audit.js";
 import { adminPartnersHandler, handlePartnerAddInput } from "./admin-partners.js";
-import { accountQrMetaHandler, handleAccountQrMetaInput } from "./account-qr-meta.js";
+import { accountQrMetaHandler, handleAccountQrMetaInput, handleAccountQrImportMedia } from "./account-qr-meta.js";
 
 export const adminOperationsHandler = new Composer<BotContext>();
 
-export { handleAdminPayoutEvidenceMedia, handleAiVoiceTestMedia, showOperationsCenter, handleAccountAddQrMedia, handleAccountQrUpdateMedia };
+export { handleAdminPayoutEvidenceMedia, handleAiVoiceTestMedia, showOperationsCenter, handleAccountAddQrMedia, handleAccountQrUpdateMedia, handleAccountQrImportMedia };
 
 adminOperationsHandler.use(adminOrdersHandler);
 adminOperationsHandler.use(adminActionsHandler);
