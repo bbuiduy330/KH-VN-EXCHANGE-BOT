@@ -15,6 +15,7 @@ import { customerLabel, shortOrderId } from "./admin-panel.js";
 import { customerIdentity } from "../notifications.js";
 import { setAdminSearch } from "./admin-session.js";
 import { clearSelectedCustomer, getSelectedCustomer, setSelectedCustomer } from "../state/staff-chat-session.js";
+import { formatAdminDate } from "../../shared/app-time.js";
 
 export const adminCustomersHandler = new Composer<BotContext>();
 
@@ -64,7 +65,7 @@ export function renderCustomerDetailText(customer: any, conv: any, latestOrder: 
       lines.push(`👨‍💼 CSKH: ${escapeHtml(staffDisplayName(null, conv.claimedById))}`);
     }
   }
-  lines.push("", `🕒 Gia nhập: ${escapeHtml(new Date(customer.createdAt).toLocaleDateString("vi-VN"))}`);
+  lines.push("", `🕒 Gia nhập: ${escapeHtml(formatAdminDate(customer.createdAt))} (GMT+7)`);
 
   return lines.join("\n");
 }

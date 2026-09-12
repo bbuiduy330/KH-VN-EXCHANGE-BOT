@@ -23,6 +23,8 @@ import { BakongKHQR } from "bakong-khqr";
 import { QRPay } from "vietnam-qr-pay";
 import { SystemConfigService } from "../src/modules/system-config/system-config-service.js";
 import { SUPPORTED_LOCALES, t } from "../src/modules/i18n/locales.js";
+import { getQrReadiness } from "../src/modules/payment-qr/payment-qr-service.js";
+import { readinessLine, resolveVietQrBank } from "../src/bot/admin/account-qr-meta.js";
 
 let seq = 0;
 
@@ -545,5 +547,207 @@ describe("customer card caption keys (vi/en/km/zh)", () => {
         expect(v, `${loc}:${key}`).not.toBe(key);
       }
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// TASK 2 — KHQR CONFIG UX (shared readiness validation)
+// ---------------------------------------------------------------------------
+describe("getQrReadiness — the SAME validation PaymentQrService uses at runtime", () => {
+  it("simple USD KHQR (INDIVIDUAL: bakong + name + city) is READY", () => {
+    const r = getQrReadiness({
+      currency: "USD",
+      qrProvider: "KHQR",
+      khqrMode: "INDIVIDUAL",
+      khqrBakongAccountId: "personal@aba",
+      khqrMerchantName: "Personal ABA",
+      khqrMerchantCity: "Phnom Penh"
+    });
+    expect(r.provider).toBe("KHQR");
+    expect(r.ready).toBe(true);
+    expect(r.missing).toEqual([]);
+    // INDIVIDUAL never requires Merchant ID / Acquiring Bank:
+    expect(JSON.stringify(r.missing)).not.toContain("Merchant ID");
+    expect(JSON.stringify(r.missing)).not.toContain("Acquiring");
+  });
+
+  it("MERCHANT mode is NEVER ready unless every merchant field is present", () => {
+    const incomplete = getQrReadiness({
+      currency: "USD",
+      qrProvider: "KHQR",
+      khqrMode: "MERCHANT",
+      khqrBakongAccountId: "merchant@aba",
+      khqrMerchantName: "MERCHANT DESK",
+      khqrMerchantCity: "Phnom Penh"
+      // khqrMerchantId + khqrAcquiringBank MISSING
+    });
+    expect(incomplete.ready).toBe(false);
+    expect(JSON.stringify(incomplete.missing)).toContain("Merchant ID");
+    expect(JSON.stringify(incomplete.missing)).toContain("Acquiring Bank");
+
+    const complete = getQrReadiness({
+      currency: "USD",
+      qrProvider: "KHQR",
+      khqrMode: "MERCHANT",
+      khqrBakongAccountId: "merchant@aba",
+      khqrMerchantName: "MERCHANT DESK",
+      khqrMerchantCity: "Phnom Penh",
+      khqrMerchantId: "123456",
+      khqrAcquiringBank: "ABA"
+    });
+    expect(complete.ready).toBe(true);
+  });
+
+  it("USD KHQR missing ANY simple field reports the exact missing list (never a blank mode)", () => {
+    const r = getQrReadiness({ currency: "USD", qrProvider: "KHQR", khqrMode: "INDIVIDUAL" });
+    expect(r.ready).toBe(false);
+    expect(JSON.stringify(r.missing)).toContain("Bakong");
+    expect(JSON.stringify(r.missing)).toContain("Tên hiển thị");
+    expect(JSON.stringify(r.missing)).toContain("Thành phố");
+  });
+
+  it("VND VietQR readiness mirrors detectVietQrCapability", () => {
+    const ok = getQrReadiness({ currency: "VND", qrProvider: "VIETQR", bankBin: "970436", accountNumber: "9988776655" });
+    expect(ok.provider).toBe("VIETQR");
+    expect(ok.ready).toBe(true);
+
+    const bad = getQrReadiness({ currency: "VND", qrProvider: "VIETQR", accountNumber: "9988776655" });
+    expect(bad.ready).toBe(false);
+    expect(JSON.stringify(bad.missing)).toContain("Bank BIN");
+  });
+
+  it("readiness output strings follow the Admin UX contract (never a blank mode)", () => {
+    expect(readinessLine({ provider: "KHQR", ready: true, missing: [] })).toBe("🟢 KHQR động — Sẵn sàng");
+    expect(readinessLine({ provider: "VIETQR", ready: true, missing: [] })).toBe("🟢 VietQR động — Sẵn sàng");
+    const notReady = readinessLine({
+      provider: "KHQR",
+      ready: false,
+      missing: ["Bakong Account ID (name@bank)", "Tên hiển thị"]
+    });
+    expect(notReady.startsWith("🟡 QR tĩnh")).toBe(true);
+    expect(notReady).toContain("KHQR động chưa sẵn sàng:");
+    expect(notReady).toContain("Thiếu: Bakong Account ID (name@bank), Tên hiển thị");
+    // The mode label is NEVER blank (old bug rendered "KHQR — "):
+    expect(notReady).not.toContain("KHQR —");
+  });
+});
+
+describe("resolveVietQrBank — verified NAPAS table only, BIN never invented", () => {
+  it("resolves a bank by NAME (case-insensitive)", () => {
+    const b = resolveVietQrBank("vietcombank");
+    expect(b).not.toBeNull();
+    expect(b!.bankBin).toMatch(/^\d{4,6}$/);
+    expect(b!.bankName.toLowerCase()).toContain("vietcombank");
+  });
+
+  it("resolves an exact BIN and rejects an unknown BIN", () => {
+    const b = resolveVietQrBank("970436");
+    expect(b).not.toBeNull();
+    expect(b!.bankBin).toBe("970436");
+    expect(resolveVietQrBank("0000")).toBeNull();
+    expect(resolveVietQrBank("not-a-bank")).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// TASK 2 — SIMPLE vs ADVANCED wizard save behavior (khqrMode is PERSISTED)
+// ---------------------------------------------------------------------------
+describe("ops:qrmeta wizard — simple flow saves KHQR/INDIVIDUAL, MERCHANT is gated", () => {
+  let wizSeq = 0;
+
+  function fakeCtx(telegramId: string): { ctx: any; replies: any[] } {
+    const replies: any[] = [];
+    const ctx: any = {
+      from: { id: Number(telegramId), is_bot: false, first_name: "QR Admin" },
+      reply: async (text: string, opts?: any) => {
+        replies.push({ text, opts });
+        return { message_id: replies.length };
+      },
+      answerCallbackQuery: async () => true,
+      callbackQuery: { data: "" }
+    };
+    return { ctx, replies };
+  }
+
+  async function makeAccount(): Promise<any> {
+    wizSeq++;
+    return prisma.paymentAccount.create({
+      data: {
+        id: `PA-WIZ-${wizSeq}-${Date.now().toString(36).toUpperCase()}`,
+        currency: "USD",
+        bankName: "ABA Bank",
+        accountName: "PERSONAL ABA USD",
+        accountNumber: `001234${wizSeq}`,
+        isActive: true
+      }
+    }) as any;
+  }
+
+  it("simple KHQR flow (Bakong ID / Name / City ONLY) persists qrProvider=KHQR + khqrMode=INDIVIDUAL", async () => {
+    wizSeq++;
+    const adminTg = String(993000000 + wizSeq);
+    const { PermissionService } = await import("../src/modules/permissions/permission-service.js");
+    await PermissionService.inviteStaff({ telegramId: adminTg, name: "QR Admin", role: "ADMIN" });
+
+    const acc = await makeAccount();
+    const { startAccountQrMetaWizard, handleAccountQrMetaInput, confirmAccountQrMeta } =
+      await import("../src/bot/admin/account-qr-meta.js");
+
+    // 1. Open the SIMPLE wizard — only 3 questions are asked.
+    const start = fakeCtx(adminTg);
+    await startAccountQrMetaWizard(start.ctx, "khqr_simple", acc.id);
+    const startText = start.replies.map((r) => r.text).join("\n");
+    expect(startText).toContain("Bakong");
+    expect(startText).toContain("1/3"); // exactly 3 steps, no merchant fields
+
+    // 2. Answer Bakong ID, Display name, City.
+    await handleAccountQrMetaInput(fakeCtx(adminTg).ctx, "personal@aba");
+    await handleAccountQrMetaInput(fakeCtx(adminTg).ctx, "Personal ABA");
+    const q3 = fakeCtx(adminTg);
+    await handleAccountQrMetaInput(q3.ctx, "Phnom Penh");
+    // Preview names the mode explicitly — never blank:
+    expect(q3.replies.map((r) => r.text).join("\n")).toContain("KHQR INDIVIDUAL");
+
+    // 3. Confirm → save.
+    const confirm = fakeCtx(adminTg);
+    await confirmAccountQrMeta(confirm.ctx, acc.id);
+
+    const saved: any = await prisma.paymentAccount.findUnique({ where: { id: acc.id } });
+    expect(saved.qrProvider).toBe("KHQR"); // NOT "MERCHANT" (old regression)
+    expect(saved.khqrMode).toBe("INDIVIDUAL"); // never LOST (old regression)
+    expect(saved.khqrBakongAccountId).toBe("personal@aba");
+    expect(saved.khqrMerchantId ?? null).toBeNull(); // simple path requires NO Merchant fields
+    expect(saved.khqrAcquiringBank ?? null).toBeNull();
+
+    // 4. Save confirmation uses the SHARED readiness line:
+    expect(confirm.replies.map((r) => r.text).join("\n")).toContain("🟢 KHQR động — Sẵn sàng");
+  });
+
+  it("MERCHANT flow refuses to save when merchant-required fields are missing", async () => {
+    wizSeq++;
+    const adminTg = String(993000000 + wizSeq);
+    const { PermissionService } = await import("../src/modules/permissions/permission-service.js");
+    await PermissionService.inviteStaff({ telegramId: adminTg, name: "QR Admin 2", role: "ADMIN" });
+
+    const acc = await makeAccount();
+    const { startAccountQrMetaWizard, handleAccountQrMetaInput, confirmAccountQrMeta } =
+      await import("../src/bot/admin/account-qr-meta.js");
+
+    const start = fakeCtx(adminTg);
+    await startAccountQrMetaWizard(start.ctx, "khqr_merchant", acc.id);
+    expect(start.replies.map((r) => r.text).join("\n")).toContain("KHQR MERCHANT NÂNG CAO");
+
+    // Fill Bakong/Name/City but STOP before Merchant ID / Acquiring Bank:
+    await handleAccountQrMetaInput(fakeCtx(adminTg).ctx, "merchant@aba");
+    await handleAccountQrMetaInput(fakeCtx(adminTg).ctx, "MERCHANT DESK");
+    await handleAccountQrMetaInput(fakeCtx(adminTg).ctx, "Phnom Penh");
+
+    // Confirming with an incomplete merchant config must NOT save:
+    const confirm = fakeCtx(adminTg);
+    await confirmAccountQrMeta(confirm.ctx, acc.id);
+
+    const saved: any = await prisma.paymentAccount.findUnique({ where: { id: acc.id } });
+    expect(saved.qrProvider ?? "STATIC").not.toBe("KHQR"); // no misleading successful save
+    expect(confirm.replies.map((r) => r.text).join("\n")).toContain("Thiếu");
   });
 });

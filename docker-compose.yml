@@ -24,6 +24,9 @@ services:
     env_file: .env
     environment:
       NODE_ENV: production
+      # Canonical application display timezone (GMT+7). PostgreSQL storage
+      # semantics stay untouched (absolute timestamps); the app layer formats.
+      TZ: Asia/Ho_Chi_Minh
       DATABASE_URL: postgresql://exchange:${POSTGRES_PASSWORD}@postgres:5432/exchange?schema=public
       STORAGE_ROOT: /data/KH-VN-EXCHANGE
       DATA_DIR: /data/KH-VN-EXCHANGE
@@ -55,6 +58,7 @@ services:
       PGUSER: exchange
       PGDATABASE: exchange
       PGPASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD required}
+      TZ: Asia/Ho_Chi_Minh
       RESTIC_REPOSITORY: /repository
       RESTIC_PASSWORD_FILE: /run/secrets/restic_password
       RESTIC_CACHE_DIR: /tmp/restic-cache

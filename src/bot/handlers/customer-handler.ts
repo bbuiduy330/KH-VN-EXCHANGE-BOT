@@ -17,6 +17,7 @@ import { SystemConfigService } from "../../modules/system-config/system-config-s
 import { generateTransferMemo } from "../../modules/orders/transfer-memo.js";
 import { parsePayoutDestinationText, parsePayoutDestinationPipe, parsePayoutDestinationWithAi, decodePayoutQrImage } from "../../modules/orders/payout-destination.js";
 import { getPayoutInputSession, setPayoutInputSession, updatePayoutInputSession, clearPayoutInputSession } from "../state/customer-session.js";
+import { setPendingBillSession, clearPendingBillSession, takePendingBillSession, finishPendingBill } from "../state/pending-bill-session.js";
 import { PaymentQrService } from "../../modules/payment-qr/payment-qr-service.js";
 
 /** Mask a payout account number for customer-facing previews (**** + last 4). */
@@ -680,15 +681,81 @@ function confirmedQuoteCurrency(err: any): string {
   return code ?? "";
 }
 
-// Attach bill to explicitly selected order
-customerHandler.callbackQuery(/^customer:bill:attach:([a-zA-Z0-9_-]+):(.+)$/, async (ctx) => {
+// Attach pending bill media to the EXPLICITLY selected order.
+// FINANCIAL SAFETY + RELIABILITY:
+//   - The media reference lives in the per-customer PENDING-BILL session
+//     (never attached to an arbitrary Order before selection).
+//   - takePendingBillSession atomically MOVES the session into an in-flight
+//     slot: a double-click cannot double-attach (second click sees
+//     bill.processing) and the media is owned by exactly ONE attempt.
+//   - The session is only RELEASED (cleared for good) AFTER the bill is
+//     durably persisted. On ANY failure it is RESTORED with its ORIGINAL
+//     media reference — the customer retries by tapping the same order
+//     button again and NEVER re-sends the image.
+customerHandler.callbackQuery(/^customer:bill:attach:([a-zA-Z0-9_-]+)$/, async (ctx) => {
   await ctx.answerCallbackQuery();
-  const orderId = ctx.match ? ctx.match[1] : undefined;
-  const fileId = ctx.match ? ctx.match[2] : undefined;
-  if (!orderId || !fileId) return;
-
+  const orderId = ctx.match?.[1] || "";
   const telegramId = String(ctx.from?.id || "");
-  await processBillUpload(ctx, orderId, fileId, telegramId);
+  const customer = await CustomerService.getOrCreateCustomer({ telegramId });
+  const locale = locOf(customer);
+
+  // 1+2+3. Atomic take: prevents concurrent/double processing of the same
+  // session. A repeated click while one attempt is running gets a "processing"
+  // note; a click with no session at all sees "expired".
+  const take = takePendingBillSession(telegramId);
+  if (take.state === "in_flight") {
+    return void ctx.reply(t(locale, "bill.processing"));
+  }
+  if (take.state === "none") {
+    return void ctx.reply(t(locale, "bill.session_expired"));
+  }
+  const pending = take.session;
+
+  try {
+    const order = await OrderService.getOrder(orderId);
+    if (!order || order.customerId !== customer.id) {
+      finishPendingBill(telegramId, pending, true); // media stays recoverable
+      return void ctx.reply(t(locale, "bill.none"));
+    }
+    // Billable statuses = the statuses submitCustomerBill() accepts.
+    const allowedStatuses = ["WAITING_PAYMENT", "CUSTOMER_SENT_BILL", "WAITING_ADMIN_VERIFY", "MANUAL_REVIEW"];
+    if (!allowedStatuses.includes(order.status as string)) {
+      finishPendingBill(telegramId, pending, true); // media stays recoverable
+      return void ctx.reply(t(locale, "bill.not_eligible"), { parse_mode: "HTML" });
+    }
+
+    // 4. Process/download/store the ORIGINAL media. processBillUpload replies
+    // to the customer itself and returns TRUE only after durable persistence.
+    let stored = false;
+    try {
+      stored = await processBillUpload(ctx, orderId, pending.fileId, telegramId, {
+        type: pending.mediaType,
+        telegramMime: pending.telegramMime ?? null,
+        fileName: pending.fileName ?? null
+      });
+    } catch (processErr: any) {
+      logger.error(
+        { err: processErr?.message, orderRef: orderId.slice(-6) },
+        "Pending-bill attach threw — original media kept for retry"
+      );
+      stored = false;
+    }
+
+    if (!stored) {
+      // 5-failure. Persist failed (download/storage/DB) — restore the ORIGINAL
+      // pending media so the customer can retry by tapping the same button.
+      finishPendingBill(telegramId, pending, true);
+      return void ctx.reply(t(locale, "bill.retry_kept"), { parse_mode: "HTML" });
+    }
+
+    // 5-success. Bill persisted exactly once — release the session for good.
+    finishPendingBill(telegramId, pending, false);
+  } catch (unexpectedErr: any) {
+    // Defensive: any unexpected error must never lose the original media.
+    logger.error({ err: unexpectedErr?.message }, "Pending-bill attach crashed — session restored for retry");
+    finishPendingBill(telegramId, pending, true);
+    await ctx.reply(t(locale, "bill.retry_kept"), { parse_mode: "HTML" }).catch(() => {});
+  }
 });
 
 /** Reserved navigation labels recognized across ALL locales so a stale
@@ -974,7 +1041,13 @@ async function processBillUpload(
   fileId: string,
   telegramId: string,
   media?: { type: "photo" | "document"; telegramMime?: string | null; fileName?: string | null }
-) {
+): Promise<boolean> {
+  // RELIABILITY CONTRACT: returns TRUE only when the evidence was durably
+  // persisted to the Order (WAITING_ADMIN_VERIFY / MANUAL_REVIEW /
+  // SUSPICIOUS / LATE_BILL_CANCELLED — all store evidence rows). Every
+  // rejection/failure path (wrong owner, too large, download failed,
+  // unsupported type, non-billable state) returns FALSE so the caller can
+  // keep the original pending media recoverable and offer a retry.
   const maxBytes = (env.MAX_UPLOAD_MB || 15) * 1024 * 1024;
   const mediaType = media?.type || (ctx.message?.document ? "document" : "photo");
   const customer = await CustomerService.getOrCreateCustomer({ telegramId });
@@ -987,14 +1060,14 @@ async function processBillUpload(
   const target = await OrderService.getOrder(orderId);
   if (!target || target.customerId !== customer.id) {
     await ctx.reply(t(locale, "bill.none"));
-    return;
+    return false;
   }
 
   const file = await ctx.api.getFile(fileId);
 
   if (file.file_size && file.file_size > maxBytes) {
     await ctx.reply(t(locale, "bill.too_large", { limit: String(env.MAX_UPLOAD_MB || 15) }));
-    return;
+    return false;
   }
 
   const botToken = env.TELEGRAM_BOT_TOKEN;
@@ -1007,13 +1080,13 @@ async function processBillUpload(
       mimeType: "unknown", bytes: 0, reason: "EMPTY_FILE"
     });
     await ctx.reply(t(locale, "bill.download_failed"));
-    return;
+    return false;
   }
 
   const buffer = Buffer.from(await res.arrayBuffer());
   if (buffer.length === 0) {
     await ctx.reply(t(locale, "bill.download_failed"));
-    return;
+    return false;
   }
   if (buffer.length > maxBytes) {
     logEvidenceDiagnostics(logger, {
@@ -1021,7 +1094,7 @@ async function processBillUpload(
       mimeType: "unknown", bytes: buffer.length, reason: "UNSUPPORTED_TYPE"
     });
     await ctx.reply(t(locale, "bill.too_large", { limit: String(env.MAX_UPLOAD_MB || 15) }));
-    return;
+    return false;
   }
 
   // Safe MIME resolution — never requires a filename, never trusts the
@@ -1041,7 +1114,7 @@ async function processBillUpload(
 
   if (!resolved.accepted) {
     await ctx.reply(t(locale, "bill.unsupported"));
-    return;
+    return false;
   }
 
   const safeExt =
@@ -1064,8 +1137,22 @@ async function processBillUpload(
     // Order in a non-billable state (e.g. confirmed payment) — safe message,
     // never a raw Vietnamese service error in a localized flow.
     await ctx.reply(t(locale, "bill.not_eligible"), { parse_mode: "HTML" });
-    return;
+    return false;
   }
+
+  // RUNTIME HARDENING: the bill/evidence is ALREADY durably stored at this
+  // point. Admin notification failures must never surface as a customer
+  // error (and never lose the evidence) — wrapped best-effort with logging.
+  const notifyAdminBill = async (o: any, risk?: "DUPLICATE_BILL" | "ADDITIONAL_BILL") => {
+    try {
+      await notifyBillReceived(o, risk ? { risk } : undefined);
+    } catch (notifyErr: any) {
+      logger.error(
+        { err: notifyErr?.message, orderRef: orderId.slice(-6) },
+        "Admin bill notification failed — bill IS stored, Admin must check the Operations Center"
+      );
+    }
+  };
 
   if (result.status === "SUSPICIOUS") {
     // I — DUPLICATE/RISKY BILL: the customer gets a NEUTRAL success message
@@ -1074,24 +1161,31 @@ async function processBillUpload(
     await ctx.reply(t(locale, "bill.wait_verify", { id: orderId }), { parse_mode: "HTML" });
     const suspiciousOrder = await OrderService.getOrder(orderId);
     if (suspiciousOrder) {
-      await notifyBillReceived(suspiciousOrder, { risk: "DUPLICATE_BILL" });
+      await notifyAdminBill(suspiciousOrder, "DUPLICATE_BILL");
     }
+    return true; // evidence durably stored (flagged for review)
   } else if (result.status === "MANUAL_REVIEW") {
     // I — additional/re-uploaded bill: neutral customer message; Admin-only
     // additional-bill warning. Evidence preserved (MANUAL_REVIEW state).
     await ctx.reply(t(locale, "bill.wait_verify", { id: orderId }), { parse_mode: "HTML" });
     const additionalBillOrder = await OrderService.getOrder(orderId);
     if (additionalBillOrder) {
-      await notifyBillReceived(additionalBillOrder, { risk: "ADDITIONAL_BILL" });
+      await notifyAdminBill(additionalBillOrder, "ADDITIONAL_BILL");
     }
+    return true; // evidence durably stored (additional-bill review)
   } else if (result.status === "LATE_BILL_CANCELLED") {
     // Late bill after auto-cancel (requirement E): acknowledge locally, the
     // evidence is already stored — route to manual review, never reopen.
     await ctx.reply(t(locale, "bill.late_cancelled_customer", { id: orderId }), { parse_mode: "HTML" });
     const lateOrder = await OrderService.getOrder(orderId);
     if (lateOrder) {
-      await notifyLateBillOnCancelledOrder(lateOrder);
+      try {
+        await notifyLateBillOnCancelledOrder(lateOrder);
+      } catch (notifyErr: any) {
+        logger.error({ err: notifyErr?.message, orderRef: orderId.slice(-6) }, "Late-bill Admin notification failed");
+      }
     }
+    return true; // evidence durably stored (manual-review trail)
   } else {
     // Per the payout lifecycle: the payout destination is requested ONLY
     // after Admin verifies the incoming payment. Here we acknowledge the
@@ -1100,8 +1194,9 @@ async function processBillUpload(
 
     const billedOrderForNotify = await OrderService.getOrder(orderId);
     if (billedOrderForNotify) {
-      await notifyBillReceived(billedOrderForNotify);
+      await notifyAdminBill(billedOrderForNotify);
     }
+    return true; // evidence durably stored (first bill / re-upload)
   }
 }
 
@@ -1796,13 +1891,21 @@ export async function handleCustomerPhoto(ctx: BotContext) {
   }
 
   // 3. Reserved bill evidence routing (beats the generic HUMAN relay).
+  // BILL INTAKE SAFETY (multi-order):
+  //   - EXACTLY ONE billable Order → attach immediately (unambiguous: its
+  //     memo is in the QR the customer just scanned).
+  //   - MULTIPLE billable Orders → NEVER guess newest/oldest in a financial
+  //     system. The Telegram media reference is kept in a short-lived
+  //     PENDING-BILL session and the customer chooses the Order
+  //     (customer:bill:attach). No evidence is persisted to ANY Order before
+  //     the explicit selection, and the customer never re-sends the image.
+  //   "Billable" = every status submitCustomerBill() accepts
+  //   (WAITING_PAYMENT + CUSTOMER_SENT_BILL / WAITING_ADMIN_VERIFY /
+  //   MANUAL_REVIEW), so a SECOND bill photo is also ingested here — never
+  //   swallowed by the HUMAN relay or the "bill.none" dead end.
   const awaitingOrders = await OrderService.getOrdersAwaitingBill(customer.id);
 
   if (awaitingOrders.length > 0) {
-    // Routing is based on customer + eligible Order + state + media type —
-    // never on media type alone (requirement I). A document carrying a safe
-    // image/PDF is bill evidence here; a payout-QR session would have captured
-    // it earlier, and without that session it can NEVER become payout data.
     let fileId: string | undefined;
     let mediaType: "photo" | "document" = "photo";
     if (ctx.message?.photo && ctx.message.photo.length > 0) {
@@ -1823,43 +1926,60 @@ export async function handleCustomerPhoto(ctx: BotContext) {
         fileName: (ctx.message as any)?.document?.file_name || null
       } as const;
 
-      // If customer has exactly ONE eligible order, attach automatically
       if (awaitingOrders.length === 1) {
+        // Unambiguous target: attach immediately. A stale pending-bill
+        // session (if any) is superseded by this direct attach.
+        clearPendingBillSession(telegramId);
         const targetOrder = awaitingOrders[0];
         try {
           await processBillUpload(ctx, targetOrder.id, fileId, telegramId, mediaInfo);
         } catch (err: any) {
-          logger.error({ err }, "Error processing single customer bill");
+          logger.error({ err }, "Error processing customer bill");
           await ctx.reply(t(locale, "bill.error", { error: String(err?.message || err) }));
+          return;
         }
         // J: the bill was accepted while the customer is in HUMAN support —
         // give the assigned staff a short heads-up (no media duplication;
-        // Admin gets the full evidence via the bill notification).
-        const conv = await ConversationService.getOrCreateConversation(customer.id);
-        if (conv.mode === "HUMAN" && conv.claimedById) {
-          await sendToStaff(
-            conv.claimedById,
-            `📷 <b>Khách ${customer.fullName || (customer.username ? "@" + customer.username : `Telegram ID ${customer.telegramId}`)} vừa gửi bill cho đơn #${targetOrder.id.slice(-6).toUpperCase()}.</b>\nĐơn chuyển sang chờ Admin đối soát.`,
-            { parse_mode: "HTML" }
-          ).catch(() => {});
+        // Admin gets the full evidence via the bill notification). Best-effort:
+        // a failure here must NEVER turn a stored bill into a silent error.
+        try {
+          const conv = await ConversationService.getOrCreateConversation(customer.id);
+          if (conv.mode === "HUMAN" && conv.claimedById) {
+            await sendToStaff(
+              conv.claimedById,
+              `📷 <b>Khách ${customer.fullName || (customer.username ? "@" + customer.username : `Telegram ID ${customer.telegramId}`)} vừa gửi bill cho đơn #${targetOrder.id.slice(-6).toUpperCase()}.</b>\nĐơn chuyển sang chờ Admin đối soát.`,
+              { parse_mode: "HTML" }
+            ).catch(() => {});
+          }
+        } catch (convErr) {
+          logger.warn({ err: convErr }, "Bill HUMAN heads-up failed (bill already stored)");
         }
         return;
       }
 
-      // If multiple eligible orders exist, present interactive selection buttons
-      const keyboard = new InlineKeyboard();
-      for (const order of awaitingOrders.slice(0, 5)) {
-        const srcAmt = MoneyService.formatAmount(order.sourceAmount, order.sourceCurrency);
-        keyboard.text(
-          t(locale, "bill.order_btn", { id: order.id.slice(-6), amount: `${srcAmt} ${order.sourceCurrency}` }),
-          `customer:bill:attach:${order.id}:${fileId}`
+      // MULTIPLE billable Orders → do NOT guess. Preserve the media reference
+      // (Telegram file_id — re-downloaded at submission) in a short-lived
+      // session and ask the customer which Order the bill belongs to. The
+      // ambiguous media is persisted NOWHERE until the customer selects.
+      setPendingBillSession(telegramId, {
+        fileId,
+        mediaType,
+        telegramMime: (ctx.message as any)?.document?.mime_type || null,
+        fileName: (ctx.message as any)?.document?.file_name || null
+      });
+      const kb = new InlineKeyboard();
+      for (const o of awaitingOrders.slice(0, 5)) {
+        const srcAmt = MoneyService.formatAmount(o.sourceAmount, o.sourceCurrency);
+        kb.text(
+          t(locale, "bill.order_btn", { id: o.id.slice(-6), amount: `${srcAmt} ${o.sourceCurrency}` }),
+          `customer:bill:attach:${o.id}`
         ).row();
       }
-
       await ctx.reply(
         `${t(locale, "bill.multi_title", { count: awaitingOrders.length })}\n\n` +
+          `${t(locale, "bill.pending_kept")}\n\n` +
           t(locale, "bill.multi_hint"),
-        { parse_mode: "HTML", reply_markup: keyboard }
+        { parse_mode: "HTML", reply_markup: kb }
       );
       return;
     }

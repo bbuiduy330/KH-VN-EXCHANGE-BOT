@@ -1177,10 +1177,18 @@ export class OrderService {
   }
 
   static async getOrdersAwaitingBill(customerId: string) {
+    // BILL INTAKE eligibility = EXACTLY the statuses submitCustomerBill()
+    // accepts (WAITING_PAYMENT first bill + CUSTOMER_SENT_BILL /
+    // WAITING_ADMIN_VERIFY / MANUAL_REVIEW re-uploads). If this list ever
+    // shrinks to WAITING_PAYMENT alone, a customer's SECOND bill photo (order
+    // already in verify) silently falls through to the HUMAN relay/"bill.none"
+    // dead end and Admin never receives it — that was the observed runtime
+    // regression. Newest first: the just-paid Order (whose QR the customer
+    // scanned) is unambiguous.
     return prisma.order.findMany({
       where: {
         customerId,
-        status: { in: ["WAITING_PAYMENT"] }
+        status: { in: ["WAITING_PAYMENT", "CUSTOMER_SENT_BILL", "WAITING_ADMIN_VERIFY", "MANUAL_REVIEW"] }
       },
       orderBy: { createdAt: "desc" }
     });
