@@ -11,6 +11,7 @@ import { PartnerService } from "../../modules/partner/partner-service.js";
 import { escapeHtml } from "../menus/cskh-panel.js";
 import { startWizard, getAdminSession, isSessionExpired, clearWizard, updateWizard } from "./admin-session.js";
 import { setAdminSearch } from "./admin-session.js";
+import { shortOrderId } from "./admin-panel.js";
 import { getBotInstance, notifyPartnerSettlementPaid } from "../notifications.js";
 import { MoneyService } from "../../modules/money/money-service.js";
 import { formatAdminDateTime } from "../../shared/app-time.js";

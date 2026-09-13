@@ -33,6 +33,7 @@ import { FileService } from "../files/file-service.js";
 import { AUTO_CANCEL_MIN } from "../orders/payment-reminder-service.js";
 import { MoneyService } from "../money/money-service.js";
 import { renderPaymentCardSafe } from "./payment-qr-card-renderer.js";
+import { prisma } from "../../database/client.js";
 
 export type PaymentQrType = "KHQR" | "VIETQR" | "STATIC" | "EXPIRED" | "NONE";
 

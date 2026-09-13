@@ -104,6 +104,51 @@ export class PartnerService {
     return prisma.partner.findMany({ orderBy: { createdAt: "desc" }, take: 30 });
   }
 
+  /**
+   * E1 — Admin-only parent (upline) assignment.
+   *
+   * ALL hierarchy rules (self-parent block, cycle prevention, max 5-level
+   * depth cap) are delegated to the CANONICAL pure implementation
+   * `validateParentAssignment` (partner-hierarchy.ts) — never duplicated here.
+   * Clearing the parent (newParentId = null) is always allowed. Every change
+   * is audited as PARTNER_HIERARCHY_UPDATED. Already-created Commission rows
+   * are NEVER rewritten (their hierarchySnapshot is frozen).
+   */
+  static async setPartnerParent(adminId: string, partnerId: string, newParentId: string | null): Promise<any> {
+    const partner = await prisma.partner.findUnique({ where: { id: partnerId } });
+    if (!partner) throw new Error("Không tìm thấy CTV.");
+    if (newParentId) {
+      const parent = await prisma.partner.findUnique({ where: { id: newParentId } });
+      if (!parent) throw new Error("Không tìm thấy CTV cha.");
+    }
+    // Bounded hierarchy scan (CTV count is small by design) — same shape as
+    // onOrderCompleted. validateParentAssignment walks UP from the proposed
+    // parent against the CURRENT map, which is exactly the self/cycle/depth
+    // check for the new assignment.
+    const allPartners: any[] = await prisma.partner.findMany({
+      select: { id: true, parentPartnerId: true }
+    });
+    const parentByPartnerId = new Map<string, string | null>(
+      allPartners.map((p: any) => [p.id, p.parentPartnerId ?? null])
+    );
+    const validationError = validateParentAssignment(parentByPartnerId, partnerId, newParentId);
+    if (validationError) throw new Error(validationError);
+    const previousParentId = partner.parentPartnerId ?? null;
+    const updated = await prisma.partner.update({
+      where: { id: partnerId },
+      data: { parentPartnerId: newParentId }
+    });
+    await AuditService.log({
+      actorId: adminId,
+      actorRole: "ADMIN",
+      action: "PARTNER_HIERARCHY_UPDATED",
+      targetType: "PARTNER",
+      targetId: partnerId,
+      details: { previousParentId, newParentId: newParentId ?? null }
+    });
+    return updated;
+  }
+
   static async getPartnerById(id: string): Promise<any | null> {
     return prisma.partner.findUnique({ where: { id } });
   }

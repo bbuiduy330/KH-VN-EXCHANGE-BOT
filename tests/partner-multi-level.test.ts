@@ -171,10 +171,10 @@ describe("Part E — multi-level commission engine (E2/E6/E7)", () => {
     expect(rows.length).toBeGreaterThanOrEqual(4);
 
     // Exact fixed amounts per level (E2):
-    expect(Number(byPartner.get(p4.id).baseCommissionUsd)).toBe(Number(FIXED_COMMISSION_BY_LEVEL[2]));
-    expect(Number(byPartner.get(p3.id).baseCommissionUsd)).toBe(Number(FIXED_COMMISSION_BY_LEVEL[3]));
-    expect(Number(byPartner.get(p2.id).baseCommissionUsd)).toBe(Number(FIXED_COMMISSION_BY_LEVEL[4]));
-    expect(Number(byPartner.get(p1.id).baseCommissionUsd)).toBe(Number(FIXED_COMMISSION_BY_LEVEL[5]));
+    expect(Number(byPartner.get(p4.id)!.baseCommissionUsd)).toBe(Number(FIXED_COMMISSION_BY_LEVEL[2]));
+    expect(Number(byPartner.get(p3.id)!.baseCommissionUsd)).toBe(Number(FIXED_COMMISSION_BY_LEVEL[3]));
+    expect(Number(byPartner.get(p2.id)!.baseCommissionUsd)).toBe(Number(FIXED_COMMISSION_BY_LEVEL[4]));
+    expect(Number(byPartner.get(p1.id)!.baseCommissionUsd)).toBe(Number(FIXED_COMMISSION_BY_LEVEL[5]));
     // Full network fixed total = exactly 0.4+0.3+0.2+0.1 = 1.00 (L2..L5):
     const network = rows
       .filter((r) => r.level >= 2)
@@ -182,7 +182,7 @@ describe("Part E — multi-level commission engine (E2/E6/E7)", () => {
     expect(network).toBeCloseTo(1, 5);
     // Rule version + frozen snapshot present on every new row:
     expect(rows.every((r) => r.ruleVersion === CTV_RULE_VERSION || r.level === 1)).toBe(true);
-    expect(byPartner.get(p4.id).hierarchySnapshot).toBeTruthy();
+    expect(byPartner.get(p4.id)!.hierarchySnapshot).toBeTruthy();
     // Legacy row untouched:
     const legacyRows: any[] = await prisma.commission.findMany({ where: { orderId: legacyOrder.id } });
     expect(legacyRows.length).toBe(1);

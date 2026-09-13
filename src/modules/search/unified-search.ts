@@ -84,7 +84,7 @@ export function parseQueryHints(rawQuery: string): QueryHints {
   const hints: QueryHints = { raw: q, amount: null, currency: null };
   const statusMatch = /(?:status[:=])(completed|cancelled|active)/i.exec(q);
   if (statusMatch) {
-    hints.status = statusMatch[1].toLowerCase();
+    hints.status = statusMatch[1]?.toLowerCase() ?? null;
     q = q.replace(statusMatch[0], " ").trim();
   }
   if (/usd2vnd|usd\s*(?:->|→)\s*vnd/i.test(q)) {
@@ -96,8 +96,8 @@ export function parseQueryHints(rawQuery: string): QueryHints {
     q = q.replace(/vnd2usd|vnd\s*(?:->|→)\s*usd/i, " ").trim();
   }
   const amountMatch = /(\d+(?:[.,]\d+)?)\s*(usd|vnd|\$|đ|đô)?/i.exec(q);
-  if (amountMatch && /^\d/.test(amountMatch[0])) {
-    const value = parseFloat(amountMatch[1].replace(/,/g, ""));
+  if (amountMatch && /^\d/.test(amountMatch[0] ?? "")) {
+    const value = parseFloat(amountMatch[1]?.replace(/,/g, "") ?? "");
     if (Number.isFinite(value) && value > 0) {
       hints.amount = value;
       const cur = (amountMatch[2] || "").toLowerCase();
