@@ -232,9 +232,13 @@ describe("Part A — CTV privacy vs Admin traceability", () => {
 
     const adminRows = await PartnerService.getAdminCommissionRows(partner.id, 5);
     expect(adminRows.length).toBe(1);
-    expect(adminRows[0].customer?.fullName).toBe("Ziconat Test");
-    expect(adminRows[0].customer?.telegramId).toBeTruthy();
-    expect(adminRows[0].order).toBeTruthy();
+    const adminRow = adminRows[0];
+    if (!adminRow) {
+      throw new Error("Expected one admin commission row for the direct CTV.");
+    }
+    expect(adminRow.customer?.fullName).toBe("Ziconat Test");
+    expect(adminRow.customer?.telegramId).toBeTruthy();
+    expect(adminRow.order).toBeTruthy();
 
     // The CTV-facing list carries NO customer join/identity:
     const ctvRows: any[] = await PartnerService.listPartnerCommissions(partner.id, 5);
