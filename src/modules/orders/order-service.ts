@@ -121,6 +121,18 @@ export class OrderService {
         }
       : null;
 
+    // E6 — FROZEN rate/margin basis for commission spread math (captured ONCE
+    // from the authoritative ExchangeRate row at Order creation; commission
+    // math NEVER uses current live rates).
+    const rateRow = await prisma.exchangeRate.findUnique({ where: { pair: "USD/VND" } });
+    const rateMarginSnapshot = rateRow
+      ? {
+          baseRate: String(rateRow.baseRate),
+          buyMargin: String(rateRow.buyMargin),
+          sellMargin: String(rateRow.sellMargin)
+        }
+      : null;
+
     // T — immutable Partner attribution snapshot at Order creation: taken from
     // the customer's CURRENT assignment once, so later corrections never
     // rewrite historical attribution.
@@ -157,6 +169,7 @@ export class OrderService {
           receivingAccountId: receivingAccount.id,
           receivingAccountSnapshot,
           payoutBankSnapshot,
+          rateMarginSnapshot,
           status: "WAITING_PAYMENT"
         }
       });
@@ -579,6 +592,96 @@ export class OrderService {
       );
 
       // Fetch the updated order inside the transaction
+      return tx.order.findUnique({
+        where: { id: orderId },
+        include: { customer: true }
+      });
+    });
+  }
+
+  /**
+   * F3 — AUTHORITATIVE BANK-PROVIDER CONFIRMATION (Part 2 of the state-machine
+   * fix). A cryptographically verified bank-provider event is authoritative
+   * incoming-payment evidence and does NOT require a customer bill.
+   *
+   * Allowed source states (narrowly pre-confirmation only):
+   *   WAITING_PAYMENT / CUSTOMER_SENT_BILL / WAITING_ADMIN_VERIFY
+   * Refused (never reopened): PAYMENT_CONFIRMED, WAITING_PAYOUT, PAYOUT_SENT,
+   * COMPLETED, CANCELLED, MANUAL_REVIEW, SUSPICIOUS, PAYMENT_MISMATCH (those
+   * stay Admin-review territory).
+   *
+   * Transition follows the EXISTING architecture: verifiedAt →
+   * PAYMENT_CONFIRMED → WAITING_PAYOUT (payout-destination flow unchanged;
+   * NO auto payout, NO auto completion). Idempotent-safe: a re-call after the
+   * transition is refused with a clear error (event replay stays safe).
+   * MANUAL_ADMIN semantics (confirmPaymentReceived) are unchanged.
+   */
+  static async confirmPaymentFromBankProvider(orderId: string, provider: string, externalRef: string) {
+    return prisma.$transaction(async (tx: any) => {
+      const order = await tx.order.findUnique({ where: { id: orderId } });
+      if (!order) throw new Error("Không tìm thấy đơn hàng");
+
+      const allowed = ["WAITING_PAYMENT", "CUSTOMER_SENT_BILL", "WAITING_ADMIN_VERIFY"];
+      if (!allowed.includes(order.status)) {
+        throw new Error(
+          `BANK_CONFIRMED_REFUSED: Order ở trạng thái ${order.status} — không thể xác nhận lại tiền vào.`
+        );
+      }
+
+      const verifiedAt = new Date();
+      const actorId = `BANK:${provider}`;
+      const result = await tx.order.updateMany({
+        where: { id: orderId, status: order.status },
+        data: {
+          status: "PAYMENT_CONFIRMED",
+          verifiedByAdminId: actorId,
+          verifiedAt
+        }
+      });
+      if (result.count !== 1) {
+        throw new Error("Order đã thay đổi trạng thái, vui lòng thử lại.");
+      }
+
+      await tx.orderStateHistory.create({
+        data: {
+          orderId,
+          fromStatus: order.status,
+          toStatus: "PAYMENT_CONFIRMED",
+          actorId,
+          actorRole: "SYSTEM",
+          reason: "BANK_PROVIDER_CONFIRMED",
+          metadata: { provider, externalRef, verifiedAt: verifiedAt.toISOString() }
+        }
+      });
+      await tx.orderStateHistory.create({
+        data: {
+          orderId,
+          fromStatus: "PAYMENT_CONFIRMED",
+          toStatus: "WAITING_PAYOUT",
+          actorId,
+          actorRole: "SYSTEM",
+          reason: "READY_FOR_PAYOUT",
+          metadata: { provider, externalRef, verifiedAt: verifiedAt.toISOString() }
+        }
+      });
+
+      await AuditService.logStrict(
+        {
+          actorId,
+          actorRole: "SYSTEM",
+          action: "PAYMENT_VERIFIED",
+          targetType: "ORDER",
+          targetId: orderId,
+          details: {
+            verifiedAt: verifiedAt.toISOString(),
+            source: "BANK_PROVIDER",
+            provider,
+            externalRef
+          }
+        },
+        tx
+      );
+
       return tx.order.findUnique({
         where: { id: orderId },
         include: { customer: true }

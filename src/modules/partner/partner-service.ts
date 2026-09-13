@@ -28,6 +28,14 @@ import { Decimal } from "decimal.js";
 import { prisma } from "../../database/client.js";
 import { AuditService } from "../audit/audit-service.js";
 import { logger } from "../../shared/logger.js";
+import {
+  CTV_RULE_VERSION,
+  FIXED_COMMISSION_BY_LEVEL,
+  getUplineChain,
+  validateParentAssignment,
+  computeCommissionableSpread,
+  buildHierarchySnapshot
+} from "./partner-hierarchy.js";
 
 /**
  * Minimal projection row for the reconciliation fallback walk — only the
@@ -414,7 +422,7 @@ export class PartnerService {
   }
 
   /**
-   * Commission creation attempt for a COMPLETED order.
+   * Commission creation attempt for a COMPLETED order — MULTI-LEVEL (Part E).
    *
    * TRUTHFUL CONTRACT (1): this function NEVER throws for commission
    * problems — the outer catch swallows everything and logs. Therefore:
@@ -425,10 +433,14 @@ export class PartnerService {
    *     best-effort in-transaction attempt;
    *   - the AUTHORITATIVE eventual-consistency guarantee is
    *     reconcileMissingCommissions(): COMPLETED + partnerId + no Commission
-   *     is repaired exactly once (unique orderId), by the scheduler, the
-   *     Admin panel open, or the post-completion backstop.
-   * Idempotent (unique orderId + pre-check). Risk flags HOLD the commission
-   * (no availableAt) pending Admin release.
+   *     rows at all is repaired exactly once (unique orderId+partnerId+level),
+   *     by the scheduler, the Admin panel open, or the post-completion backstop.
+   *
+   * MULTI-LEVEL (E1/E2/E6): creates one Commission row per upline level
+   * (L1..L5) with FIXED tier amounts, L1 spread share (20% of the frozen
+   * commissionable FX spread), and a FROZEN hierarchy/rule snapshot per row.
+   * Missing/disabled upline is skipped — never redistributed. Risk flag is
+   * evaluated once on the direct (L1) Partner and applies to the whole chain.
    */
   static async onOrderCompleted(orderId: string, tx?: any): Promise<void> {
     try {
@@ -437,54 +449,91 @@ export class PartnerService {
       if (!order || order.status !== "COMPLETED") return;
       if (!order.partnerId) return;
 
-      const existing = await db.commission.findUnique({ where: { orderId } });
+      const existing = await db.commission.findFirst({ where: { orderId } });
       if (existing) return;
 
-      const partner = await db.partner.findUnique({ where: { id: order.partnerId } });
-      if (!partner || partner.status === "DISABLED") return;
+      // Bounded hierarchy scan (CTV count is small by design).
+      const allPartners: any[] = await db.partner.findMany({
+        select: { id: true, parentPartnerId: true, displayName: true, status: true, holdHours: true }
+      });
+      const parentByPartnerId = new Map<string, string | null>(
+        allPartners.map((p: any) => [p.id, p.parentPartnerId ?? null])
+      );
+      const partnerById = new Map(allPartners.map((p: any) => [p.id, p]));
+      const chain = getUplineChain(parentByPartnerId, String(order.partnerId));
 
-      const base = new Decimal(partner.baseCommissionUsd ?? 1);
-      const spreadBonus = new Decimal(0); // U — spread bonus DEFERRED
-      const total = base.plus(spreadBonus);
+      // Risk is evaluated ONCE for the direct (L1) Partner; a flagged chain
+      // stays HELD until Admin release (existing behavior, unchanged).
+      const l1Partner = partnerById.get(String(order.partnerId));
+      if (!l1Partner || l1Partner.status === "DISABLED") return;
+      const riskFlag = await this.evaluateRiskFlags(l1Partner, order);
+      const holdHours = l1Partner.holdHours ?? 72;
 
-      const riskFlag = await this.evaluateRiskFlags(partner, order);
-      const availableAt = riskFlag ? null : new Date(Date.now() + (partner.holdHours ?? 72) * 3600_000);
-
-      try {
-        await db.commission.create({
-          data: {
-            orderId,
-            partnerId: partner.id,
-            baseCommissionUsd: base,
-            spreadBonusUsd: spreadBonus,
-            totalUsd: total,
-            status: "HELD",
-            availableAt,
-            riskFlag
-          }
-        });
-        await AuditService.log({
-          actorId: "SYSTEM",
-          actorRole: "SYSTEM",
-          action: "PARTNER_COMMISSION_CREATED",
-          targetType: "ORDER",
-          targetId: orderId,
-          details: { partnerId: partner.id, totalUsd: total.toString(), riskFlag, availableAt: availableAt?.toISOString() ?? null }
-        });
-      } catch (createErr: any) {
-        // Idempotency under concurrency: the unique orderId constraint means a
-        // concurrent reconciliation/admin pass may have created it first.
-        // That is an IDEMPOTENT SUCCESS/SKIP, not corruption — re-verify and
-        // move on. Any other error is rethrown (still swallowed by the outer
-        // fail-safe catch; reconciliation will repair).
-        if (String(createErr?.message || "").includes("orderId")) {
-          const again = await db.commission.findUnique({ where: { orderId } });
-          if (again) {
-            logger.info({ orderId }, "Commission already exists (concurrent creation) — idempotent skip");
-            return;
+      for (const link of chain) {
+        const partner = partnerById.get(link.partnerId);
+        if (!partner) continue;
+        if (partner.status === "DISABLED") continue; // missing upline: NO redistribution
+        const fixed = new Decimal(FIXED_COMMISSION_BY_LEVEL[link.level] ?? "0");
+        let share = new Decimal(0);
+        let spreadBasis: object | null = null;
+        if (link.level === 1) {
+          const spread = computeCommissionableSpread(order);
+          if (spread.shareUsd) {
+            share = spread.shareUsd;
+            spreadBasis = spread.basis;
           }
         }
-        throw createErr;
+        const total = fixed.plus(share);
+        const availableAt = riskFlag ? null : new Date(Date.now() + holdHours * 3600_000);
+        try {
+          await db.commission.create({
+            data: {
+              orderId,
+              level: link.level,
+              partnerId: partner.id,
+              baseCommissionUsd: fixed,
+              spreadBonusUsd: share,
+              totalUsd: total,
+              status: "HELD",
+              availableAt,
+              riskFlag,
+              ruleVersion: CTV_RULE_VERSION,
+              hierarchySnapshot: buildHierarchySnapshot(
+                chain.map((c) => ({
+                  level: c.level,
+                  partnerId: c.partnerId,
+                  displayName: String(partnerById.get(c.partnerId)?.displayName ?? "")
+                }))
+              ),
+              spreadBasis: spreadBasis ?? undefined
+            }
+          });
+          await AuditService.log({
+            actorId: "SYSTEM",
+            actorRole: "SYSTEM",
+            action: "PARTNER_COMMISSION_CREATED",
+            targetType: "ORDER",
+            targetId: orderId,
+            details: {
+              level: link.level,
+              partnerId: partner.id,
+              fixedUsd: fixed.toString(),
+              spreadUsd: share.toString(),
+              totalUsd: total.toString(),
+              riskFlag,
+              ruleVersion: CTV_RULE_VERSION
+            }
+          });
+        } catch (createErr: any) {
+          // Idempotency under concurrency: the unique (orderId, partnerId,
+          // level) constraint means a concurrent pass may have created the row
+          // first — an IDEMPOTENT SUCCESS/SKIP, not corruption.
+          if (this.isUniqueViolation(createErr)) {
+            logger.info({ orderId, level: link.level }, "Commission row already exists (concurrent creation) — idempotent skip");
+            continue;
+          }
+          throw createErr;
+        }
       }
     } catch (err: any) {
       // Commission failure must NEVER break the authoritative financial flow.
@@ -588,7 +637,7 @@ export class PartnerService {
       // limit still bounds creation work.
       if (cursorId && orders.some((o) => o.id === cursorId)) break;
       for (const o of orders) {
-        const existing = await prisma.commission.findUnique({ where: { orderId: o.id } });
+        const existing = await prisma.commission.findFirst({ where: { orderId: o.id } });
         if (!existing) {
           missing.push(o.id);
           if (missing.length >= workLimit) break;
@@ -615,7 +664,7 @@ export class PartnerService {
     let created = 0;
     for (const orderId of missingIds) {
       await this.onOrderCompleted(orderId); // never throws; idempotent
-      const after = await prisma.commission.findUnique({ where: { orderId } });
+      const after = await prisma.commission.findFirst({ where: { orderId } });
       if (after) created++;
     }
     if (created > 0) {
@@ -769,6 +818,27 @@ export class PartnerService {
 
   static async listPartnerCommissions(partnerId: string, take: number = 20): Promise<any[]> {
     return prisma.commission.findMany({ where: { partnerId }, orderBy: { createdAt: "desc" }, take });
+  }
+
+  /**
+   * A2 — ADMIN commission rows WITH full customer traceability (display name,
+   * Telegram numeric ID, short ref + Order direction/amount). Admin-only
+   * surface; the CTV handlers deliberately keep using the privacy-safe
+   * listPartnerCommissions (no customer join there).
+   */
+  static async getAdminCommissionRows(partnerId: string, take: number = 15): Promise<{ commission: any; order: any; customer: any }[]> {
+    const commissions = await this.listPartnerCommissions(partnerId, take);
+    if (commissions.length === 0) return [];
+    const orderIds = [...new Set(commissions.map((c: any) => c.orderId))];
+    const orders: any[] = await prisma.order.findMany({
+      where: { id: { in: orderIds } },
+      include: { customer: true }
+    });
+    const byId = new Map(orders.map((o) => [o.id, o]));
+    return commissions.map((c: any) => {
+      const order = byId.get(c.orderId) ?? null;
+      return { commission: c, order, customer: order?.customer ?? null };
+    });
   }
 
   static async partnerSummary(partnerId: string): Promise<{ held: Decimal; available: Decimal; paid: Decimal; eligibleCompleted: number }> {

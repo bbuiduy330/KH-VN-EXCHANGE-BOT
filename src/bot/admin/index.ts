@@ -27,13 +27,15 @@ import { adminCustomersHandler, runCustomerSearch, showCustomerList } from "./ad
 import { adminCskhHandler, showCskhOverview } from "./admin-cskh.js";
 import { adminScreensHandler } from "./admin-screens.js";
 import { adminRatesHandler, showRateManagement, handleRateWizardInput } from "./admin-rates.js";
-import { adminAccountsHandler, handleAccountWizardInput, handlePriorityInput, handleAccountAddQrMedia, handleAccountQrUpdateMedia } from "./admin-accounts.js";
+import { adminAccountsHandler, handleAccountWizardInput, handlePriorityInput, handleAccountAddQrMedia, handleAccountQrUpdateMedia, handleVerificationConfigInput } from "./admin-accounts.js";
 import { adminStaffHandler, handleStaffWizardInput, handleStaffNameInput } from "./admin-staff.js";
 import { adminAiHandler, handleAiKeyInput, handleAiModelInput, handleAiVoiceTestMedia } from "./admin-ai.js";
 import { adminConfigHandler, handleConfigInput } from "./admin-config.js";
 import { adminAuditHandler } from "./admin-audit.js";
-import { adminPartnersHandler, handlePartnerAddInput, handlePartnerBindInput, runPartnerSearch, handleSettlementProofMedia } from "./admin-partners.js";
+import { adminPartnersHandler, handlePartnerAddInput, handlePartnerBindInput, runPartnerSearch, handleSettlementProofMedia, handlePartnerParentInput } from "./admin-partners.js";
 import { adminBroadcastHandler, handleBroadcastComposerText, handleBroadcastComposerPhoto } from "./admin-broadcast.js";
+import { adminActivityHandler } from "./admin-activity.js";
+import { adminSearchHandler, handleUnifiedSearchText } from "./admin-search.js";
 import { accountQrMetaHandler, handleAccountQrMetaInput, handleAccountQrImportMedia } from "./account-qr-meta.js";
 
 export const adminOperationsHandler = new Composer<BotContext>();
@@ -54,6 +56,8 @@ adminOperationsHandler.use(adminAiHandler);
 adminOperationsHandler.use(adminConfigHandler);
 adminOperationsHandler.use(adminAuditHandler);
 adminOperationsHandler.use(adminBroadcastHandler);
+adminOperationsHandler.use(adminActivityHandler);
+adminOperationsHandler.use(adminSearchHandler);
 
 adminOperationsHandler.callbackQuery("ops:home", (ctx) => showOperationsCenter(ctx));
 
@@ -105,10 +109,13 @@ export async function handleAdminSessionText(ctx: BotContext, text: string): Pro
     if (kind === "ai_key_input") return handleAiKeyInput(ctx, text);
     if (kind === "ai_text_model" || kind === "ai_stt_model") return handleAiModelInput(ctx, text);
     if (kind === "config_edit") return handleConfigInput(ctx, text);
+    if (kind === "verification_config") return handleVerificationConfigInput(ctx, text);
     if (kind === "order_cancel_reason") return handleCancelReasonInput(ctx, text);
     if (kind === "partner_add") return handlePartnerAddInput(ctx, text);
     if (kind === "partner_bind") return handlePartnerBindInput(ctx, text);
+    if (kind === "partner_parent") return handlePartnerParentInput(ctx, text);
     if (kind === "broadcast_compose") return handleBroadcastComposerText(ctx, text);
+    if (kind === "unified_search") return handleUnifiedSearchText(ctx, text);
     if (kind.startsWith("qrmeta_")) return handleAccountQrMetaInput(ctx, text);
     if (kind === "account_qr") {
       await ctx.reply("📷 Vui lòng gửi <b>ảnh QR</b> vào khung chat, hoặc gửi /cancel để hủy.", { parse_mode: "HTML" });

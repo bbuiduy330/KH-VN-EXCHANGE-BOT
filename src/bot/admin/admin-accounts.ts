@@ -50,6 +50,8 @@ export async function showAccountDetail(ctx: BotContext, accountId: string): Pro
     await ctx.reply("❌ Không tìm thấy tài khoản.").catch(() => {});
     return;
   }
+  const { getVerificationReadiness } = await import("../../modules/incoming-payments/incoming-payment-service.js");
+  const readiness = getVerificationReadiness(a as any);
   const text =
     `🏦 <b>TÀI KHOẢN NHẬN TIỀN</b>\n\n` +
     `Ngân hàng: <b>${escapeHtml(a.bankName)}</b>\n` +
@@ -58,12 +60,14 @@ export async function showAccountDetail(ctx: BotContext, accountId: string): Pro
     `Số tài khoản: <code>${escapeHtml(maskAccountNumber(a.accountNumber))}</code>\n` +
     `Trạng thái: ${a.isActive ? "🟢 Đang hoạt động" : "⚪ Tạm ngưng"}\n` +
     `Mặc định: ${a.isDefault ? "⭐ Có" : "—"} · Ưu tiên: ${a.priority}\n` +
-    `QR: ${a.qrFilePath ? `✅ có · v${a.qrVersion}` : "— chưa có"}\n`;
+    `QR: ${a.qrFilePath ? `✅ có · v${a.qrVersion}` : "— chưa có"}\n` +
+    `🔔 Xác nhận tiền tự động: ${escapeHtml(readiness.label)}\n`;
 
   const kb = new InlineKeyboard()
     .row().text("🖼 Cập nhật QR", `ops:account:qr:${a.id}`)
     .row().text("⭐ Đặt mặc định", `ops:account:default:preview:${a.id}`)
     .text("↕️ Ưu tiên", `ops:account:priority:${a.id}`)
+    .row().text("🔔 Xác nhận tiền tự động", `ops:account:verify:${a.id}`)
     .row().text(a.isActive ? "⚪ Ngừng sử dụng" : "🟢 Kích hoạt", `ops:account:toggle:preview:${a.id}`)
     .row().text("⬅️ Quay lại", "ops:accounts").text("🏠 Menu Admin", "ops:home");
 
@@ -78,6 +82,108 @@ export async function showAccountDetail(ctx: BotContext, accountId: string): Pro
   }
   await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb });
 }
+
+// ---------------------------------------------------------------------------
+// F9 — 🔔 Xác nhận tiền tự động (verification provider config wizard)
+// Compact: provider → (Bakong: base URL → token) → saved with STRICT audit.
+// Tokens go ONLY into the encrypted system-secret mechanism; never displayed
+// again, never logged.
+// ---------------------------------------------------------------------------
+export async function showVerificationConfig(ctx: BotContext, accountId: string): Promise<void> {
+  await ctx.answerCallbackQuery();
+  if (!(await requirePermission(ctx, "payment_account.edit"))) return;
+  const a = await PaymentAccountService.getAccountById(accountId);
+  if (!a) return;
+  const { getVerificationReadiness } = await import("../../modules/incoming-payments/incoming-payment-service.js");
+  const readiness = getVerificationReadiness(a as any);
+  const lines = [
+    "🔔 <b>XÁC NHẬN TIỀN TỰ ĐỘNG</b>",
+    "",
+    `Hiện tại: ${escapeHtml(readiness.label)}`,
+    "",
+    "Chọn provider cho tài khoản này:"
+  ];
+  const kb = new InlineKeyboard()
+    .text("🔴 Tắt", `ops:account:verify:set:${accountId}:off`)
+    .row()
+    .text("🇰🇭 Bakong Open API", `ops:account:verify:set:${accountId}:BAKONG_OPEN_API`)
+    .row()
+    .text("🏦 ABA PayWay (chưa bật)", "ops:account:verify:disabled:ABA_PAYWAY")
+    .text("🇻🇳 SePay (chưa bật)", "ops:account:verify:disabled:SEPAY")
+    .row()
+    .text("🇻🇳 ApiPay (chưa bật)", "ops:account:verify:disabled:APIPAY")
+    .row()
+    .text("⬅️ Quay lại", `ops:account:detail:${accountId}`);
+  await ctx.reply(lines.join("\n"), { parse_mode: "HTML", reply_markup: kb });
+}
+
+adminAccountsHandler.callbackQuery(/^ops:account:verify:disabled:([A-Z_]+)$/, async (ctx) => {
+  await ctx.answerCallbackQuery({ show_alert: true });
+  const { INCOMING_PROVIDERS } = await import("../../modules/incoming-payments/incoming-payment-service.js");
+  const meta = INCOMING_PROVIDERS[(ctx.match?.[1] || "") as keyof typeof INCOMING_PROVIDERS];
+  await ctx.reply(
+    `🔴 <b>Provider CHƯA BẬT</b>\n${escapeHtml(meta?.missingContract || "Chưa có hợp đồng xác thực.")}\n\n<i>Webhook không xác thực KHÔNG BAO GIỜ được dùng để xác nhận tiền.</i>`,
+    { parse_mode: "HTML" }
+  ).catch(() => {});
+});
+
+adminAccountsHandler.callbackQuery(/^ops:account:verify:set:([a-zA-Z0-9_-]+):off$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  if (!(await requirePermission(ctx, "payment_account.edit"))) return;
+  const { setAccountVerificationProvider } = await import("../../modules/incoming-payments/incoming-payment-service.js");
+  await setAccountVerificationProvider(String(ctx.from?.id || ""), ctx.match?.[1] || "", null);
+  await ctx.reply("🔴 Đã TẮT xác nhận tiền tự động — quay lại duyệt thủ công.").catch(() => {});
+  await showAccountDetail(ctx, ctx.match?.[1] || "");
+});
+
+adminAccountsHandler.callbackQuery(/^ops:account:verify:set:([a-zA-Z0-9_-]+):BAKONG_OPEN_API$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  if (!(await requirePermission(ctx, "payment_account.edit"))) return;
+  const accountId = ctx.match?.[1] || "";
+  startWizard(String(ctx.from?.id || ""), "verification_config", { accountId, stage: "base_url" });
+  await ctx.reply(
+    "🇰🇭 <b>BAKONG OPEN API</b>\n\nBước 1/2 — Gửi <b>API base URL</b>\n(ví dụ: <code>https://api-bakong.nbc.gov.kh</code>)\n\nGửi /cancel để hủy.",
+    { parse_mode: "HTML" }
+  );
+});
+
+export async function handleVerificationConfigInput(ctx: BotContext, text: string): Promise<boolean> {
+  const adminId = String(ctx.from?.id || "");
+  const session = getAdminSession(adminId);
+  if (session.wizard?.kind !== "verification_config") return false;
+  if (isSessionExpired(adminId)) {
+    clearWizard(adminId);
+    await ctx.reply("⌛️ Phiên đã hết hạn. Mở lại từ chi tiết tài khoản.").catch(() => {});
+    return true;
+  }
+  const data = session.wizard.data as any;
+  const value = text.trim();
+  if (data.stage === "base_url") {
+    if (!/^https:\/\//i.test(value)) {
+      await ctx.reply("❌ Base URL phải bắt đầu bằng https:// — gửi lại hoặc /cancel.").catch(() => {});
+      return true;
+    }
+    updateWizard(adminId, { data: { baseUrl: value, stage: "token" } });
+    await ctx.reply("🔑 Bước 2/2 — Gửi <b>Bakong API token</b> (được mã hóa, không hiển thị lại):\n\nGửi /cancel để hủy.", { parse_mode: "HTML" });
+    return true;
+  }
+  if (data.stage === "token") {
+    try {
+      const { setAccountVerificationProvider } = await import("../../modules/incoming-payments/incoming-payment-service.js");
+      await setAccountVerificationProvider(adminId, String(data.accountId), "BAKONG_OPEN_API", String(data.baseUrl), value);
+      clearWizard(adminId);
+      await ctx.reply("✅ Đã lưu cấu hình Bakong Open API (🟢 Sẵn sàng). Token được mã hóa và không hiển thị lại.").catch(() => {});
+    } catch (err: any) {
+      await ctx.reply(`❌ ${escapeHtml(err?.message || "Lỗi")}`).catch(() => {});
+    }
+    return true;
+  }
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// Add account wizard (multi-step, preview before save)
+
 
 // ---------------------------------------------------------------------------
 // Add account wizard (multi-step, preview before save)

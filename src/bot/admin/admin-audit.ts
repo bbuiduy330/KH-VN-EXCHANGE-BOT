@@ -45,7 +45,7 @@ export async function showAudit(ctx: BotContext, filter: string = "all"): Promis
     kb.text(f.label, `ops:audit:filter:${f.id}`);
     if ((i + 1) % 2 === 0) kb.row();
   }
-  kb.row().text("🏠 Menu Admin", "ops:home");
+  kb.row().text("📋 Hoạt động", "ops:activity").text("🏠 Menu Admin", "ops:home");
 
   if (ctx.callbackQuery) {
     await ctx.answerCallbackQuery();

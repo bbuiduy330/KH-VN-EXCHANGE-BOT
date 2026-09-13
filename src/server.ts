@@ -8,6 +8,7 @@ import { RuntimeConfigService } from "./modules/system-config/runtime-config-ser
 import { BackupService } from "./modules/backup/backup-service.js";
 import { startPaymentReminderScheduler, stopPaymentReminderScheduler } from "./modules/orders/payment-reminder-service.js";
 import { startBroadcastScheduler, stopBroadcastScheduler } from "./modules/broadcast/broadcast-service.js";
+import { startIncomingPaymentScheduler, stopIncomingPaymentScheduler, handleProviderWebhook } from "./modules/incoming-payments/incoming-payment-service.js";
 import { PartnerService } from "./modules/partner/partner-service.js";
 
 const app = express();
@@ -111,6 +112,20 @@ await assertProductionDatabaseReady();
 
 // Start HTTP server - Port 3000 is strictly required by reverse proxy
 const PORT = 3000;
+// PART F — incoming-payment provider webhook endpoint (SCAFFOLDING).
+// Every current provider adapter is DISABLED until its real authentication
+// contract is implemented — unauthenticated webhooks can NEVER confirm
+// payment. The endpoint is idempotent/replay-safe by design (dedupe happens
+// in the authoritative service only after provider auth is verified).
+app.post("/webhooks/incoming-payments/:provider", async (req, res) => {
+  try {
+    const result = await handleProviderWebhook(String(req.params.provider || ""), req.body);
+    res.status(result.status).json(result.body);
+  } catch {
+    res.status(500).json({ error: "webhook processing error" });
+  }
+});
+
 const server = app.listen(PORT, "0.0.0.0", () => {
   logger.info(`Server running on http://0.0.0.0:${PORT}`);
   console.log(`KH-VN Exchange Bot server listening on http://0.0.0.0:${PORT}`);
@@ -130,6 +145,7 @@ const server = app.listen(PORT, "0.0.0.0", () => {
   // 2c. Partner/CTV commission reconciliation scheduler (2): DB-derived,
   // restart-safe HELD→AVAILABLE after hold + missing-commission backstop.
   // Never auto-pays anything.
+  startIncomingPaymentScheduler();
   PartnerService.startReconciliationScheduler();
 
   // 2d. Broadcast delivery worker: durable DB queue, small batches,
@@ -148,6 +164,7 @@ process.on("SIGTERM", async () => {
   BackupService.stopScheduler();
   stopPaymentReminderScheduler();
   stopBroadcastScheduler();
+  stopIncomingPaymentScheduler();
   PartnerService.stopReconciliationScheduler();
   await stopSingleBot();
   server.close(() => {
@@ -161,6 +178,7 @@ process.on("SIGINT", async () => {
   BackupService.stopScheduler();
   stopPaymentReminderScheduler();
   stopBroadcastScheduler();
+  stopIncomingPaymentScheduler();
   PartnerService.stopReconciliationScheduler();
   await stopSingleBot();
   server.close(() => {
