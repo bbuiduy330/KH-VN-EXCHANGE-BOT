@@ -4,7 +4,7 @@ import { logger } from "../shared/logger.js";
 import { customerHandler, showCustomerStart, handleCustomerTextMessage, handleCustomerPhoto, handleCustomerVoice } from "./handlers/customer-handler.js";
 import { cskhHandler, showCskhStart, handleStaffMedia, handleStaffTextMessage } from "./handlers/cskh-handler.js";
 import { adminHandler, showAdminStart, handleAdminPhoto, handleAdminTextMessage } from "./handlers/admin-handler.js";
-import { adminOperationsHandler, handleAdminReservedText, handleAdminSessionText, handleAdminPayoutEvidenceMedia, handleAiVoiceTestMedia, handleAccountAddQrMedia, handleAccountQrUpdateMedia, handleAccountQrImportMedia, handleSettlementProofMedia } from "./admin/index.js";
+import { adminOperationsHandler, handleAdminReservedText, handleAdminSessionText, handleAdminPayoutEvidenceMedia, handleAiVoiceTestMedia, handleAccountAddQrMedia, handleAccountQrUpdateMedia, handleAccountQrImportMedia, handleSettlementProofMedia, handleBroadcastComposerPhoto } from "./admin/index.js";
 import { PermissionService } from "../modules/permissions/permission-service.js";
 import { sendToAdminNotificationChat } from "./notifications.js";
 

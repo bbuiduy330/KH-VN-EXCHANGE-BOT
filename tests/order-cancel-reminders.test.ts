@@ -3,8 +3,7 @@ import { prisma } from "../src/database/client.js";
 import { OrderService } from "../src/modules/orders/order-service.js";
 import {
   hasValidPaymentEvidence,
-  ADMIN_CANCEL_REASONS,
-  adminCancelReasonLabel
+  sanitizeAdminCancelReason
 } from "../src/modules/orders/order-safety.js";
 import {
   computeReminderState,
@@ -94,34 +93,28 @@ describe("Centralized cancellation rules (L — one rule set for customer/admin/
     expect(OrderService.canCustomerCancel({ status: "CANCELLED" }).code).toBe("ALREADY_CANCELLED");
   });
 
-  it("admin normal-cancel is limited to a SAFELY UNPAID WAITING_PAYMENT order (financial safety audit)", () => {
-    // Allowed: exactly the same financial-safety principle as customer cancel.
-    expect(OrderService.canAdminCancel({ status: "WAITING_PAYMENT" }).allowed).toBe(true);
-    expect(
-      OrderService.canAdminCancel({ status: "WAITING_PAYMENT", customerBillFileId: "ev" }).allowed
-    ).toBe(false);
-    expect(
-      OrderService.canAdminCancel({ status: "WAITING_PAYMENT", verifiedAt: new Date() }).allowed
-    ).toBe(false);
+  it("admin normal-cancel: ALL pre-payout states allowed; PAYOUT_SENT/COMPLETED blocked", () => {
+    // Expanded Admin authority: every state BEFORE the payout was sent.
+    for (const status of ["WAITING_PAYMENT", "CUSTOMER_SENT_BILL", "WAITING_ADMIN_VERIFY", "PAYMENT_MISMATCH", "MANUAL_REVIEW", "SUSPICIOUS", "PAYMENT_CONFIRMED", "WAITING_PAYOUT"]) {
+      expect(OrderService.canAdminCancel({ status }).allowed, status).toBe(true);
+    }
+    // Bills / verified payment no longer block an ADMIN cancel (warning only):
+    expect(OrderService.canAdminCancel({ status: "WAITING_PAYMENT", customerBillFileId: "ev" }).allowed).toBe(true);
+    expect(OrderService.canAdminCancel({ status: "WAITING_PAYMENT", verifiedAt: new Date() }).allowed).toBe(true);
+
+    // Payout evidence / terminal states remain BLOCKED — even stale statuses:
     expect(OrderService.canAdminCancel({ status: "WAITING_PAYMENT", payoutAt: new Date() }).allowed).toBe(false);
     expect(OrderService.canAdminCancel({ status: "WAITING_PAYMENT", completedAt: new Date() }).allowed).toBe(false);
+    expect(OrderService.canAdminCancel({ status: "PAYOUT_SENT" }).code).toBe("PAYOUT_SENT");
+    expect(OrderService.canAdminCancel({ status: "COMPLETED" }).code).toBe("COMPLETED");
+    expect(OrderService.canAdminCancel({ status: "CANCELLED" }).code).toBe("ALREADY_CANCELLED");
+  });
 
-    // Evidence / possible incoming money → normal cancel BLOCKED, routed to
-    // the existing manualFinancialOverride / not-received review flows.
-    for (const status of ["CUSTOMER_SENT_BILL", "WAITING_ADMIN_VERIFY", "PAYMENT_MISMATCH", "MANUAL_REVIEW", "SUSPICIOUS"]) {
-      const d = OrderService.canAdminCancel({ status });
-      expect(d.allowed, status).toBe(false);
-      expect(["BILL_EXISTS", "NOT_CANCELLABLE"]).toContain(d.code);
-    }
-    expect(OrderService.canAdminCancel({ status: "WAITING_ADMIN_VERIFY", customerBillFileId: "ev" }).code).toBe("BILL_EXISTS");
-
-    // Confirmed money / payout / completed / already-cancelled remain blocked.
-    for (const status of ["PAYMENT_CONFIRMED", "WAITING_PAYOUT", "PAYOUT_SENT", "COMPLETED", "CANCELLED"]) {
-      expect(OrderService.canAdminCancel({ status }).allowed, status).toBe(false);
-    }
-    expect(ADMIN_CANCEL_REASONS.length).toBeGreaterThanOrEqual(3);
-    expect(adminCancelReasonLabel("customer_request")).toContain("Khách");
-    expect(adminCancelReasonLabel("custom", "Sai so tien")).toBe("Sai so tien");
+  it("admin cancel reason is FREE-FORM (preset menu removed): sanitized, ≤300, non-empty", () => {
+    expect(sanitizeAdminCancelReason("  Khách gửi bill giả \u0001  ")).toBe("Khách gửi bill giả");
+    expect(sanitizeAdminCancelReason("   ")).toBeNull();
+    expect(sanitizeAdminCancelReason("x".repeat(301))).toBeNull();
+    expect(sanitizeAdminCancelReason("Sai so tien")).toBe("Sai so tien");
   });
 });
 
@@ -193,21 +186,29 @@ describe("Admin cancel flow (reason → preview → final confirm)", () => {
     expect(updated.status).toBe("CANCELLED");
     const logs: any[] = await prisma.auditLog.findMany({ where: { action: "ORDER_CANCELLED", targetId: order.id } });
     expect(logs.length).toBe(1);
-    expect(logs[0].details.source).toBe("ADMIN_CANCELLED");
-    expect(logs[0].details.reason).toBe("Đơn thử nghiệm");
+    const log = logs[0];
+    expect(log).toBeDefined();
+    expect(log?.details.source).toBe("ADMIN_CANCELLED");
+    expect(log?.details.reason).toBe("Đơn thử nghiệm");
   });
 
-  it("admin CANNOT normal-cancel evidence/manual-review states — must route to review instead", async () => {
+  it("admin CAN normal-cancel evidence/manual-review states under the expanded policy", async () => {
     await ensureCustomer();
     for (const status of ["CUSTOMER_SENT_BILL", "WAITING_ADMIN_VERIFY", "MANUAL_REVIEW", "SUSPICIOUS", "PAYMENT_MISMATCH"]) {
       const order = await createTestOrder({ status });
-      await expect(
-        OrderService.cancelOrder(order.id, "admin-1", "ADMIN", "test", { source: "ADMIN_CANCELLED" }),
-        `state ${status}`
-      ).rejects.toThrow();
+      const updated: any = await OrderService.cancelOrder(order.id, "admin-1", "ADMIN", "Huỷ operation — lý do tự do", { source: "ADMIN_CANCELLED_AFTER_PAYMENT" });
+      expect(updated.status, status).toBe("CANCELLED");
       const fresh: any = await prisma.order.findUnique({ where: { id: order.id } });
-      expect(fresh.status, status).toBe(status); // untouched — evidence/history preserved
+      expect(fresh.status, status).toBe("CANCELLED");
     }
+  });
+
+  it("admin CANNOT normal-cancel PAYOUT_SENT (money already left)", async () => {
+    await ensureCustomer();
+    const order = await createTestOrder({ status: "PAYOUT_SENT", verifiedAt: new Date(), payoutAt: new Date() });
+    await expect(OrderService.cancelOrder(order.id, "admin-1", "ADMIN", "test")).rejects.toThrow();
+    const fresh: any = await prisma.order.findUnique({ where: { id: order.id } });
+    expect(fresh.status).toBe("PAYOUT_SENT");
   });
 });
 

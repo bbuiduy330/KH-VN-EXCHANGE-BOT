@@ -21,6 +21,10 @@ import {
 
 let sent: { chatId: string; kind: "message" | "photo"; text: string; buttons?: any }[] = [];
 
+// Small test-local unique-id helper (same pattern as the other test files).
+let idSeq = 0;
+const uniqueId = (): string => `${Date.now()}${String(++idSeq).padStart(3, "0")}`;
+
 function failingTransport(err: unknown): BroadcastTransport {
   return {
     sendMessage: async () => { throw err; },
@@ -129,9 +133,11 @@ describe("Part C — campaign snapshot, confirm, composer safety", () => {
     await sendTestToAdmin("admin-777", { text: "Nội dung thử", cta: true });
     const testMessages = sent.slice(before);
     expect(testMessages.length).toBe(1);
-    expect(testMessages[0].chatId).toBe("admin-777");
-    expect(testMessages[0].text).toContain("GỬI THỬ");
-    expect(testMessages[0].buttons).toEqual(BROADCAST_CTA_BUTTONS);
+    const first = testMessages[0];
+    expect(first).toBeDefined();
+    expect(first?.chatId).toBe("admin-777");
+    expect(first?.text).toContain("GỬI THỬ");
+    expect(first?.buttons).toEqual(BROADCAST_CTA_BUTTONS);
     const campaigns: any[] = await prisma.broadcastCampaign.findMany({});
     expect(campaigns.filter((c) => c.status === "READY" || c.status === "SENDING").length).toBe(0);
   });

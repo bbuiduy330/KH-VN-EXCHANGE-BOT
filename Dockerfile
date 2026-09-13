@@ -20,7 +20,9 @@ WORKDIR /app
 ENV NODE_ENV=production
 # Canonical application display timezone (GMT+7) — centralized, host-independent.
 ENV TZ=Asia/Ho_Chi_Minh
-RUN apt-get update && apt-get install -y --no-install-recommends openssl && rm -rf /var/lib/apt/lists/*
+# fonts-dejavu-core: system fonts for the professional payment-QR card renderer
+# (@napi-rs/canvas). Image-build step only — no manual font installation on VPS.
+RUN apt-get update && apt-get install -y --no-install-recommends openssl fonts-dejavu-core && rm -rf /var/lib/apt/lists/*
 # Ship the already-prepared production tree from the build stage.
 # NO second npm install: installing with --ignore-scripts omits Prisma engine
 # binaries, forcing runtime engine downloads/writes into node_modules which
