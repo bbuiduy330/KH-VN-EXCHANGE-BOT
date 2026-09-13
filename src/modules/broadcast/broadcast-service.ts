@@ -142,6 +142,10 @@ export function matchesAudienceFilter(
       if ((orders || []).some((o) => new Date(o.createdAt) >= cutoff)) return false;
     } else {
       const days = ACTIVITY_WINDOW_DAYS[f.activity];
+      if (typeof days !== "number" || !Number.isFinite(days) || days <= 0) {
+        // Unknown/invalid activity filter value is ignored safely (never throws).
+        return true;
+      }
       const cutoff = new Date(now.getTime() - days * 24 * 60 * 60 * 1000);
       if (!(orders || []).some((o) => new Date(o.createdAt) >= cutoff)) return false;
     }
@@ -381,7 +385,7 @@ function parseRetryAfter(err: unknown): number | null {
   const n = typeof p === "number" ? p : typeof p === "string" ? parseFloat(p) : NaN;
   if (Number.isFinite(n) && n > 0) return Math.min(n, MAX_RETRY_WAIT_SEC);
   const m = /retry after (\d+)/i.exec(String(e?.message || ""));
-  if (m) return Math.min(parseFloat(m[1]), MAX_RETRY_WAIT_SEC);
+  if (m && m[1] !== undefined) return Math.min(parseFloat(m[1]), MAX_RETRY_WAIT_SEC);
   return null;
 }
 

@@ -25,6 +25,7 @@
   "dependencies": {
     "@google/genai": "^1.0.0",
     "@grammyjs/runner": "^2.0.2",
+    "@napi-rs/canvas": "^0.1.64",
     "bakong-khqr": "^1.0.20",
     "qrcode": "^1.5.4",
     "vietnam-qr-pay": "^1.5.1",

@@ -204,15 +204,16 @@ describe("frozen Order payment data", () => {
     expect(parsed.additionalData.purpose).toBe("A7K92 CK");
   });
 
-  it("KHQR decimal USD amount 100.25 embeds exactly 100.25 (string-safe, SDK validates ≤2dp)", () => {
+  it("KHQR decimal USD amount 100.25 embeds exactly 100.25 (SDK boundary: NUMBER, ≤2dp)", () => {
     const expirationMs = Date.now() + 50 * 60_000; // deterministic valid-future
     const cap = detectKhqrCapability(snap({ khqrBakongAccountId: "x@dev", khqrMerchantName: "M", khqrMerchantCity: "Phnom Penh" }))!;
     const payload = buildKhqrPayload(cap, "100.25", "A7K92 CK", expirationMs);
     expect(BakongKHQR.verify(payload).isValid).toBe(true);
     // EMV tag 54 (amount), length 05, value "100.25":
     expect(payload).toContain("5405100.25");
-    // >2 decimals would be rejected by the official SDK — never silently rounded:
-    expect(() => buildKhqrPayload(cap, "100.256", "A7K92 CK", expirationMs)).toThrow();
+    // >2 decimals are REJECTED at the SDK boundary — no rounding, no
+    // truncation; the safe STATIC/TEXT fallback handles it instead:
+    expect(() => buildKhqrPayload(cap, "100.256", "A7K92 CK", expirationMs)).toThrow(/2 decimal places/);
   });
 
   it("QR amount exactly equals the locked Order payment amount (no recomputation)", async () => {

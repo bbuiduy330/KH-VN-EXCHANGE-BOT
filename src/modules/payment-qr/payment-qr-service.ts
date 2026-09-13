@@ -31,6 +31,8 @@ import { logger } from "../../shared/logger.js";
 import { OrderService } from "../orders/order-service.js";
 import { FileService } from "../files/file-service.js";
 import { AUTO_CANCEL_MIN } from "../orders/payment-reminder-service.js";
+import { MoneyService } from "../money/money-service.js";
+import { renderPaymentCardSafe } from "./payment-qr-card-renderer.js";
 
 export type PaymentQrType = "KHQR" | "VIETQR" | "STATIC" | "EXPIRED" | "NONE";
 
@@ -193,7 +195,22 @@ export function computePaymentDeadlineMs(order: { createdAt: Date | string }): n
 // encoded here is the SAME normalized string shown in the Telegram caption.
 // ---------------------------------------------------------------------------
 
-/** KHQR dynamic payload — official NBC `BakongKHQR` (currency = USD). */
+/**
+ * KHQR dynamic payload — official NBC `BakongKHQR` (currency = USD).
+ *
+ * SDK BOUNDARY (VPS-verified runtime contract):
+ *  - `amount` must be a finite NUMBER > 0 with at most 2 USD decimals
+ *    (the stored FROZEN Order amount string is never modified).
+ *  - `expirationTimestamp` must be a NUMBER (epoch ms) — the fixed per-Order
+ *    payment deadline derived from createdAt.
+ *  - `billNumber` = the FROZEN Order transferMemo.
+ *  - A successful SDK response is `{ status: { code: 0 }, data: { qr } }` —
+ *    the payload is read from `data.qr` (NOT a top-level `qr`), and it must
+ *    pass `BakongKHQR.verify(...).isValid` before it is ever returned.
+ *  - Failures log ONLY sanitized SDK status fields + mode — never the QR
+ *    payload or any banking data — then throw into the existing STATIC/TEXT
+ *    fallback in generateForOrder.
+ */
 export function buildKhqrPayload(
   cap: KhqrCapability,
   amountString: string,
@@ -202,12 +219,32 @@ export function buildKhqrPayload(
    *  the current time, so re-displaying the QR cannot extend payment lifetime. */
   expirationTimestampMs: number
 ): string {
+  const amountDecimal = new Decimal(String(amountString ?? ""));
+  if (!amountDecimal.isFinite()) {
+    throw new Error(`KHQR amount must be a finite number (got: ${amountString})`);
+  }
+  if (!amountDecimal.greaterThan(0)) {
+    throw new Error(`KHQR amount must be > 0 (got: ${amountString})`);
+  }
+  // NO silent rounding/truncation of financial amounts: an amount with more
+  // than 2 decimal places is REJECTED into the safe STATIC/TEXT fallback.
+  if (amountDecimal.decimalPlaces() > 2) {
+    throw new Error(`KHQR amount must have at most 2 decimal places (got: ${amountString})`);
+  }
+  const amount = amountDecimal.toNumber();
+  if (!Number.isFinite(amount) || amount <= 0) {
+    throw new Error("KHQR amount must be a finite number > 0");
+  }
+  if (!Number.isFinite(expirationTimestampMs) || expirationTimestampMs <= 0) {
+    throw new Error("KHQR expirationTimestamp must be a positive epoch-ms number");
+  }
+
   const optional = {
     currency: khqrData.currency.usd, // KHQR currency = USD for USD incoming
-    amount: amountString, // dynamic QR: amount > 0 (official requirement)
+    amount, // NUMBER per the SDK boundary (exact locked amount, ≤2 decimals)
     billNumber, // officially supported short reference field = transfer memo
     // Official dynamic-QR expiration — fixed payment deadline of THIS Order.
-    expirationTimestamp: String(expirationTimestampMs)
+    expirationTimestamp: expirationTimestampMs
   };
   const sdk = new BakongKHQR();
   const response =
@@ -226,13 +263,25 @@ export function buildKhqrPayload(
           new IndividualInfo(cap.bakongAccountId, cap.merchantName, cap.merchantCity, optional)
         );
 
-  const payload = String(response?.qr || "").trim();
-  if (!payload) {
-    // SDK returns { status: {...} } on validation failure — never a payload.
+  // Runtime SDK contract: success = status.code === 0 AND data.qr present.
+  const status = response?.status;
+  const payload = String(response?.data?.qr || "").trim();
+  if (status?.code !== 0 || !payload) {
+    // Sanitized diagnostics only — NEVER the QR payload or bank data.
+    logger.warn(
+      {
+        sdkStatusCode: status?.code,
+        sdkErrorCode: status?.errorCode,
+        sdkMessage: status?.message,
+        mode: cap.mode
+      },
+      "KHQR SDK generation rejected"
+    );
     throw new Error(`KHQR generation rejected by official SDK (mode: ${cap.mode})`);
   }
   // Official SDK checksum verification — never trust an invalid payload.
   if (!BakongKHQR.verify(payload).isValid) {
+    logger.warn({ mode: cap.mode }, "KHQR payload failed official CRC validation");
     throw new Error("KHQR payload failed official CRC validation");
   }
   return payload;
@@ -320,16 +369,40 @@ export class PaymentQrService {
         const cap = detectKhqrCapability(order.receivingAccountSnapshot);
         if (cap) {
           const payload = buildKhqrPayload(cap, amount, memo, paymentDeadlineMs);
-          const imageBuffer = await renderQrPng(payload);
-          return { type: "KHQR", imageBuffer, amount, currency, memo, orderRef, payload };
+          const rawQr = await renderQrPng(payload);
+          // PRESENTATION ONLY — the professional card is drawn from the SAME
+          // frozen Order data + FROZEN snapshot; any failure → raw QR.
+          const cardImage = await renderPaymentCardSafe({
+            provider: "KHQR",
+            payload,
+            amountLine: `${MoneyService.formatAmount(order.sourceAmount, "USD")} USD`,
+            memo,
+            recipientName: String(readSnapshot(order.receivingAccountSnapshot).khqrMerchantName ?? ""),
+            bankLine: String(readSnapshot(order.receivingAccountSnapshot).khqrAcquiringBank ?? ""),
+            identityLine: String(readSnapshot(order.receivingAccountSnapshot).khqrBakongAccountId ?? "")
+              ? `Bakong: ${String(readSnapshot(order.receivingAccountSnapshot).khqrBakongAccountId ?? "")}`
+              : ""
+          });
+          return { type: "KHQR", imageBuffer: cardImage ?? rawQr, amount, currency, memo, orderRef, payload };
         }
       } else if (currency === "VND") {
         const cap = detectVietQrCapability(order.receivingAccountSnapshot);
         if (cap) {
           const amountString = normalizeVndAmountString(order.sourceAmount);
           const payload = buildVietQrPayload(cap, amountString, memo);
-          const imageBuffer = await renderQrPng(payload);
-          return { type: "VIETQR", imageBuffer, amount: amountString, currency, memo, orderRef, payload };
+          const rawQr = await renderQrPng(payload);
+          // PRESENTATION ONLY — see the KHQR branch note above.
+          const snap = readSnapshot(order.receivingAccountSnapshot);
+          const cardImage = await renderPaymentCardSafe({
+            provider: "VIETQR",
+            payload,
+            amountLine: `${MoneyService.formatAmount(order.sourceAmount, "VND")} VND`,
+            memo,
+            recipientName: String(snap.accountName ?? ""),
+            bankLine: String(snap.bankName ?? ""),
+            accountLine: String(snap.accountNumber ?? "")
+          });
+          return { type: "VIETQR", imageBuffer: cardImage ?? rawQr, amount: amountString, currency, memo, orderRef, payload };
         }
       }
     } catch (err: any) {

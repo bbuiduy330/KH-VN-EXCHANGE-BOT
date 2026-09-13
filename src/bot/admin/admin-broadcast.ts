@@ -16,6 +16,7 @@ import {
   BroadcastAudienceFilter,
   BroadcastAudienceType,
   BroadcastContent,
+  MAX_CONTENT_CAPTION_LEN,
   cancelCampaign,
   confirmCampaign,
   countEligible,

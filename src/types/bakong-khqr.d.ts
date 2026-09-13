@@ -57,10 +57,26 @@ declare module "bakong-khqr" {
     );
   }
 
+  /**
+   * RUNTIME shape (VPS-verified): generateIndividual/generateMerchant return
+   * { status: { code }, data: { qr } } — success when status.code === 0 and
+   * data.qr carries the payload. A top-level `qr` is kept optional for the
+   * decode() APIs but is NOT the generate() success contract.
+   */
   export interface KHQRResponse {
+    status?: {
+      /** 0 = success. */
+      code: number;
+      errorCode?: number | string;
+      message?: string;
+    };
+    data?: {
+      qr?: string;
+      md5?: string;
+    };
+    /** Legacy/decode surface — not the generate() success contract. */
     qr?: string;
     md5?: string;
-    status?: { code: string; errorCode?: unknown; message?: string };
   }
 
   export interface CRCValidation {

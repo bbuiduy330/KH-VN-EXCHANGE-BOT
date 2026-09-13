@@ -211,7 +211,9 @@ export function canAdminCancel(
   if (order.status === "CANCELLED") {
     return { allowed: false, code: "ALREADY_CANCELLED", billWarning };
   }
-  if (order.status === "COMPLETED") {
+  if (order.status === "COMPLETED" || order.completedAt) {
+    // COMPLETED — or a stale status carrying authoritative completion evidence —
+    // can never be normal-cancelled.
     return { allowed: false, code: "COMPLETED", billWarning };
   }
   // Payout already sent (status OR authoritative evidence) — never a normal
