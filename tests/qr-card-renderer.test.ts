@@ -165,7 +165,11 @@ describe("Card rendering — recording canvas (B5/B7)", () => {
     expect(widths.size).toBe(1); // uniform, non-distorted modules
     expect(heights.size).toBe(1);
     const moduleWidth = [...widths][0];
-    expect(moduleWidth).toBeDefined();
+    // Explicit narrowing: a missing module width means the renderer produced
+    // no QR matrix — fail the test clearly instead of an unsafe multiply.
+    if (moduleWidth === undefined) {
+      throw new Error("card renderer produced no QR module width — test cannot proceed");
+    }
     // QR area (21+ modules) stays large/scannable:
     expect(moduleWidth * 21).toBeGreaterThanOrEqual(400);
     expect(blackModules.every((r) => r.w === r.h)).toBe(true);
