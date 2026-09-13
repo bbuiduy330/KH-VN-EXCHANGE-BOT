@@ -30,6 +30,7 @@ import { SystemSecretService } from "../system-config/system-secret-service.js";
 import { OrderService } from "../orders/order-service.js";
 import { sendToAdminNotificationChat, sendToCustomer } from "../../bot/notifications.js";
 import { shortOrderId } from "../../bot/admin/admin-panel.js";
+import { escapeHtml } from "../../bot/menus/cskh-panel.js";
 import { formatAdminDateTime } from "../../shared/app-time.js";
 
 export type IncomingProvider = "BAKONG_OPEN_API" | "ABA_PAYWAY" | "SEPAY" | "APIPAY";
@@ -328,7 +329,7 @@ export function isAllowedVerificationBaseUrl(rawUrl: string): boolean {
 // ---------------------------------------------------------------------------
 // F5/F6 — BAKONG_OPEN_API background reconciliation (USD/KHQR by MD5)
 // ---------------------------------------------------------------------------
-function sanitizeLookup(tx: any): { hash?: string; amount?: number | string; currency?: string } | null {
+function sanitizeLookup(tx: any): { hash: string; amount: number | string; currency: string | null } | null {
   // Defensive parse of the Open API transaction payload — shapes vary; any
   // missing critical field means we NEVER confirm.
   const data = tx?.data ?? tx;

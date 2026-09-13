@@ -28,8 +28,8 @@ vi.mock("bakong-khqr", () => {
     }
   }
   class MerchantInfo extends IndividualInfo {
-    merchantID: string;
-    acquiringBank: string;
+    merchantID = "";
+    acquiringBank = "";
   }
   class MockBakongKHQR {
     static generateIndividual = generateIndividual;
