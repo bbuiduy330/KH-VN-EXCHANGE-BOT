@@ -109,7 +109,10 @@ export function isBroadcastEligible(customer: any): boolean {
   if (!customer) return false;
   const tg = String(customer.telegramId ?? "").trim();
   if (!tg || !/^\d{4,20}$/.test(tg)) return false; // valid numeric Telegram ID only
-  if (customer.marketingEnabled === false) return false;
+  // PART D — broadcasts are MANDATORY: the customer-facing marketing opt-out
+  // was REMOVED. The ONLY normal delivery exclusion is telegramReachable=false
+  // (bot blocked / chat deleted / unreachable). marketingEnabled remains as
+  // legacy schema and MUST NOT exclude anyone.
   if (customer.telegramReachable === false) return false;
   return true;
 }

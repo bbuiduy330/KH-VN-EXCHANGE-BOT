@@ -12,6 +12,7 @@ import { escapeHtml } from "../menus/cskh-panel.js";
 import { startWizard, getAdminSession, isSessionExpired, clearWizard, updateWizard } from "./admin-session.js";
 import { setAdminSearch } from "./admin-session.js";
 import { getBotInstance, notifyPartnerSettlementPaid } from "../notifications.js";
+import { MoneyService } from "../../modules/money/money-service.js";
 import { formatAdminDateTime } from "../../shared/app-time.js";
 import { prisma } from "../../database/client.js";
 import { FileService } from "../../modules/files/file-service.js";
@@ -142,18 +143,96 @@ async function showPartnerSettlements(ctx: BotContext, partnerId: string): Promi
 async function showPartnerCommissions(ctx: BotContext, partnerId: string): Promise<void> {
   await ctx.answerCallbackQuery();
   if (!(await requireRole(ctx, ["ADMIN", "SUPER_ADMIN"]))) return;
-  const commissions = await PartnerService.listPartnerCommissions(partnerId, 15);
-  const lines = ["💰 <b>HOA HỒNG GẦN NHẤT</b> (khách hàng được ẩn)", ""];
-  if (commissions.length === 0) {
+  // A2 — ADMIN FULL TRACEABILITY: customer identity is deliberately VISIBLE to
+  // Admin here (name + Telegram numeric ID + short ref) — the CTV /ctv view
+  // remains privacy-safe and never receives any of this.
+  const rows = await PartnerService.getAdminCommissionRows(partnerId, 10);
+  const lines = ["💰 <b>HOA HỒNG GẦN NHẤT — TRUY VẾT ĐẦY ĐỦ</b>", ""];
+  const kb = new InlineKeyboard();
+  if (rows.length === 0) {
     lines.push("Chưa có hoa hồng nào.");
   } else {
-    for (const c of commissions) {
+    for (const { commission: c, order, customer } of rows) {
       const st = PartnerService.effectiveStatus(c);
-      lines.push(`${formatAdminDateTime(c.createdAt)} · Giao dịch #${c.orderId.slice(-6)} · ${usd(c.totalUsd)} · ${st}${c.riskFlag ? ` · ⚠️ ${c.riskFlag}` : ""}`);
+      const levelLabel = `L${c.level ?? 1}`;
+      const fixed = `$${Number(c.baseCommissionUsd ?? 0).toFixed(2)}`;
+      const spread = `$${Number(c.spreadBonusUsd ?? 0).toFixed(2)}`;
+      const dir = order
+        ? `${MoneyService.formatMoney(order.sourceAmount, order.sourceCurrency)} → ${MoneyService.formatMoney(order.targetAmount, order.targetCurrency)}`
+        : "—";
+      lines.push(
+        `💰 <b>${usd(c.totalUsd)}</b> · ${levelLabel} · ${st}${c.riskFlag ? ` · ⚠️ ${escapeHtml(c.riskFlag)}` : ""}`,
+        `👤 Khách: ${escapeHtml(customer?.fullName || customer?.username || "—")}${customer?.telegramId ? ` · TG <code>${escapeHtml(customer.telegramId)}</code>` : ""}`,
+        `📦 Đơn: <code>${shortOrderId(c.orderId)}</code> · ${escapeHtml(dir)}`,
+        `${fixed} cố định + ${spread} chia sẻ tỷ giá`,
+        `🕒 ${formatAdminDateTime(c.createdAt)}`,
+        ""
+      );
+      kb.text(`📦 Mở giao dịch ${shortOrderId(c.orderId)}`, `ops:order:detail:${c.orderId}`).row();
+      if (customer) {
+        kb.text(`👤 Mở khách ${customer.fullName || customer.username || customer.telegramId}`, `ops:customer:detail:${customer.id}`).row();
+      }
     }
   }
-  await ctx.reply(lines.join("\n"), { parse_mode: "HTML", reply_markup: new InlineKeyboard().text("⬅️ Chi tiết CTV", `ops:partner:detail:${partnerId}`) });
+  // E1 — parent hierarchy assignment (Admin-only, cycle/depth validated).
+  const partner = await PartnerService.getPartnerById(partnerId);
+  lines.push(`🔗 CTV cha: ${partner?.parentPartnerId ? `<code>${escapeHtml(partner.parentPartnerId.slice(-6))}</code>` : "— (L1)"}`);
+  kb.row().text("🔗 Gán CTV cha", `ops:partner:parent:${partnerId}`);
+  kb.row().text("⬅️ Chi tiết CTV", `ops:partner:detail:${partnerId}`).text("🏠 Menu Admin", "ops:home");
+  await ctx.reply(lines.join("\n"), { parse_mode: "HTML", reply_markup: kb });
 }
+
+// E1 — parent hierarchy assignment wizard: free-form (Telegram ID, mã GT, Ref).
+export async function handlePartnerParentInput(ctx: BotContext, text: string): Promise<boolean> {
+  const adminId = String(ctx.from?.id || "");
+  const session = getAdminSession(adminId);
+  if (session.wizard?.kind !== "partner_parent") return false;
+  if (isSessionExpired(adminId)) {
+    clearWizard(adminId);
+    await ctx.reply("⏱ Phiên đã hết hạn.").catch(() => {});
+    return true;
+  }
+  const partnerId = String(session.wizard.data?.partnerId || "");
+  const raw = text.trim();
+  if (raw.toLowerCase() === "xoa" || raw.toLowerCase() === "xóa" || raw === "-") {
+    try {
+      await PartnerService.setPartnerParent(adminId, partnerId, null);
+      clearWizard(adminId);
+      await ctx.reply("✅ Đã gỡ CTV cha — đây nay là CTV L1.").catch(() => {});
+    } catch (err: any) {
+      await ctx.reply(`❌ ${escapeHtml(err?.message || "Lỗi")}`).catch(() => {});
+    }
+    return true;
+  }
+  const matches = await PartnerService.searchPartners(raw);
+  const parent = matches.find((p: any) => p.id !== partnerId);
+  if (!parent) {
+    await ctx.reply("❌ Không tìm thấy CTV cha phù hợp. Gửi lại, hoặc /cancel để hủy.").catch(() => {});
+    return true;
+  }
+  try {
+    await PartnerService.setPartnerParent(adminId, partnerId, parent.id);
+    clearWizard(adminId);
+    await ctx.reply(
+      `✅ Đã gán CTV cha: <b>${escapeHtml(parent.displayName)}</b> (TG <code>${escapeHtml(parent.telegramId || "")}</code>).\n<i>Các hoa hồng ĐÃ TẠO không bị viết lại — snapshot đóng băng giữ nguyên.</i>`,
+      { parse_mode: "HTML" }
+    ).catch(() => {});
+  } catch (err: any) {
+    await ctx.reply(`❌ ${escapeHtml(err?.message || "Lỗi")}`).catch(() => {});
+  }
+  return true;
+}
+
+adminPartnersHandler.callbackQuery(/^ops:partner:parent:([a-zA-Z0-9_-]+)$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  if (!(await requireRole(ctx, ["ADMIN", "SUPER_ADMIN"]))) return;
+  const partnerId = ctx.match?.[1] || "";
+  startWizard(String(ctx.from?.id || ""), "partner_parent", { partnerId });
+  await ctx.reply(
+    "🔗 <b>GÁN CTV CHA</b>\n\nGửi Telegram ID / mã GT / tên của CTV cha (tầng trên).\nGửi <code>xoa</code> để gỡ (thành CTV L1).\nTối đa 5 tầng chi trả — hệ thống chặn tự-parent/cycle/quá sâu.\n\nGửi /cancel để hủy.",
+    { parse_mode: "HTML" }
+  );
+});
 
 export async function handlePartnerAddInput(ctx: BotContext, text: string): Promise<boolean> {
   const adminId = String(ctx.from?.id || "");

@@ -104,6 +104,11 @@ model PaymentAccount {
   khqrMode              String?
   khqrBakongAccountId   String?
   khqrMerchantName      String?
+  // F1/F9 — automated incoming-payment verification provider for THIS account.
+  // null/empty = DISABLED (manual Admin verification only). Secrets (API
+  // tokens) live in the encrypted system-secret mechanism, never here.
+  verificationProvider  String?
+  verificationBaseUrl   String?
   khqrMerchantCity      String?
   khqrMerchantId        String?
   khqrAcquiringBank     String?
@@ -174,6 +179,12 @@ model Order {
   // creation from the then-current template; later template changes never
   // rewrite an existing Order's payment instructions.
   transferMemo             String?
+  // E6 — FROZEN rate/margin basis captured at Order creation from the
+  // authoritative ExchangeRate row (baseRate + buy/sellMargin). Commission
+  // spread math uses THIS snapshot — never current live rates.
+  rateMarginSnapshot       Json?
+  // F5 — Bakong Open API MD5 of THIS Order's dynamic KHQR (nullable).
+  khqrMd5                  String?
   sourceCurrency           String
   targetCurrency           String
   sourceAmount             Decimal             @db.Decimal(18, 6)
@@ -403,6 +414,11 @@ model Partner {
   // Reference information only — Admin manually reviews and pays.
   payoutDestinationText String?
   payoutQrFileId        String?
+  // E1 — 5-level CTV hierarchy (L2..L5 upline). Commission originates ONLY
+  // from real COMPLETED customer Orders — never for recruiting.
+  parentPartnerId String?
+  parent          Partner?           @relation("PartnerHierarchy", fields: [parentPartnerId], references: [id])
+  children        Partner[]          @relation("PartnerHierarchy")
   createdAt           DateTime            @default(now())
   updatedAt           DateTime            @updatedAt
   commissions         Commission[]
@@ -411,10 +427,15 @@ model Partner {
 
 model Commission {
   id                String            @id @default(cuid())
-  orderId           String            @unique
+  // MULTI-LEVEL (E7): multiple Commission rows per Order (one per upline
+  // Partner level). Composite identity (orderId, partnerId, level).
+  orderId           String
+  level             Int               @default(1)
   partnerId         String
   partner           Partner           @relation(fields: [partnerId], references: [id])
+  // Fixed tier component of THIS level (E2).
   baseCommissionUsd Decimal           @db.Decimal(18, 6)
+  // L1 only: 20% of the commissionable FX spread (E2/E3); 0 for L2-L5.
   spreadBonusUsd    Decimal           @default(0) @db.Decimal(18, 6)
   totalUsd          Decimal           @db.Decimal(18, 6)
   status            String            @default("HELD") // HELD | AVAILABLE | PAID | REVERSED
@@ -424,9 +445,15 @@ model Commission {
   settlement        PartnerSettlement? @relation(fields: [settlementId], references: [id])
   paidAt            DateTime?
   reversedReason    String?
+  // E6 — FROZEN commission snapshot: hierarchy used, rule version, spread
+  // basis. Later Partner-parent changes NEVER rewrite past commissions.
+  ruleVersion       String?
+  hierarchySnapshot Json?
+  spreadBasis       Json?
   createdAt         DateTime          @default(now())
   updatedAt         DateTime          @updatedAt
 
+  @@unique([orderId, partnerId, level])
   @@index([partnerId, status])
 }
 
@@ -495,4 +522,28 @@ model BroadcastRecipient {
 
   @@unique([campaignId, customerId])
   @@index([campaignId, status])
+}
+
+// F2 — durable inbound-payment event model (provider-neutral). Unique per
+// (provider, externalTransactionId) for webhook/lookup deduplication. NEVER
+// stores API secrets/tokens — secrets live in the encrypted system-secret
+// mechanism; rawMetadata holds sanitized provider data only.
+model IncomingPaymentEvent {
+  id                    String    @id @default(cuid())
+  provider              String // BAKONG_OPEN_API | ABA_PAYWAY | SEPAY | APIPAY
+  externalTransactionId String
+  paymentAccountId      String?
+  matchedOrderId        String?
+  currency              String?
+  amount                Decimal?  @db.Decimal(18, 6)
+  memo                  String?
+  // RECEIVED | MATCHED | CONFIRMED | MISMATCH | IGNORED | FAILED
+  status                String    @default("RECEIVED")
+  rawMetadata           Json?
+  receivedAt            DateTime  @default(now())
+  verifiedAt            DateTime?
+  createdAt             DateTime  @default(now())
+
+  @@unique([provider, externalTransactionId])
+  @@index([status, receivedAt])
 }

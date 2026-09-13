@@ -63,10 +63,10 @@ async function mkCustomer(opts: { marketing?: boolean; reachable?: boolean; lang
 }
 
 describe("Part C — eligibility (C2) + audience filters (C3)", () => {
-  it("excludes opt-out and blocked customers; requires a numeric Telegram ID", () => {
-    expect(isBroadcastEligible({ telegramId: "123456789", marketingEnabled: true, telegramReachable: true })).toBe(true);
-    expect(isBroadcastEligible({ telegramId: "123456789", marketingEnabled: false, telegramReachable: true })).toBe(false);
+  it("marketingEnabled=false does NOT exclude (opt-out removed); blocked/unreachable DOES; valid numeric ID required", () => {
+    expect(isBroadcastEligible({ telegramId: "123456789", marketingEnabled: false, telegramReachable: true })).toBe(true);
     expect(isBroadcastEligible({ telegramId: "123456789", marketingEnabled: true, telegramReachable: false })).toBe(false);
+    expect(isBroadcastEligible({ telegramId: "123456789", marketingEnabled: true, telegramReachable: true })).toBe(true);
     expect(isBroadcastEligible({ telegramId: "", marketingEnabled: true, telegramReachable: true })).toBe(false);
     expect(isBroadcastEligible({ telegramId: "not-a-number", marketingEnabled: true, telegramReachable: true })).toBe(false);
   });
@@ -109,10 +109,10 @@ describe("Part C — eligibility (C2) + audience filters (C3)", () => {
 });
 
 describe("Part C — campaign snapshot, confirm, composer safety", () => {
-  it("snapshots the audience BEFORE sending; opt-out/blocked excluded; no duplicates", async () => {
+  it("snapshots the audience BEFORE sending; duplicates prevented; only unreachable excluded", async () => {
     await mkCustomer();
-    await mkCustomer({ marketing: false });
-    await mkCustomer({ reachable: false });
+    await mkCustomer({ marketing: false }); // opt-out removed: STILL included
+    await mkCustomer({ reachable: false }); // blocked: excluded
 
     const campaign = await createCampaign({
       createdByTelegramId: "admin-bc",
@@ -120,7 +120,7 @@ describe("Part C — campaign snapshot, confirm, composer safety", () => {
       content: { text: "Chào khách! Ưu đãi hôm nay." }
     });
     const { campaign: confirmed, totalRecipients } = await confirmCampaign("admin-bc", campaign.id);
-    expect(totalRecipients).toBeGreaterThanOrEqual(1);
+    expect(totalRecipients).toBeGreaterThanOrEqual(2);
 
     const recipients: any[] = await prisma.broadcastRecipient.findMany({ where: { campaignId: confirmed.id } });
     expect(recipients.every((r) => r.telegramId && r.status === "PENDING")).toBe(true);
@@ -158,15 +158,26 @@ describe("Part C — campaign snapshot, confirm, composer safety", () => {
     expect(recipients.length).toBe(0); // snapshot happens ONLY at confirm
   });
 
-  it("confirmCampaign refuses customers who opted out (ONE_CUSTOMER)", async () => {
+  it("ONE_CUSTOMER with an unreachable customer is refused; opt-out does NOT refuse", async () => {
     const off = await mkCustomer({ marketing: false });
-    const campaign = await createCampaign({
+    const unreachable = await mkCustomer({ reachable: false });
+
+    const okCampaign = await createCampaign({
       createdByTelegramId: "admin-bc",
       audienceType: "ONE_CUSTOMER",
       customerIds: [off.id],
+      content: { text: "opt-out no longer blocks" }
+    });
+    const { campaign: confirmed } = await confirmCampaign("admin-bc", okCampaign.id);
+    expect(confirmed.totalRecipients).toBe(1); // marketingEnabled is legacy-only
+
+    const blocked = await createCampaign({
+      createdByTelegramId: "admin-bc",
+      audienceType: "ONE_CUSTOMER",
+      customerIds: [unreachable.id],
       content: { text: "nope" }
     });
-    await expect(confirmCampaign("admin-bc", campaign.id)).rejects.toThrow();
+    await expect(confirmCampaign("admin-bc", blocked.id)).rejects.toThrow();
   });
 
   it("cancelCampaign only cancels DRAFT/READY; cancelled cannot be confirmed", async () => {

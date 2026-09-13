@@ -778,6 +778,16 @@ customerHandler.callbackQuery(/^customer:bill:attach:([a-zA-Z0-9_-]+)$/, async (
       return void ctx.reply(t(locale, "bill.none"));
     }
     // Billable statuses = the statuses submitCustomerBill() accepts.
+    // PART I — a bank-confirmed Order (WAITING_PAYOUT with verifiedAt) is
+    // handled SAFELY: the customer is told no bill is needed; the Order is
+    // NEVER reopened or re-confirmed by a late bill.
+    if (order.status === "WAITING_PAYOUT" && order.verifiedAt) {
+      finishPendingBill(telegramId, pending, true); // media stays recoverable
+      return void ctx.reply(
+        t(locale, "order.status_reply_payout_info", { id: orderId }),
+        { parse_mode: "HTML" }
+      );
+    }
     const allowedStatuses = ["WAITING_PAYMENT", "CUSTOMER_SENT_BILL", "WAITING_ADMIN_VERIFY", "MANUAL_REVIEW"];
     if (!allowedStatuses.includes(order.status as string)) {
       finishPendingBill(telegramId, pending, true); // media stays recoverable
@@ -1985,8 +1995,19 @@ customerHandler.callbackQuery("ctv:commissions", async (ctx) => {
   } else {
     for (const c of commissions) {
       const st = PartnerService.effectiveStatus(c);
-      // PRIVACY: date + order short-ref + amount + status. NO customer identity.
-      lines.push(`${formatAdminDateTime(c.createdAt)} · Giao dịch #${c.orderId.slice(-6)} · ${usd(c.totalUsd)} · ${st}`);
+      // PRIVACY (A1): date + order short-ref + amount + status + commission
+      // breakdown. NO customer identity, no bank/payment/payout data.
+      const level = c.level ?? 1;
+      const kind = level === 1 ? "Đơn trực tiếp" : `Hoa hồng tầng ${level}`;
+      lines.push(
+        `✅ #COM-${c.id.slice(-6).toUpperCase()} · +${usd(c.totalUsd)}`,
+        level === 1
+          ? `${kind}: ${usd(c.baseCommissionUsd)} cố định${Number(c.spreadBonusUsd ?? 0) > 0 ? ` + ${usd(c.spreadBonusUsd)} chia sẻ tỷ giá` : ""}`
+          : `${kind}: ${usd(c.totalUsd)} cố định`,
+        `${formatAdminDateTime(c.createdAt)}`,
+        `${st}`,
+        ""
+      );
     }
   }
   await ctx.reply(lines.join("\n"), { parse_mode: "HTML" });
@@ -2095,25 +2116,6 @@ customerHandler.callbackQuery("ctv:payout:confirm:go", async (ctx) => {
   } catch (err: any) {
     await ctx.reply(`❌ ${err?.message || "Không lưu được thông tin."}`);
   }
-});
-
-// 🔔 Marketing opt-out (C9) — controls ONLY Broadcast/outreach messages.
-// Order status, payment verification, payout, support and security
-// notifications are NEVER suppressed by this setting.
-customerHandler.callbackQuery("customer:menu:marketing", async (ctx) => {
-  await ctx.answerCallbackQuery();
-  const telegramId = String(ctx.from?.id || "");
-  const customer = await CustomerService.getOrCreateCustomer({ telegramId });
-  const locale = locOf(customer);
-  const next = customer.marketingEnabled === false; // currently off → turn on
-  await prisma.customer.update({
-    where: { id: customer.id },
-    data: { marketingEnabled: next }
-  });
-  await ctx.reply(
-    t(locale, next ? "marketing.toggled_on" : "marketing.toggled_off"),
-    { parse_mode: "HTML", reply_markup: getCustomerMenuKeyboard(locale) }
-  );
 });
 
 // O — OPTIONAL post-completion rating (never blocks financial completion).

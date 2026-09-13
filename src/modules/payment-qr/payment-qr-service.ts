@@ -219,6 +219,20 @@ export function buildKhqrPayload(
    *  the current time, so re-displaying the QR cannot extend payment lifetime. */
   expirationTimestampMs: number
 ): string {
+  return buildKhqrPayloadDetailed(cap, amountString, billNumber, expirationTimestampMs).payload;
+}
+
+/**
+ * Same SDK boundary as buildKhqrPayload but also returns the SDK-provided
+ * MD5 (F5) so the caller can persist it on the Order for Bakong Open API
+ * reconciliation. No financial term of the QR is influenced by the MD5.
+ */
+export function buildKhqrPayloadDetailed(
+  cap: KhqrCapability,
+  amountString: string,
+  billNumber: string,
+  expirationTimestampMs: number
+): { payload: string; md5: string | null } {
   const amountDecimal = new Decimal(String(amountString ?? ""));
   if (!amountDecimal.isFinite()) {
     throw new Error(`KHQR amount must be a finite number (got: ${amountString})`);
@@ -284,7 +298,8 @@ export function buildKhqrPayload(
     logger.warn({ mode: cap.mode }, "KHQR payload failed official CRC validation");
     throw new Error("KHQR payload failed official CRC validation");
   }
-  return payload;
+  const md5 = String(response?.data?.md5 || response?.md5 || "").trim() || null;
+  return { payload, md5 };
 }
 
 /** VietQR dynamic payload — `vietnam-qr-pay` (VND, integer-normalized). */
@@ -368,7 +383,13 @@ export class PaymentQrService {
       if (currency === "USD") {
         const cap = detectKhqrCapability(order.receivingAccountSnapshot);
         if (cap) {
-          const payload = buildKhqrPayload(cap, amount, memo, paymentDeadlineMs);
+          // Detailed variant captures the SDK MD5 (F5) for Bakong Open API
+          // reconciliation — persisted best-effort on the Order, never used to
+          // alter any financial term of the QR.
+          const { payload, md5 } = buildKhqrPayloadDetailed(cap, amount, memo, paymentDeadlineMs);
+          if (md5 && order.status === "WAITING_PAYMENT") {
+            await prisma.order.update({ where: { id: order.id }, data: { khqrMd5: md5 } }).catch(() => {});
+          }
           const rawQr = await renderQrPng(payload);
           // PRESENTATION ONLY — the professional card is drawn from the SAME
           // frozen Order data + FROZEN snapshot; any failure → raw QR.
