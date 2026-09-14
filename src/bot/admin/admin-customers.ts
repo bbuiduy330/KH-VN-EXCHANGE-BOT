@@ -11,9 +11,21 @@ import { ConversationService } from "../../modules/conversation/conversation-ser
 import { PermissionService } from "../../modules/permissions/permission-service.js";
 import { MoneyService } from "../../modules/money/money-service.js";
 import { escapeHtml, staffDisplayName } from "../menus/cskh-panel.js";
-import { customerLabel, shortOrderId } from "./admin-panel.js";
+import { customerLabel, shortOrderId, timeAgo } from "./admin-panel.js";
 import { customerIdentity } from "../notifications.js";
 import { resolveCustomer } from "../../modules/customer/customer-resolver.js";
+import { CustomerChatHistoryService } from "../../modules/chat/customer-chat-history-service.js";
+import {
+  ADMIN_LIST_FETCH_TAKE,
+  ADMIN_LIST_PAGE_SIZE,
+  advanceAdminList,
+  commitAdminListNext,
+  decodeListCursor,
+  ensureAdminListFilter,
+  getAdminListState,
+  listCursorWhere,
+  retreatAdminList
+} from "./admin-list-session.js";
 import { setAdminSearch } from "./admin-session.js";
 import { clearSelectedCustomer, getSelectedCustomer, setSelectedCustomer } from "../state/staff-chat-session.js";
 import { formatAdminDate, formatAdminDateTime } from "../../shared/app-time.js";
@@ -80,6 +92,7 @@ export function renderCustomerDetailText(customer: any, conv: any, latestOrder: 
 export function customerDetailKeyboard(customer: any, latestOrder: any): InlineKeyboard {
   const kb = new InlineKeyboard();
   kb.row().text("💬 Hỗ trợ khách", `ops:customer:support:${customer.id}`);
+  kb.row().text("💬 Lịch sử chat", `ops:customer:chat:${customer.id}`);
   if (latestOrder) {
     kb.text("📦 Xem đơn", `ops:order:detail:${latestOrder.id}`);
   }
@@ -203,20 +216,63 @@ export async function showCustomerHistory(
   await ctx.reply(lines.join("\n"), { parse_mode: "HTML", reply_markup: kb });
 }
 
-export async function showCustomerList(ctx: BotContext): Promise<void> {
+export async function showCustomerList(ctx: BotContext, move?: "next" | "prev"): Promise<void> {
   if (!(await requirePermission(ctx, "customer.view"))) return;
-  const customers = await prisma.customer.findMany({ orderBy: { createdAt: "desc" }, take: 10 });
+  const adminId = String(ctx.from?.id || "");
 
-  const lines = ["👥 <b>KHÁCH HÀNG GẦN ĐÂY</b>", ""];
+  // Cursor pagination state (per admin + screen). Customers are ordered by
+  // last ACTIVITY (updatedAt — any profile/bank/language touch refreshes it),
+  // not creation date — closest operational equivalent on this model.
+  ensureAdminListFilter(adminId, "customers", "");
+  let cursorRaw = "";
+  if (move === "next") {
+    const next = advanceAdminList(adminId, "customers");
+    if (next === null) {
+      await ctx.answerCallbackQuery("Đã hết danh sách.").catch(() => {});
+      return;
+    }
+    cursorRaw = next;
+  } else if (move === "prev") {
+    const prev = retreatAdminList(adminId, "customers");
+    if (prev === null) {
+      await ctx.answerCallbackQuery().catch(() => {});
+      return;
+    }
+    cursorRaw = prev;
+  }
+
+  const cw = listCursorWhere(decodeListCursor(cursorRaw || null));
+  const customers: any[] = await prisma.customer.findMany({
+    ...(cw ? { where: cw } : {}),
+    orderBy: [{ lastActivityAt: "desc" }, { id: "desc" }],
+    take: ADMIN_LIST_FETCH_TAKE
+  });
+  const hasMore = customers.length > ADMIN_LIST_PAGE_SIZE;
+  const page = customers.slice(0, ADMIN_LIST_PAGE_SIZE);
+  commitAdminListNext(adminId, "customers", hasMore && page.length > 0 ? encodeListCursor(page[page.length - 1]) : null);
+
+  const lines = ["👥 <b>KHÁCH HÀNG</b>", `${page.length} khách (hoạt động gần nhất)`, ""];
   const kb = new InlineKeyboard();
-  if (customers.length === 0) {
-    lines.push("Chưa có khách hàng nào.");
+  if (page.length === 0) {
+    lines.push("Không có khách hàng phù hợp.");
   } else {
-    for (const c of customers) {
-      lines.push(`👤 ${escapeHtml(customerLabel(c))}${c.telegramId ? ` · 🆔 <code>${c.telegramId}</code>` : ""} · 🔖 #${String(c.id).slice(-6).toUpperCase()}`);
+    for (const c of page) {
+      // Display name + Telegram numeric ID + public Customer Ref + TRUE
+      // last-activity context. NO internal Customer.id in the UI.
+      const active = timeAgo(c.lastActivityAt || c.updatedAt || c.createdAt);
+      lines.push(
+        `👤 ${escapeHtml(customerLabel(c))}${c.telegramId ? ` · 🆔 <code>${c.telegramId}</code>` : ""} · 🔖 #${String(c.id).slice(-6).toUpperCase()} · 🌐 ${escapeHtml(c.language || "vi")} · 🕒 ${active}`
+      );
       kb.row().text(`👤 ${escapeHtml(customerLabel(c))}`, `ops:customer:detail:${c.id}`);
     }
   }
+
+  // Page navigation (tiny callbacks; cursor state in per-admin session).
+  const state = getAdminListState(adminId, "customers");
+  const navRow = kb.row();
+  if (state.pos > 0) navRow.text("⬅️ Trước", "ops:customers:page:prev");
+  if (hasMore) navRow.text("Tiếp ➡️", "ops:customers:page:next");
+
   kb.row().text("🔎 Tìm khách", "ops:customers:search").text("🏠 Menu Admin", "ops:home");
   if (ctx.callbackQuery) {
     await ctx.answerCallbackQuery();
@@ -251,6 +307,9 @@ export async function runCustomerSearch(ctx: BotContext, query: string): Promise
 }
 
 adminCustomersHandler.callbackQuery("ops:customers", (ctx) => showCustomerList(ctx));
+// Cursor page navigation (tiny callbacks; cursor state in per-admin session).
+adminCustomersHandler.callbackQuery("ops:customers:page:next", (ctx) => showCustomerList(ctx, "next"));
+adminCustomersHandler.callbackQuery("ops:customers:page:prev", (ctx) => showCustomerList(ctx, "prev"));
 adminCustomersHandler.callbackQuery("ops:customers:search", async (ctx) => {
   await ctx.answerCallbackQuery();
   if (!(await requirePermission(ctx, "customer.view"))) return;
@@ -269,6 +328,92 @@ adminCustomersHandler.callbackQuery(/^ops:customer:history:(.+)$/, (ctx) => {
   const filter = hasFilter ? raw.slice(sep + 1) : "all";
   return showCustomerHistory(ctx, customerId, filter);
 });
+
+// ---------------------------------------------------------------------------
+// 💬 DURABLE CHAT HISTORY (Part 2) — shared by Admin CRM + CSKH panels.
+// Keyset pagination 25/page (createdAt DESC, id DESC); per-admin cursor state.
+// NEVER displays the raw internal Customer.id; Admin/CSKH only (no CTV route).
+// ---------------------------------------------------------------------------
+
+const SENDER_LABELS: Record<string, string> = {
+  CUSTOMER: "👤 Khách",
+  BOT: "🤖 Bot",
+  STAFF: "👨‍💼 CSKH",
+  SYSTEM: "⚙️ Hệ thống"
+};
+
+function chatEntryLine(m: any): string {
+  const time = formatAdminDateTime(m.createdAt).slice(11, 16); // GMT+7 HH:mm
+  const who = SENDER_LABELS[m.senderType] || "💬";
+  const staffTag = m.senderType === "STAFF" && m.staffTelegramId ? ` · ${m.staffTelegramId.slice(-4)}` : "";
+  const media = m.contentType !== "TEXT" ? ` [${m.contentType}]` : "";
+  const body = escapeHtml(String(m.text || m.caption || "")).slice(0, 300) || "(media)";
+  return `${time} ${who}${staffTag}${media}\n${body}`;
+}
+
+export async function showCustomerChatHistory(ctx: BotContext, customerId: string, move?: "next" | "prev"): Promise<void> {
+  if (!(await requirePermission(ctx, "customer.view"))) return;
+  const adminId = String(ctx.from?.id || "");
+  const { customer } = await resolveCustomer(customerId);
+  if (!customer) {
+    await ctx.reply("❌ Không tìm thấy khách hàng.").catch(() => {});
+    return;
+  }
+  const screen = `chat:${customer.id}`;
+  ensureAdminListFilter(adminId, screen, "");
+  let cursorRaw = "";
+  if (move === "next") {
+    const next = advanceAdminList(adminId, screen);
+    if (next === null) {
+      await ctx.answerCallbackQuery("Đã hết lịch sử.").catch(() => {});
+      return;
+    }
+    cursorRaw = next;
+  } else if (move === "prev") {
+    const prev = retreatAdminList(adminId, screen);
+    if (prev === null) return;
+    cursorRaw = prev;
+  }
+
+  const { messages, hasOlder, nextCursor } = await CustomerChatHistoryService.listPage(customer.id, cursorRaw || null);
+  commitAdminListNext(adminId, screen, nextCursor);
+
+  const lines = [
+    "💬 <b>LỊCH SỬ TRÒ CHUYỆN</b>",
+    "",
+    `👤 ${escapeHtml(customerLabel(customer))}`,
+    customer.telegramId ? `🆔 TG: <code>${customer.telegramId}</code>` : "",
+    `🔖 Ref: #${String(customer.id).slice(-6).toUpperCase()}`,
+    ""
+  ];
+  const kb = new InlineKeyboard();
+  if (messages.length === 0) {
+    lines.push("Chưa có nội dung trò chuyện nào.");
+  } else {
+    for (const m of messages) lines.push(chatEntryLine(m));
+  }
+  const st = getAdminListState(adminId, screen);
+  const nav = kb.row();
+  if (st.pos > 0) nav.text("⬅️ Cũ hơn", `ops:customer:chat:${customer.id}:prev`);
+  if (hasOlder) nav.text("Mới hơn ➡️", `ops:customer:chat:${customer.id}:next`);
+  kb.row().text("⬅️ Hồ sơ khách", `ops:customer:detail:${customer.id}`).text("🏠 Menu Admin", "ops:home");
+
+  if (ctx.callbackQuery) {
+    await ctx.answerCallbackQuery();
+    try {
+      await ctx.editMessageText(lines.filter(Boolean).join("\n"), { parse_mode: "HTML", reply_markup: kb });
+      return;
+    } catch {
+      /* fall through */
+    }
+  }
+  await ctx.reply(lines.filter(Boolean).join("\n"), { parse_mode: "HTML", reply_markup: kb });
+}
+
+adminCustomersHandler.callbackQuery(/^ops:customer:chat:([a-zA-Z0-9_-]+):(next|prev)$/, (ctx) =>
+  showCustomerChatHistory(ctx, ctx.match?.[1] || "", ctx.match?.[2] as "next" | "prev"));
+adminCustomersHandler.callbackQuery(/^ops:customer:chat:([a-zA-Z0-9_-]+)$/, (ctx) =>
+  showCustomerChatHistory(ctx, ctx.match?.[1] || ""));
 
 // ---------------------------------------------------------------------------
 // Admin → customer direct support (reuses existing C3 claim/selected-chat)

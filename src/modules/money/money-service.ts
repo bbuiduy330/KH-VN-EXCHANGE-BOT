@@ -252,6 +252,21 @@ export class MoneyService {
    * Formats an effective quote rate in an intuitive customer form.
    * Never shows VND->USD as "0.0000": both directions are presented as
    * "1 USD = xx xxx VND" using the directional effective rate.
+   *
+   * RATE DISPLAY CONTRACT (authoritative = the Quote/Order's OWN frozen
+   * effectiveRate; live/config rates are NEVER fetched to render an existing
+   * Quote):
+   *   USD -> VND: effectiveRate IS VND-per-USD (e.g. 25400) — shown directly.
+   *   VND -> USD: TWO frozen-snapshot semantics exist historically:
+   *     - source-side quotes: effectiveRate = USD-per-VND multiplier (< 1,
+   *       e.g. 0.0000392) → the applicable VND-per-USD rate is 1/rate;
+   *     - target-side quotes ("nhận 100 USD"): effectiveRate = the applicable
+   *       VND-per-USD sell rate itself (e.g. 25500, >= 1).
+   *     Within the USD<->VND business these ranges can never collide, so the
+   *     display disambiguates deterministically by magnitude: rate < 1 ⇒
+   *     multiplier (invert), rate >= 1 ⇒ already VND-per-USD (show directly).
+   *     The displayed value always corresponds to the rate that produced the
+   *     quote's targetAmount. Financial values are never recomputed here.
    */
   static formatEffectiveRate(sourceCurrency: string, targetCurrency: string, effectiveRate: Decimal | number | string): string {
     const src = sourceCurrency.toUpperCase().trim();
@@ -262,8 +277,10 @@ export class MoneyService {
       return `1 USD = ${this.formatAmount(rate, "VND")} VND`;
     }
     if (src === "VND" && tgt === "USD") {
-      // Inverse direction: present the intuitive USD->VND customer form.
-      const usdToVnd = new Decimal(1).dividedBy(rate);
+      // Applicable customer rate is ALWAYS presented as "1 USD = X VND".
+      // rate < 1 ⇒ USD-per-VND multiplier (source→target) → invert to VND/USD.
+      // rate >= 1 ⇒ already the VND-per-USD applicable rate — show as-is.
+      const usdToVnd = rate.lessThan(1) ? new Decimal(1).dividedBy(rate) : rate;
       return `1 USD = ${this.formatAmount(usdToVnd, "VND")} VND`;
     }
     // Fallback (historical pairs): keep a readable 4-decimal form.

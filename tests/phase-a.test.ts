@@ -3,6 +3,7 @@ import { inMemoryStore } from "../src/database/client.js";
 import { AiProvider } from "../src/modules/ai/ai-provider.js";
 import { QuoteService } from "../src/modules/quotes/quote-service.js";
 import { CustomerService } from "../src/modules/customer/customer-service.js";
+import { RuntimeConfigService } from "../src/modules/system-config/runtime-config-service.js";
 import {
   getCustomerMenuKeyboard,
   getBankWizardKeyboard,
@@ -30,8 +31,12 @@ import {
 
 const uniqueId = () => `phasea-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
 
-beforeEach(() => {
+beforeEach(async () => {
   inMemoryStore.exchangeRates.clear();
+  // USD/VND margins now come from SystemSetting — pin them to the fixture
+  // values used by seedUsdVndRate() (50/50) so the arithmetic stays exact.
+  await RuntimeConfigService.setBuyMarginVnd(50, "TEST");
+  await RuntimeConfigService.setSellMarginVnd(50, "TEST");
 });
 
 function seedUsdVndRate(): void {

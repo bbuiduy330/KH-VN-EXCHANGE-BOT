@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach } from "vitest";
 import { inMemoryStore } from "../src/database/client.js";
 import { QuoteService } from "../src/modules/quotes/quote-service.js";
 import { CustomerService } from "../src/modules/customer/customer-service.js";
+import { RuntimeConfigService } from "../src/modules/system-config/runtime-config-service.js";
 import { parseNonNegativeInteger } from "../src/bot/admin/admin-rates.js";
 
 /**
@@ -18,9 +19,13 @@ import { parseNonNegativeInteger } from "../src/bot/admin/admin-rates.js";
 
 const uniqueId = () => `ratesetup-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
 
-beforeEach(() => {
+beforeEach(async () => {
   inMemoryStore.exchangeRates.clear();
   inMemoryStore.quotes.clear();
+  // USD/VND margins now come from SystemSetting (RuntimeConfigService); pin the
+  // fixture values so the numeric expectations below stay meaningful.
+  await RuntimeConfigService.setBuyMarginVnd(50, "TEST");
+  await RuntimeConfigService.setSellMarginVnd(100, "TEST");
 });
 
 describe("Fresh DB — customer safety before any rate exists", () => {

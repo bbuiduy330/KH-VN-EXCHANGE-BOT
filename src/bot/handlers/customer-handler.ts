@@ -21,6 +21,8 @@ import { setPendingBillSession, clearPendingBillSession, takePendingBillSession,
 import { setPartnerPayoutSession, getPartnerPayoutSession, updatePartnerPayoutSession, setPartnerPayoutQrAwaiting, clearPartnerPayoutSession, parsePayoutDestinationFreeForm } from "../state/partner-session.js";
 import { clearCustomerTelegramChat } from "../../modules/telegram/clear-chat-service.js";
 import { formatAdminDateTime } from "../../shared/app-time.js";
+import { ChatService } from "../../modules/chat/chat-service.js";
+import { formatPublicOrderRef, orderPublicRef } from "../../modules/orders/order-ref.js";
 import { PaymentQrService } from "../../modules/payment-qr/payment-qr-service.js";
 
 /** Mask a payout account number for customer-facing previews (**** + last 4). */
@@ -269,13 +271,13 @@ function customerCancelBlockedText(
   const decision = OrderService.canCustomerCancel(order);
   if (decision.allowed) return null;
   if (decision.code === "ALREADY_CANCELLED") {
-    return t(locale, "order.cancel_already", { id: order.id });
+    return t(locale, "order.cancel_already", { id: formatPublicOrderRef(order) });
   }
   if (decision.code === "BILL_EXISTS") {
     return t(locale, "order.cancel_blocked_bill");
   }
   return t(locale, "order.cancel_blocked_status", {
-    id: order.id,
+    id: formatPublicOrderRef(order),
     status: t(locale, `status.${order.status}`)
   });
 }
@@ -303,7 +305,7 @@ async function showCustomerCancelWarning(ctx: BotContext, orderId: string): Prom
     .text(t(locale, "order.cancel_keep_btn"), `customer:order:keep:${order.id}`);
 
   await ctx.reply(
-    `${t(locale, "order.cancel_warn_title")}\n\n${t(locale, "order.cancel_warn_body", { id: order.id, amount })}`,
+    `${t(locale, "order.cancel_warn_title")}\n\n${t(locale, "order.cancel_warn_body", { id: formatPublicOrderRef(order), amount })}`,
     { parse_mode: "HTML", reply_markup: kb }
   );
 }
@@ -348,7 +350,7 @@ customerHandler.callbackQuery(/^customer:order:cancel:confirm:([a-zA-Z0-9_-]+)$/
   }
 
   if (order.status === "CANCELLED") {
-    return void ctx.reply(t(locale, "order.cancel_already", { id: order.id }), { parse_mode: "HTML" });
+    return void ctx.reply(t(locale, "order.cancel_already", { id: formatPublicOrderRef(order) }), { parse_mode: "HTML" });
   }
 
   const blocked = customerCancelBlockedText(order, locale);
@@ -366,7 +368,14 @@ customerHandler.callbackQuery(/^customer:order:cancel:confirm:([a-zA-Z0-9_-]+)$/
       "CUSTOMER_CANCELLED",
       { source: "CUSTOMER_CANCELLED" }
     );
-    await ctx.reply(t(locale, "order.cancel_success", { id: order.id }), {
+    await ctx.reply(t(locale, "order.cancel_success", { id: formatPublicOrderRef(order) }), {
+      parse_mode: "HTML",
+      // Order-linked support — the customer NEVER types the Order number:
+      reply_markup: new InlineKeyboard().text(
+        t(locale, "payout.support_btn"),
+        `customer:support:order:${order.id}`
+      )
+    });
       parse_mode: "HTML",
       reply_markup: getCustomerMenuKeyboard(locale)
     });
@@ -635,7 +644,168 @@ customerHandler.callbackQuery("customer:menu:support", async (ctx) => {
   }
 });
 
-// --- 💳 Transfer info + 📷 bill instruction callbacks (requirement N) ---
+// ---------------------------------------------------------------------------
+// 🧾 CUSTOMER TRANSACTION HISTORY — recent terminal Orders (COMPLETED/CANCELLED),
+// keyset-paginated 20/page (createdAt DESC, id DESC), strictly own-customer.
+// Historical detail → [💬 Hỗ trợ đơn này] carries the stable internal Order.id.
+// ---------------------------------------------------------------------------
+
+const HISTORY_TERMINAL_STATUSES = ["COMPLETED", "CANCELLED"];
+
+customerHandler.callbackQuery(/^customer:history(?::page:(next|prev))?$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const telegramId = String(ctx.from?.id || "");
+  const customer = await CustomerService.getOrCreateCustomer({ telegramId });
+  const move = ctx.match?.[1] as "next" | "prev" | undefined;
+  const st = getChatHistoryNav(telegramId, customer.id);
+  let cursorRaw = "";
+  if (move === "next" && st.next) cursorRaw = st.next;
+  else if (move === "prev" && st.prev) cursorRaw = st.prev;
+
+  const where: any = { customerId: customer.id, status: { in: HISTORY_TERMINAL_STATUSES } };
+  if (cursorRaw) {
+    const c = decodeChatCursorRaw(cursorRaw);
+    if (c) where.AND = [{ OR: [{ createdAt: { lt: c.createdAt } }, { createdAt: c.createdAt, id: { lt: c.id } }] }];
+  }
+  const rows: any[] = await prisma.order.findMany({
+    where,
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+    take: 21
+  });
+  const hasMore = rows.length > 20;
+  const page = rows.slice(0, 20);
+  setChatHistoryNav(telegramId, customer.id, {
+    next: hasMore ? encodeChatCursorRaw(page[page.length - 1]) : null,
+    prev: cursorRaw
+  });
+
+  const lines = ["🧾 <b>LỊCH SỬ GIAO DỊCH</b>", `${page.length} giao dịch gần nhất`, ""];
+  const kb = new InlineKeyboard();
+  if (page.length === 0) {
+    lines.push("Chưa có giao dịch nào.");
+  } else {
+    for (const o of page) {
+      const badge = o.status === "COMPLETED" ? "✅" : "❌";
+      lines.push(
+        `${badge} ${formatPublicOrderRef(o)} · ${MoneyService.formatAmount(o.sourceAmount, o.sourceCurrency)} ${o.sourceCurrency} · ${formatAdminDateTime(o.createdAt).slice(0, 10)}`
+      );
+      kb.row().text(`${badge} ${formatPublicOrderRef(o)}`, `customer:history:detail:${o.id}`);
+    }
+  }
+  const nav = kb.row();
+  if (cursorRaw) nav.text("⬅️ Trước", "customer:history:page:prev");
+  if (hasMore) nav.text("Tiếp ➡️", "customer:history:page:next");
+  await ctx.reply(lines.join("\n"), { parse_mode: "HTML", reply_markup: kb });
+});
+
+customerHandler.callbackQuery(/^customer:history:detail:([a-zA-Z0-9_-]+)$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const telegramId = String(ctx.from?.id || "");
+  const customer = await CustomerService.getOrCreateCustomer({ telegramId });
+  const order = await OrderService.getOrder(ctx.match?.[1] || "");
+  // Ownership guard — a customer can ONLY ever see their OWN orders.
+  if (!order || order.customerId !== customer.id) {
+    return void ctx.reply(t(locOf(customer), "order.cancel_none"));
+  }
+  const badge = order.status === "COMPLETED" ? "✅" : "❌";
+  const memo = await OrderService.getOrderTransferMemo(order).catch(() => "");
+  const lines = [
+    `📦 <b>${formatPublicOrderRef(order)}</b>`,
+    `${MoneyService.formatMoney(order.sourceAmount, order.sourceCurrency)} → ${MoneyService.formatMoney(order.targetAmount, order.targetCurrency)}`,
+    `${formatAdminDateTime(order.createdAt)} (GMT+7)`,
+    `📍 ${t(locOf(customer), `status.${order.status}`)}`,
+    memo ? `🔖 Nội dung chuyển khoản: <code>${escapeHtml(memo)}</code>` : ""
+  ];
+  const kb = new InlineKeyboard()
+    .text(`💬 Hỗ trợ đơn ${formatPublicOrderRef(order)}`, `customer:support:order:${order.id}`)
+    .row()
+    .text("⬅️ Lịch sử", "customer:history");
+  await ctx.reply(lines.filter(Boolean).join("\n"), { parse_mode: "HTML", reply_markup: kb });
+});
+
+// Per-chat minimal history navigation state (tiny cursors, bounded Map).
+const historyNav = new Map<string, { next: string | null; prev: string | null }>();
+function getChatHistoryNav(tg: string, customerId: string) {
+  return historyNav.get(`${tg}|${customerId}`) || { next: null, prev: null };
+}
+function setChatHistoryNav(tg: string, customerId: string, v: { next: string | null; prev: string | null }) {
+  historyNav.set(`${tg}|${customerId}`, v);
+  if (historyNav.size > 500) historyNav.delete(historyNav.keys().next().value as string);
+}
+function encodeChatCursorRaw(row: { createdAt: Date; id: string }): string {
+  return Buffer.from(`${row.createdAt.toISOString()}|${row.id}`, "utf8").toString("base64url");
+}
+function decodeChatCursorRaw(raw: string): { createdAt: Date; id: string } | null {
+  try {
+    const [iso, id] = Buffer.from(raw, "base64url").toString("utf8").split("|");
+    const d = new Date(iso);
+    return id && !Number.isNaN(d.getTime()) ? { createdAt: d, id } : null;
+  } catch {
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 💬 ORDER-LINKED SUPPORT — customer presses [💬 Hỗ trợ đơn #REF] on any
+// historical/active Order. The internal Order.id travels in callback/session
+// state; the public Ref is the ONLY label the customer sees. Sets
+// Conversation.orderId for transcript context + notifies staff with 📦 context.
+// ---------------------------------------------------------------------------
+
+customerHandler.callbackQuery(/^customer:support:order:([a-zA-Z0-9_-]+)$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const telegramId = String(ctx.from?.id || "");
+  const customer = await CustomerService.getOrCreateCustomer({ telegramId });
+  const locale = locOf(customer);
+  const order = await OrderService.getOrder(ctx.match?.[1] || "");
+  if (!order || order.customerId !== customer.id) {
+    return void ctx.reply(t(locale, "order.cancel_none"));
+  }
+
+  // Idempotent: reuse an already-active support session — no duplicate notify.
+  const { newRequest } = await ConversationService.requestHumanSupport(customer.id);
+  // Bind the Order context to the conversation (support transcript rows may
+  // carry orderId for 📦 Trao đổi về đơn routing).
+  await prisma.conversation.updateMany({
+    where: { customerId: customer.id },
+    data: { orderId: order.id }
+  });
+  if (!newRequest) {
+    await ctx.reply(t(locale, "support.active_body"), { parse_mode: "HTML", reply_markup: getCustomerReplyKeyboard(locale, true) });
+    return;
+  }
+  await ConversationService.addMessage({
+    customerId: customer.id,
+    senderType: "CUSTOMER",
+    content: `[YÊU CẦU HỖ TRỢ ĐƠN ${formatPublicOrderRef(order)}]`
+  });
+  await ctx.reply(t(locale, "support.requested"), { parse_mode: "HTML", reply_markup: getCustomerReplyKeyboard(locale, true) });
+
+  // Order-context notification — same dedupe as generic support requests.
+  const orderLines = [
+    "🛎 <b>YÊU CẦU HỖ TRỢ ĐƠN</b>",
+    "",
+    ...customerIdentity(customer).split("\n"),
+    "",
+    `📦 Đơn: <b>${formatPublicOrderRef(order)}</b>`,
+    `💵 ${MoneyService.formatMoney(order.sourceAmount, order.sourceCurrency)}`,
+    `📍 ${order.status}`,
+    ...(await OrderService.getOrderTransferMemo(order).catch(() => ""))
+      ? [`🔖 Nội dung CK: <code>${escapeHtml(String(await OrderService.getOrderTransferMemo(order).catch(() => "")))}</code>`]
+      : []
+  ];
+  const orderKb = new InlineKeyboard()
+    .text("📦 Mở đơn", `ops:order:detail:${order.id}`)
+    .text("💬 Chat khách", `cskh:preview:${customer.id}`)
+    .row()
+    .text("👤 Hồ sơ khách", `ops:customer:detail:${customer.id}`);
+  await notifySupportRequest(orderLines.filter(Boolean).join("\n"), {
+    parse_mode: "HTML",
+    reply_markup: orderKb
+  });
+});
+
+
 
 /** 💳 View transfer details for an active unpaid order (localized re-render). */
 customerHandler.callbackQuery(/^customer:order:payinfo:([a-zA-Z0-9_-]+)$/, async (ctx) => {
@@ -1002,6 +1172,15 @@ export async function handleCustomerTextMessage(ctx: BotContext, text: string) {
     customerId: customer.id,
     senderType: "CUSTOMER",
     content: text
+  });
+  // Durable transcript — plain conversation text only. Reserved financial
+  // routing (payout bank data handled above) is deliberately NOT recorded.
+  void ChatService.recordInbound({
+    customerId: customer.id,
+    telegramChatId: String(ctx.chat?.id || telegramId),
+    telegramMessageId: ctx.message?.message_id ?? null,
+    conversationId: conv.id,
+    text
   });
 
   if (conv.mode === "HUMAN") {
@@ -2161,7 +2340,10 @@ export async function sendOrderPaymentCard(ctx: BotContext, order: any, locale: 
   const qr = await PaymentQrService.generateForOrder(order.id).catch(() => null);
   const memo = qr?.memo || (await OrderService.getOrderTransferMemo(order).catch(() => ""));
   const snap = (order.receivingAccountSnapshot || {}) as Record<string, any>;
-  const ref = `#${order.id.slice(-6).toUpperCase()}`;
+  // CANONICAL PUBLIC ORDER REF — the ONE identifier the customer sees.
+  // transferMemo (below) is explicitly labeled as the BANK transfer content,
+  // never as an Order number.
+  const ref = formatPublicOrderRef(order);
   const amount = qr?.amount || MoneyService.formatAmount(order.sourceAmount, order.sourceCurrency);
   const kb = getActiveOrderActionKeyboard(order as any, locale);
 
@@ -2303,6 +2485,22 @@ export async function handleCustomerPhoto(ctx: BotContext) {
   }
 
   const locale = locOf(customer);
+
+  // Durable transcript — media metadata ONLY (file_id + caption; never a
+  // download): this photo reached the customer-facing flow (bill/support),
+  // never the CTV payout-QR / payout-QR-session intercepts above.
+  const photoSizes: any[] = (ctx.message as any)?.photo || [];
+  const largestPhoto = photoSizes[photoSizes.length - 1];
+  if (largestPhoto?.file_id) {
+    void ChatService.recordInbound({
+      customerId: customer.id,
+      telegramChatId: String(ctx.chat?.id || telegramId),
+      telegramMessageId: ctx.message?.message_id ?? null,
+      contentType: "PHOTO",
+      caption: (ctx.message as any)?.caption || null,
+      telegramFileId: String(largestPhoto.file_id)
+    });
+  }
 
   // 2. K — DB-STATE payout routing (session-loss safe). If the customer has
   // exactly ONE Order in WAITING_PAYOUT without a confirmed destination, an

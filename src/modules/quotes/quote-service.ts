@@ -169,28 +169,27 @@ export class QuoteService {
     let fee: Decimal;
     let feeCurrency: string;
 
+    const isUsdVnd = (src === "USD" && tgt === "VND");
+    const isVndUsd = (src === "VND" && tgt === "USD");
+
     if (rateDirect) {
       baseRate = new Decimal(rateDirect.baseRate);
-      // Customer sells source to buy target: applies buyMargin (subtracted)
-      const { effectiveBuy } = MoneyService.calculateEffectiveRates(
-        baseRate,
-        rateDirect.buyMargin,
-        rateDirect.sellMargin
-      );
-      effectiveRate = effectiveBuy;
       fee = new Decimal(rateDirect.fee);
       feeCurrency = rateDirect.feeCurrency;
+      const buyMargin = isUsdVnd || isVndUsd ? RuntimeConfigService.getBuyMarginVnd() : new Decimal(rateDirect.buyMargin);
+      const sellMargin = isUsdVnd || isVndUsd ? RuntimeConfigService.getSellMarginVnd() : new Decimal(rateDirect.sellMargin);
+      // Customer sells source to buy target: applies buyMargin (subtracted)
+      const { effectiveBuy } = MoneyService.calculateEffectiveRates(baseRate, buyMargin, sellMargin);
+      effectiveRate = effectiveBuy;
     } else if (rateInverse) {
       baseRate = new Decimal(rateInverse.baseRate);
-      // Inverse pair: Customer buys target, denominator applies sellMargin (added)
-      const { effectiveSell } = MoneyService.calculateEffectiveRates(
-        baseRate,
-        rateInverse.buyMargin,
-        rateInverse.sellMargin
-      );
-      effectiveRate = new Decimal(1).dividedBy(effectiveSell);
       fee = new Decimal(rateInverse.fee);
       feeCurrency = rateInverse.feeCurrency;
+      const buyMargin = isUsdVnd || isVndUsd ? RuntimeConfigService.getBuyMarginVnd() : new Decimal(rateInverse.buyMargin);
+      const sellMargin = isUsdVnd || isVndUsd ? RuntimeConfigService.getSellMarginVnd() : new Decimal(rateInverse.sellMargin);
+      // Inverse pair: Customer buys target, denominator applies sellMargin (added)
+      const { effectiveSell } = MoneyService.calculateEffectiveRates(baseRate, buyMargin, sellMargin);
+      effectiveRate = new Decimal(1).dividedBy(effectiveSell);
     } else {
       throw new Error(`Chưa thiết lập tỷ giá cho cặp tiền tệ ${src}/${tgt}`);
     }
@@ -285,25 +284,24 @@ export class QuoteService {
     let fee: Decimal;
     let feeCurrency: string;
 
+    const isUsdVnd = (src === "USD" && tgt === "VND");
+    const isVndUsd = (src === "VND" && tgt === "USD");
+
     if (rateDirect) {
       baseRate = new Decimal(rateDirect.baseRate);
+      const buyMargin = isUsdVnd || isVndUsd ? RuntimeConfigService.getBuyMarginVnd() : new Decimal(rateDirect.buyMargin);
+      const sellMargin = isUsdVnd || isVndUsd ? RuntimeConfigService.getSellMarginVnd() : new Decimal(rateDirect.sellMargin);
       // Same side as calculateQuote: customer sells source, buyMargin applies.
-      const { effectiveBuy } = MoneyService.calculateEffectiveRates(
-        baseRate,
-        rateDirect.buyMargin,
-        rateDirect.sellMargin
-      );
+      const { effectiveBuy } = MoneyService.calculateEffectiveRates(baseRate, buyMargin, sellMargin);
       effectiveRate = effectiveBuy;
       fee = new Decimal(rateDirect.fee);
       feeCurrency = rateDirect.feeCurrency;
     } else if (rateInverse) {
       baseRate = new Decimal(rateInverse.baseRate);
+      const buyMargin = isUsdVnd || isVndUsd ? RuntimeConfigService.getBuyMarginVnd() : new Decimal(rateInverse.buyMargin);
+      const sellMargin = isUsdVnd || isVndUsd ? RuntimeConfigService.getSellMarginVnd() : new Decimal(rateInverse.sellMargin);
       // Same side as calculateQuote: denominator pair, sellMargin applies.
-      const { effectiveSell } = MoneyService.calculateEffectiveRates(
-        baseRate,
-        rateInverse.buyMargin,
-        rateInverse.sellMargin
-      );
+      const { effectiveSell } = MoneyService.calculateEffectiveRates(baseRate, buyMargin, sellMargin);
       effectiveRate = effectiveSell;
       fee = new Decimal(rateInverse.fee);
       feeCurrency = rateInverse.feeCurrency;

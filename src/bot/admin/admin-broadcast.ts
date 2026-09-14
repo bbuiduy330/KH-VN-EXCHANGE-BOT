@@ -26,6 +26,7 @@ import {
   sendTestToAdmin
 } from "../../modules/broadcast/broadcast-service.js";
 import { MoneyService } from "../../modules/money/money-service.js";
+import { RuntimeConfigService } from "../../modules/system-config/runtime-config-service.js";
 import { formatAdminDateTime } from "../../shared/app-time.js";
 import { shortCustomerId } from "./admin-panel.js";
 
@@ -181,7 +182,11 @@ export async function startComposeRatePrefill(ctx: BotContext): Promise<void> {
   const usdVnd = await prisma.exchangeRate.findUnique({ where: { pair: "USD/VND" } });
   let rateLine = "Tỷ giá hiện tại: (chưa cấu hình — hãy sửa trước khi gửi)";
   if (usdVnd) {
-    const eff = MoneyService.calculateEffectiveRates(usdVnd.baseRate, usdVnd.buyMargin, usdVnd.sellMargin);
+    const eff = MoneyService.calculateEffectiveRates(
+      usdVnd.baseRate,
+      RuntimeConfigService.getBuyMarginVnd(),
+      RuntimeConfigService.getSellMarginVnd()
+    );
     rateLine =
       `💱 Tỷ giá hôm nay:\n` +
       `USD → VND: <b>${MoneyService.formatAmount(eff.effectiveBuy, "VND")} VND</b>\n` +

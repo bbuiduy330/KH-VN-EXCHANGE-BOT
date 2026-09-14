@@ -12,6 +12,18 @@ import { escapeHtml } from "../menus/cskh-panel.js";
 import { startWizard, getAdminSession, isSessionExpired, clearWizard, updateWizard } from "./admin-session.js";
 import { setAdminSearch } from "./admin-session.js";
 import { shortOrderId } from "./admin-panel.js";
+import {
+  ADMIN_LIST_FETCH_TAKE,
+  ADMIN_LIST_PAGE_SIZE,
+  advanceAdminList,
+  commitAdminListNext,
+  decodeListCursor,
+  encodeListCursor,
+  ensureAdminListFilter,
+  getAdminListState,
+  listCursorWhere,
+  retreatAdminList
+} from "./admin-list-session.js";
 import { getBotInstance, notifyPartnerSettlementPaid } from "../notifications.js";
 import { MoneyService } from "../../modules/money/money-service.js";
 import { formatAdminDateTime } from "../../shared/app-time.js";
@@ -29,15 +41,41 @@ function partnerLink(partner: any): string {
   return me ? `https://t.me/${me}?start=${PartnerService.referralPayload(partner)}` : "";
 }
 
-async function showPartners(ctx: BotContext): Promise<void> {
+async function showPartners(ctx: BotContext, move?: "next" | "prev"): Promise<void> {
   await ctx.answerCallbackQuery();
   if (!(await requireRole(ctx, ["ADMIN", "SUPER_ADMIN"]))) return;
   // 2 — belt-and-braces: opening the panel reconciles missing commissions and
   // materialises HELD→AVAILABLE (idempotent, DB-derived, audited).
   await PartnerService.reconcileAvailableCommissions().catch(() => {});
   await PartnerService.reconcileMissingCommissions().catch(() => {});
-  const partners = await PartnerService.listPartners();
-  const lines = ["🤝 <b>CỘNG TÁC VIÊN (CTV)</b>", ""];
+  const adminId = String(ctx.from?.id || "");
+
+  // Cursor pagination (per admin + screen; createdAt DESC, id DESC keyset).
+  ensureAdminListFilter(adminId, "partners", "");
+  let cursorRaw = "";
+  if (move === "next") {
+    const next = advanceAdminList(adminId, "partners");
+    if (next === null) {
+      await ctx.answerCallbackQuery("Đã hết danh sách.").catch(() => {});
+      return;
+    }
+    cursorRaw = next;
+  } else if (move === "prev") {
+    const prev = retreatAdminList(adminId, "partners");
+    if (prev === null) return;
+    cursorRaw = prev;
+  }
+  const cw = listCursorWhere(decodeListCursor(cursorRaw || null));
+  const rows: any[] = await prisma.partner.findMany({
+    ...(cw ? { where: cw } : {}),
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+    take: ADMIN_LIST_FETCH_TAKE
+  });
+  const hasMore = rows.length > ADMIN_LIST_PAGE_SIZE;
+  const partners = rows.slice(0, ADMIN_LIST_PAGE_SIZE);
+  commitAdminListNext(adminId, "partners", hasMore && partners.length > 0 ? encodeListCursor(partners[partners.length - 1]) : null);
+
+  const lines = ["🤝 <b>CỘNG TÁC VIÊN (CTV)</b>", `${partners.length} CTV gần nhất`, ""];
   const kb = new InlineKeyboard();
   if (partners.length === 0) {
     lines.push("Chưa có CTV nào.");
@@ -48,6 +86,11 @@ async function showPartners(ctx: BotContext): Promise<void> {
       kb.text(`👤 ${p.displayName}`, `ops:partner:detail:${p.id}`).row();
     }
   }
+  // Page navigation (tiny callbacks; cursor state in per-admin session).
+  const st = getAdminListState(adminId, "partners");
+  const navRow = kb.row();
+  if (st.pos > 0) navRow.text("⬅️ Trước", "ops:partners:page:prev");
+  if (hasMore) navRow.text("Tiếp ➡️", "ops:partners:page:next");
   kb.text("➕ Thêm CTV", "ops:partner:add")
     .row()
     .text("🔎 Tìm CTV", "ops:partner:search")
@@ -140,21 +183,68 @@ async function showPartnerSettlements(ctx: BotContext, partnerId: string): Promi
   await ctx.reply(lines.join("\n"), { parse_mode: "HTML", reply_markup: kb });
 }
 
-/** Commission list (💰) — safe business references only. */
-async function showPartnerCommissions(ctx: BotContext, partnerId: string): Promise<void> {
+/** Commission list (💰) — safe business references only, cursor-paginated. */
+async function showPartnerCommissions(ctx: BotContext, partnerId: string, move?: "next" | "prev"): Promise<void> {
   await ctx.answerCallbackQuery();
   if (!(await requireRole(ctx, ["ADMIN", "SUPER_ADMIN"]))) return;
+  const adminId = String(ctx.from?.id || "");
+  // Per-(admin, partner) list state; commission status filter is part of the
+  // key context — changing it resets the cursor history.
+  const screen = `pcom:${partnerId}`;
+  const prior = getAdminListState(adminId, screen);
+  const statusFilter = (["all", "HELD", "AVAILABLE", "PAID", "REVERSED"].includes(prior.filter) ? prior.filter : "all");
+  // ensure… resets cursor history when the filter changed (never reuse stale cursor).
+  ensureAdminListFilter(adminId, screen, statusFilter);
+  const st = getAdminListState(adminId, screen);
+  let cursorRaw = "";
+  if (move === "next") {
+    const next = advanceAdminList(adminId, screen);
+    if (next === null) {
+      await ctx.answerCallbackQuery("Đã hết danh sách.").catch(() => {});
+      return;
+    }
+    cursorRaw = next;
+  } else if (move === "prev") {
+    const prev = retreatAdminList(adminId, screen);
+    if (prev === null) return;
+    cursorRaw = prev;
+  }
+
   // A2 — ADMIN FULL TRACEABILITY: customer identity is deliberately VISIBLE to
   // Admin here (name + Telegram numeric ID + short ref) — the CTV /ctv view
   // remains privacy-safe and never receives any of this.
-  const rows = await PartnerService.getAdminCommissionRows(partnerId, 10);
-  const lines = ["💰 <b>HOA HỒNG GẦN NHẤT — TRUY VẾT ĐẦY ĐỦ</b>", ""];
+  const where: any = { partnerId };
+  if (statusFilter !== "all") where.status = statusFilter;
+  const cw = listCursorWhere(decodeListCursor(cursorRaw || null));
+  if (cw) where.AND = [cw];
+  const commissions: any[] = await prisma.commission.findMany({
+    where,
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+    take: ADMIN_LIST_FETCH_TAKE
+  });
+  const hasMore = commissions.length > ADMIN_LIST_PAGE_SIZE;
+  const page = commissions.slice(0, ADMIN_LIST_PAGE_SIZE);
+  commitAdminListNext(adminId, screen, hasMore && page.length > 0 ? encodeListCursor(page[page.length - 1]) : null);
+  // Bounded customer join for EXACTLY this page (single in-clause query).
+  const orderIds = [...new Set(page.map((c: any) => c.orderId))];
+  const orders: any[] = orderIds.length
+    ? await prisma.order.findMany({ where: { id: { in: orderIds } }, include: { customer: true } })
+    : [];
+  const orderById = new Map(orders.map((o: any) => [o.id, o]));
+
+  const lines = [
+    "💰 <b>HOA HỒNG — TRUY VẾT ĐẦY ĐỦ</b>",
+    `${page.length} hoa hồng mới nhất${statusFilter !== "all" ? ` · ${statusFilter}` : ""}`,
+    ""
+  ];
   const kb = new InlineKeyboard();
-  if (rows.length === 0) {
-    lines.push("Chưa có hoa hồng nào.");
+  if (page.length === 0) {
+    lines.push("Không có hoa hồng phù hợp.");
   } else {
-    for (const { commission: c, order, customer } of rows) {
-      const st = PartnerService.effectiveStatus(c);
+    for (const c of page) {
+      const order = orderById.get(c.orderId);
+      const customer = order?.customer;
+      const stt = PartnerService.effectiveStatus(c);
       const levelLabel = `L${c.level ?? 1}`;
       const fixed = `$${Number(c.baseCommissionUsd ?? 0).toFixed(2)}`;
       const spread = `$${Number(c.spreadBonusUsd ?? 0).toFixed(2)}`;
@@ -162,7 +252,7 @@ async function showPartnerCommissions(ctx: BotContext, partnerId: string): Promi
         ? `${MoneyService.formatMoney(order.sourceAmount, order.sourceCurrency)} → ${MoneyService.formatMoney(order.targetAmount, order.targetCurrency)}`
         : "—";
       lines.push(
-        `💰 <b>${usd(c.totalUsd)}</b> · ${levelLabel} · ${st}${c.riskFlag ? ` · ⚠️ ${escapeHtml(c.riskFlag)}` : ""}`,
+        `💰 <b>${usd(c.totalUsd)}</b> · ${levelLabel} · ${stt}${c.riskFlag ? ` · ⚠️ ${escapeHtml(c.riskFlag)}` : ""}`,
         `👤 Khách: ${escapeHtml(customer?.fullName || customer?.username || "—")}${customer?.telegramId ? ` · TG <code>${escapeHtml(customer.telegramId)}</code>` : ""}`,
         `📦 Đơn: <code>${shortOrderId(c.orderId)}</code> · ${escapeHtml(dir)}`,
         `${fixed} cố định + ${spread} chia sẻ tỷ giá`,
@@ -170,14 +260,24 @@ async function showPartnerCommissions(ctx: BotContext, partnerId: string): Promi
         ""
       );
       kb.text(`📦 Mở giao dịch ${shortOrderId(c.orderId)}`, `ops:order:detail:${c.orderId}`).row();
-      if (customer) {
-        kb.text(`👤 Mở khách ${customer.fullName || customer.username || customer.telegramId}`, `ops:customer:detail:${customer.id}`).row();
-      }
     }
   }
+
+  // Status filters (HELD/AVAILABLE/PAID/REVERSED) — filter change resets cursor.
+  kb.row()
+    .text("Tất cả", `ops:pcomf:${partnerId}:all`)
+    .text("HELD", `ops:pcomf:${partnerId}:HELD`);
+  kb.row()
+    .text("AVAILABLE", `ops:pcomf:${partnerId}:AVAILABLE`)
+    .text("PAID", `ops:pcomf:${partnerId}:PAID`)
+    .text("REVERSED", `ops:pcomf:${partnerId}:REVERSED`);
+  // Page navigation.
+  const nav = kb.row();
+  if (st.pos > 0) nav.text("⬅️ Trước", `ops:pcom:${partnerId}:prev`);
+  if (hasMore) nav.text("Tiếp ➡️", `ops:pcom:${partnerId}:next`);
   // E1 — parent hierarchy assignment (Admin-only, cycle/depth validated).
   const partner = await PartnerService.getPartnerById(partnerId);
-  lines.push(`🔗 CTV cha: ${partner?.parentPartnerId ? `<code>${escapeHtml(partner.parentPartnerId.slice(-6))}</code>` : "— (L1)"}`);
+  lines.push(`🔗 CTV cha: ${partner?.parentPartnerId ? `<code>${escapeHtml(partner.parentPartnerId.slice(-6).toUpperCase())}</code>` : "— (L1)"}`);
   kb.row().text("🔗 Gán CTV cha", `ops:partner:parent:${partnerId}`);
   kb.row().text("⬅️ Chi tiết CTV", `ops:partner:detail:${partnerId}`).text("🏠 Menu Admin", "ops:home");
   await ctx.reply(lines.join("\n"), { parse_mode: "HTML", reply_markup: kb });
@@ -260,7 +360,19 @@ export async function handlePartnerAddInput(ctx: BotContext, text: string): Prom
 }
 
 adminPartnersHandler.callbackQuery("ops:partners", (ctx) => showPartners(ctx));
+// Cursor page navigation (tiny callbacks; cursor state in per-admin session).
+adminPartnersHandler.callbackQuery("ops:partners:page:next", (ctx) => showPartners(ctx, "next"));
+adminPartnersHandler.callbackQuery("ops:partners:page:prev", (ctx) => showPartners(ctx, "prev"));
 adminPartnersHandler.callbackQuery(/^ops:partner:commissions:([a-zA-Z0-9_-]+)$/, (ctx) => showPartnerCommissions(ctx, ctx.match?.[1] || ""));
+// Commission status filters (reset cursor) + cursor page navigation:
+adminPartnersHandler.callbackQuery(/^ops:pcomf:([a-zA-Z0-9_-]+):(all|HELD|AVAILABLE|PAID|REVERSED)$/, async (ctx) => {
+  const partnerId = ctx.match?.[1] || "";
+  const status = ctx.match?.[2] || "all";
+  ensureAdminListFilter(String(ctx.from?.id || ""), `pcom:${partnerId}`, status);
+  await showPartnerCommissions(ctx, partnerId);
+});
+adminPartnersHandler.callbackQuery(/^ops:pcom:([a-zA-Z0-9_-]+):(next|prev)$/, (ctx) =>
+  showPartnerCommissions(ctx, ctx.match?.[1] || "", ctx.match?.[2] as "next" | "prev"));
 adminPartnersHandler.callbackQuery(/^ops:partner:settlements:([a-zA-Z0-9_-]+)$/, (ctx) => showPartnerSettlements(ctx, ctx.match?.[1] || ""));
 
 // ---------------------------------------------------------------------------

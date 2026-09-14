@@ -13,7 +13,19 @@ import { customerLabel, shortOrderId, timeAgo, maskAccountNumber, BILL_AWAITING_
 import { customerIdentity } from "../notifications.js";
 import { hasCustomerBillEvidence } from "../../modules/orders/bill-evidence.js";
 import { formatShortDateTime, formatAdminDateTime } from "../../shared/app-time.js";
+import { formatPublicOrderRef } from "../../modules/orders/order-ref.js";
 import { setAdminSearch } from "./admin-session.js";
+import {
+  ADMIN_LIST_FETCH_TAKE,
+  ADMIN_LIST_PAGE_SIZE,
+  advanceAdminList,
+  commitAdminListNext,
+  decodeListCursor,
+  ensureAdminListFilter,
+  getAdminListState,
+  listCursorWhere,
+  retreatAdminList
+} from "./admin-list-session.js";
 
 export const adminOrdersHandler = new Composer<BotContext>();
 
@@ -60,15 +72,66 @@ export function orderExchangeLine(order: {
 
 /**
  * Resolve an admin search query to candidate orders.
- * Accepts: short order id (last 6), customer display name, @username,
- * Telegram id. Never returns a full-CUID assumption silently — callers decide
- * between a single match (detail) and multiple matches (selectable list).
+ * Ranking priority:
+ *   1. exact canonical public Order Ref
+ *   2. canonical public Ref prefix/contains
+ *   3. exact legacy/full Order ref
+ *   4. transferMemo exact
+ *   5. transferMemo prefix/contains
+ *   6. Telegram ID
+ *   7. customer name
+ * NO aggressive fuzzy matching for Order IDs/memos (human names only).
+ * Never returns a full-CUID assumption silently — callers decide between a
+ * single match (detail) and multiple matches (selectable list).
  */
 export async function searchOrders(query: string): Promise<any[]> {
   const q = String(query || "").trim();
   if (!q) return [];
 
-  // Exact Telegram id match (advanced troubleshooting).
+  // 1/2. Canonical public Order Ref (exact or contains, case-insensitive).
+  const refNeedle = q.replace(/^#/, "").toUpperCase().trim();
+  if (refNeedle) {
+    const exactRef = await prisma.order.findFirst({
+      where: { publicRef: { equals: refNeedle } },
+      include: { customer: true }
+    });
+    if (exactRef) return [exactRef];
+    const refContains = await prisma.order.findMany({
+      where: { publicRef: { contains: refNeedle } },
+      include: { customer: true },
+      orderBy: { createdAt: "desc" },
+      take: 20
+    });
+    if (refContains.length) return refContains;
+  }
+
+  // 4/5. transferMemo exact or contains.
+  const memoNeedle = q.toUpperCase().trim();
+  if (memoNeedle.length >= 3) {
+    const byMemo = await prisma.order.findMany({
+      where: {
+        OR: [
+          { transferMemo: { equals: memoNeedle } },
+          { transferMemo: { contains: memoNeedle } }
+        ]
+      },
+      include: { customer: true },
+      orderBy: { createdAt: "desc" },
+      take: 20
+    });
+    if (byMemo.length) return byMemo;
+  }
+
+  // 3. Legacy/full Order id (endsWith for short ref compatibility).
+  const byId = await prisma.order.findMany({
+    where: { id: { endsWith: q.toLowerCase() } },
+    include: { customer: true },
+    orderBy: { createdAt: "desc" },
+    take: 20
+  });
+  if (byId.length) return byId;
+
+  // 6. Exact Telegram id match (advanced troubleshooting).
   const byTelegram = await prisma.order.findMany({
     where: { customer: { telegramId: q } },
     include: { customer: true },
@@ -77,15 +140,14 @@ export async function searchOrders(query: string): Promise<any[]> {
   });
   if (byTelegram.length) return byTelegram;
 
+  // 7. Customer name (fuzzy for human names is OK).
   const needle = q.toLowerCase();
   const candidates = await prisma.order.findMany({
     include: { customer: true },
     orderBy: { createdAt: "desc" },
     take: 200
   });
-
   const matches = candidates.filter((o: any) => {
-    if (o.id.toLowerCase().endsWith(needle)) return true;
     const username = (o.customer?.username || "").toLowerCase();
     const fullName = (o.customer?.fullName || "").toLowerCase();
     if (username && username.includes(needle)) return true;
@@ -114,7 +176,7 @@ export function orderRowText(order: any): string {
   const lines = [
     `👤 ${escapeHtml(customerLabel(order.customer))}`,
     `💱 ${escapeHtml(orderExchangeLine(order))}`,
-    `📦 ${shortOrderId(order.id)}`,
+    `📦 ${formatPublicOrderRef(order)}`,
     `📍 ${orderStatusLabel(order.status)}`,
     `🕒 ${timeAgo(order.createdAt)}`
   ];
@@ -146,7 +208,7 @@ export function transactionRowText(order: any): string {
     : escapeHtml(customerLabel(c));
   return (
     `${statusBadge(order.status)} ${formatShortDateTime(order.createdAt)} · ` +
-    `${shortOrderId(order.id)} · ` +
+    `${formatPublicOrderRef(order)} · ` +
     `${escapeHtml(orderExchangeLine(order))} · ` +
     identity
   );
@@ -158,10 +220,10 @@ export function renderOrderDetailText(order: any): string {
   const cust = order.customer;
 
   const lines: string[] = [
-    `📦 <b>CHI TIẾT ĐƠN HÀNG</b> ${shortOrderId(order.id)}`,
+    `📦 <b>CHI TIẾT ĐƠN HÀNG</b> ${formatPublicOrderRef(order)}`,
     "",
     customerIdentity(cust),
-    `📦 Mã ngắn: ${shortOrderId(order.id)}`,
+    `📦 Mã đơn: ${formatPublicOrderRef(order)}`,
     "",
     `💱 Nguồn: <b>${escapeHtml(MoneyService.formatMoney(order.sourceAmount, order.sourceCurrency))}</b>`,
     `💰 Đích: <b>${escapeHtml(MoneyService.formatMoney(order.targetAmount, order.targetCurrency))}</b>`,
@@ -428,34 +490,71 @@ export async function showActionInbox(ctx: BotContext): Promise<void> {
   await replyOrEdit(ctx, lines.join("\n"), kb);
 }
 
-export async function showOrderList(ctx: BotContext, group: OrderGroup = "need_action"): Promise<void> {
+export async function showOrderList(ctx: BotContext, group: OrderGroup = "need_action", move?: "next" | "prev"): Promise<void> {
   if (!(await requirePermission(ctx, "order.view"))) return;
+  const adminId = String(ctx.from?.id || "");
 
-  const statuses = statusesForGroup(group);
-  const orders = await prisma.order.findMany({
-    where: { status: { in: statuses } },
+  // Cursor pagination state — scoped per admin + screen; filter changes reset
+  // the cursor history (a stale cursor from another filter is never reused).
+  const state = ensureAdminListFilter(adminId, "orders", group);
+  let cursorRaw = "";
+  if (move === "next") {
+    const next = advanceAdminList(adminId, "orders");
+    if (next === null) {
+      await ctx.answerCallbackQuery("Đã hết danh sách.").catch(() => {});
+      return;
+    }
+    cursorRaw = next;
+  } else if (move === "prev") {
+    const prev = retreatAdminList(adminId, "orders");
+    if (prev === null) {
+      await ctx.answerCallbackQuery().catch(() => {});
+      return;
+    }
+    cursorRaw = prev;
+  }
+
+  // Keyset predicate: (createdAt, id) strictly before the page cursor.
+  const where: any = { status: { in: statusesForGroup(group) } };
+  const cw = listCursorWhere(decodeListCursor(cursorRaw || null));
+  if (cw) where.AND = [cw];
+
+  const rows = await prisma.order.findMany({
+    where,
     include: { customer: true },
-    orderBy: { createdAt: "desc" },
-    take: 20
+    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+    take: ADMIN_LIST_FETCH_TAKE
   });
+  const hasMore = rows.length > ADMIN_LIST_PAGE_SIZE;
+  const orders = rows.slice(0, ADMIN_LIST_PAGE_SIZE);
+  commitAdminListNext(adminId, "orders", hasMore && orders.length > 0 ? encodeListCursor(orders[orders.length - 1]) : null);
 
   const title =
     group === "need_action" ? "CẦN XỬ LÝ" :
     group === "processing" ? "ĐANG XỬ LÝ" :
     group === "cancelled" ? "ĐÃ HỦY" : "THÀNH CÔNG";
-  const lines = [`📦 <b>GIAO DỊCH · ${title} (${orders.length})</b>`, ""];
+  const lines = [
+    `📦 <b>GIAO DỊCH · ${title}</b>`,
+    `${orders.length} giao dịch gần nhất`,
+    ""
+  ];
   const kb = new InlineKeyboard();
 
   if (orders.length === 0) {
-    lines.push("Không có giao dịch nào.");
+    lines.push("Không có giao dịch phù hợp.");
   } else {
     // Scale UX: EVERY row already shows badge + exact GMT+7 time + short ref +
     // amount pair + customer identity — status is obvious WITHOUT opening.
     for (const o of orders) {
       lines.push(transactionRowText(o));
-      kb.row().text(`📦 ${shortOrderId(o.id)} · ${orderStatusLabel(o.status)}`, `ops:order:detail:${o.id}`);
+      kb.row().text(`📦 ${formatPublicOrderRef(o)} · ${orderStatusLabel(o.status)}`, `ops:order:detail:${o.id}`);
     }
   }
+
+  // Page navigation (never a total count — bounded keyset pages only).
+  if (state.pos > 0) kb.text("⬅️ Trước", "ops:orders:page:prev");
+  if (hasMore) kb.text("Tiếp ➡️", "ops:orders:page:next").row();
+  else kb.row();
 
   kb.row().text("🔴 Đang xử lý", "ops:orders:filter:processing");
   kb.row().text("✅ Thành công", "ops:orders:filter:done")
@@ -478,8 +577,8 @@ export async function runOrderSearch(ctx: BotContext, query: string): Promise<vo
   const lines = [`🔎 <b>Tìm thấy ${matches.length} đơn hàng:</b>`, ""];
   const kb = new InlineKeyboard();
   for (const o of matches) {
-    lines.push(`👤 ${escapeHtml(customerLabel(o.customer))} · 📦 ${shortOrderId(o.id)} · ${orderStatusLabel(o.status)}`);
-    kb.row().text(`📦 ${shortOrderId(o.id)} · ${escapeHtml(customerLabel(o.customer))}`, `ops:order:detail:${o.id}`);
+    lines.push(`👤 ${escapeHtml(customerLabel(o.customer))} · 📦 ${formatPublicOrderRef(o)} · ${orderStatusLabel(o.status)}`);
+    kb.row().text(`📦 ${formatPublicOrderRef(o)} · ${escapeHtml(customerLabel(o.customer))}`, `ops:order:detail:${o.id}`);
   }
   kb.row().text("🏠 Menu Admin", "ops:home");
   await ctx.reply(lines.join("\n"), { parse_mode: "HTML", reply_markup: kb });
@@ -489,7 +588,26 @@ adminOrdersHandler.callbackQuery("ops:inbox", (ctx) => showActionInbox(ctx));
 adminOrdersHandler.callbackQuery("ops:orders", (ctx) => showOrderList(ctx, "need_action"));
 adminOrdersHandler.callbackQuery(/^ops:orders:filter:(need_action|processing|done|cancelled)$/, async (ctx) => {
   const group = ctx.match?.[1] as OrderGroup;
+  // Filter change → ensureAdminListFilter resets the cursor history.
   await showOrderList(ctx, group);
+});
+// Page navigation: the ACTIVE FILTER lives in the per-admin session (tiny
+// callbacks; no cursor payloads in callback_data).
+adminOrdersHandler.callbackQuery("ops:orders:page:next", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const st = getAdminListState(String(ctx.from?.id || ""), "orders");
+  const group = (["need_action", "processing", "done", "cancelled"] as string[]).includes(st.filter)
+    ? (st.filter as OrderGroup)
+    : "need_action";
+  await showOrderList(ctx, group, "next");
+});
+adminOrdersHandler.callbackQuery("ops:orders:page:prev", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const st = getAdminListState(String(ctx.from?.id || ""), "orders");
+  const group = (["need_action", "processing", "done", "cancelled"] as string[]).includes(st.filter)
+    ? (st.filter as OrderGroup)
+    : "need_action";
+  await showOrderList(ctx, group, "prev");
 });
 adminOrdersHandler.callbackQuery("ops:orders:search", async (ctx) => {
   await ctx.answerCallbackQuery();

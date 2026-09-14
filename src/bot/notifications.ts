@@ -10,10 +10,7 @@ import { getCustomerBillEvidence } from "../modules/orders/bill-evidence.js";
 import { LocalStorageService } from "../modules/storage/local-storage-service.js";
 import { FileService } from "../modules/files/file-service.js";
 import { resolveLocale, t } from "../modules/i18n/locales.js";
-import { formatAdminDateTime, formatAdminTime } from "../shared/app-time.js";
-
-
-let botInstance: Bot<any> | null = null;
+import { ChatService } from "../modules/chat/chat-service.js";
 
 export function setBotInstance(bot: Bot<any> | null) {
   botInstance = bot;
@@ -26,7 +23,8 @@ export function getBotInstance(): Bot<any> | null {
 export async function sendToCustomer(
   customerTelegramId: string,
   text: string,
-  options: { parse_mode?: "HTML" | "MarkdownV2"; reply_markup?: any } = { parse_mode: "HTML" }
+  options: { parse_mode?: "HTML" | "MarkdownV2"; reply_markup?: any } = { parse_mode: "HTML" },
+  transcript?: { customerId?: string; staffTelegramId?: string; contentType?: "TEXT" | "PHOTO" | "DOCUMENT" | "VOICE" | "VIDEO" | "STICKER" | "OTHER" }
 ): Promise<{ message_id: number } | null> {
   if (!botInstance) {
     logger.warn({ customerTelegramId }, "Cannot send message to customer: bot instance is not initialized");
@@ -37,6 +35,34 @@ export async function sendToCustomer(
 
   try {
     const sent = await botInstance.api.sendMessage(tid, text, options);
+    // Durable transcript — recorded ONLY after successful delivery. Never
+    // blocks/fails the send. Staff replies (explicit staffTelegramId) are
+    // STAFF rows; every other delivered bot message is a BOT row.
+    void (async () => {
+      try {
+        const resolvedCustomerId = transcript?.customerId;
+        if (resolvedCustomerId && transcript?.staffTelegramId) {
+          await ChatService.recordStaffOutbound({
+            customerId: resolvedCustomerId,
+            telegramChatId: tid,
+            telegramMessageId: sent.message_id,
+            text,
+            contentType: transcript?.contentType || "TEXT",
+            staffTelegramId: transcript.staffTelegramId
+          });
+        } else if (resolvedCustomerId) {
+          await ChatService.recordBotOutbound({
+            customerId: resolvedCustomerId,
+            telegramChatId: tid,
+            telegramMessageId: sent.message_id,
+            text,
+            contentType: transcript?.contentType || "TEXT"
+          });
+        }
+      } catch {
+        /* transcript is best-effort — never surfaces */
+      }
+    })();
     return sent;
   } catch (err: any) {
     logger.warn({ err: err?.message, customerTelegramId: tid }, "Failed to send message to customer");
