@@ -121,7 +121,15 @@ describe("quote footer (multilingual, escaped, financially inert)", () => {
     expect(bare).not.toContain("──────────");
     await RuntimeConfigService.set("quoteFooterVi", "Anh/chị có USDT vui lòng nhắn @footervi", "TEST");
     const withFooter = renderQuoteCard(baseQuote(), 10, "vi");
-    expect(withFooter.split("──────────")[0].trim()).toBe(bare.trim()); // body unchanged
+    // Strict-null fix (noUncheckedIndexedAccess): split("…")[0] is typed
+    // string | undefined. The footer separator MUST be present for the
+    // "financial body unchanged when the footer toggles on" comparison to
+    // mean anything — fail loudly instead of comparing the whole card.
+    const bodyBeforeFooter = withFooter.split("──────────")[0];
+    if (bodyBeforeFooter === undefined) {
+      throw new Error("Expected the quote footer separator in the rendered card");
+    }
+    expect(bodyBeforeFooter.trim()).toBe(bare.trim()); // body unchanged
     expect(withFooter).toContain("📌");
   });
 });
