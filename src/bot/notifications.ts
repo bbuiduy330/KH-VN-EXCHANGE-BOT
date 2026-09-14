@@ -11,6 +11,16 @@ import { LocalStorageService } from "../modules/storage/local-storage-service.js
 import { FileService } from "../modules/files/file-service.js";
 import { resolveLocale, t } from "../modules/i18n/locales.js";
 import { ChatService } from "../modules/chat/chat-service.js";
+import { formatAdminDateTime, formatAdminTime } from "../shared/app-time.js";
+
+/**
+ * THE single process-wide bot instance (single-bot architecture). It is
+ * assigned exactly once at startup by src/bot/index.ts through
+ * setBotInstance() (null while running in standby mode). Every notification
+ * helper below reads this ONE reference — no second singleton, no re-created
+ * Bot, so every outbound message goes through the same authenticated API.
+ */
+let botInstance: Bot<any> | null = null;
 
 export function setBotInstance(bot: Bot<any> | null) {
   botInstance = bot;

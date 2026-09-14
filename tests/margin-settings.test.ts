@@ -16,6 +16,14 @@ import { CustomerService } from "../src/modules/customer/customer-service.js";
 import { OrderService } from "../src/modules/orders/order-service.js";
 import { PartnerService } from "../src/modules/partner/partner-service.js";
 import { computeCommissionableSpread } from "../src/modules/partner/partner-hierarchy.js";
+import { PermissionService } from "../src/modules/permissions/permission-service.js";
+import {
+  startBuyMarginEdit,
+  startSellMarginEdit,
+  handleMarginWizardInput,
+  confirmMarginChange
+} from "../src/bot/admin/admin-rates.js";
+import { getAdminSession, clearWizard } from "../src/bot/admin/admin-session.js";
 
 const uniqueId = () => `margintest-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
 
@@ -166,7 +174,7 @@ describe("Snapshot safety — existing quotes/orders are frozen", () => {
       where: { orderId: order.id },
       orderBy: { level: "asc" }
     });
-    const l1Row = commissionRows.find((r) => r.level === 1);
+    const l1Row = commissionRows.find((r: any) => r.level === 1);
     expect(l1Row).toBeTruthy();
     void l1Row;
 
@@ -182,7 +190,7 @@ describe("Snapshot safety — existing quotes/orders are frozen", () => {
       sourceCurrency: "USD",
       sourceAmount: "100",
       targetCurrency: "VND",
-      targetAmount: String(calc.receiveAmount),
+      targetAmount: String(calc.targetAmount),
       rateMarginSnapshot: order.rateMarginSnapshot
     });
 
@@ -271,129 +279,130 @@ describe("Confirm-time revalidation", () => {
   // the previously-valid BUY margin may become invalid (effective rate ≤ 0).
   // Confirm must be rejected and the stored margin must be UNCHANGED.
   // A failed Confirm must NOT emit a RATE_BUY_MARGIN_UPDATED audit event.
-  test("confirm-time revalidation: base rate drop makes pending BUY margin invalid → rejected, unchanged, no audit", async ({ t, db, seed, clearAll }) => {
-    await seed.admin("admin-reval");
-    const adminId = seed.id("admin-reval");
+  //
+  // These tests drive the REAL wizard functions end-to-end
+  // (start*MarginEdit → handleMarginWizardInput → confirmMarginChange) with a
+  // fake Admin ctx, exactly like the other runtime-level tests.
 
-    // 1. Set a high base rate (27000) so a 200 BUY margin is valid at input time.
-    const initialBaseRate = Decimal.fromString("27000");
+  /** Fake Admin ctx — same shape as the other router-level runtime tests. */
+  function fakeAdminCtx(adminTg: string): { ctx: any; replies: any[] } {
+    const replies: any[] = [];
+    return {
+      ctx: {
+        from: { id: Number(adminTg), is_bot: false, first_name: "Admin" },
+        chat: { id: Number(adminTg), type: "private" },
+        reply: async (text: string, opts?: any) => {
+          replies.push({ text, opts });
+          return { message_id: replies.length };
+        },
+        answerCallbackQuery: async () => true
+      },
+      replies
+    };
+  }
+
+  /** Real grant: an ACTIVE ADMIN holding exactly `rate.edit`. */
+  async function armAdmin(adminTg: string): Promise<void> {
+    await PermissionService.inviteStaff({
+      telegramId: adminTg,
+      name: "Margin Admin",
+      role: "ADMIN",
+      permissions: ["rate.edit"]
+    });
+  }
+
+  /** The authoritative USD/VND base rate the Confirm path re-reads. */
+  async function setUsdVndBaseRate(baseRate: number): Promise<void> {
     await prisma.exchangeRate.upsert({
       where: { pair: "USD/VND" },
-      create: {
-        pair: "USD/VND",
-        baseRate: initialBaseRate,
-        isTestConfig: true,
-        name: "Base"
-      },
-      update: { baseRate: initialBaseRate, isTestConfig: true }
+      update: { baseRate },
+      create: { pair: "USD/VND", baseRate, buyMargin: 0, sellMargin: 0, fee: 2, feeCurrency: "USD" }
     });
+  }
 
-    const flowB = Flow.for(adminId, ctxB);
-    await flowB
-      .tapBuyMarginEdit()
-      .enterValue("200")
-      .gone();
+  /** Audit rows for one action (findMany — the test store has no COUNT). */
+  async function auditCount(action: string): Promise<number> {
+    const rows = await prisma.auditLog.findMany({ where: { action } });
+    return rows.length;
+  }
+
+  it("base rate drop invalidates a pending BUY margin at Confirm → rejected, unchanged, no audit", async () => {
+    const adminTg = "887700101";
+    await armAdmin(adminTg);
+
+    // 1. High base rate (27000) so a 200 BUY margin is valid at input time.
+    await setUsdVndBaseRate(27000);
+    // Stored BUY margin = 100 → "unchanged by the failed Confirm" is observable.
+    await RuntimeConfigService.setBuyMarginVnd(100, "TEST");
+
+    const { ctx, replies } = fakeAdminCtx(adminTg);
+    await startBuyMarginEdit(ctx);
+    await handleMarginWizardInput(ctx, "200");
+    expect(getAdminSession(adminTg).wizard?.step).toBe(2);
 
     // 2. Drop the base rate to 150 — the 200 BUY margin is now invalid
-    //    (baseRate - buyMargin = 150 - 200 = -50 ≤ 0).
-    await prisma.exchangeRate.update({
-      where: { pair: "USD/VND" },
-      data: { baseRate: Decimal.fromString("150") }
-    });
+    //    (baseRate − buyMargin = 150 − 200 = −50 ≤ 0).
+    await setUsdVndBaseRate(150);
 
-    // 3. Count existing RATE_BUY_MARGIN_UPDATED events before confirm.
-    const auditBefore = await prisma.auditLog.count({
-      where: { action: "RATE_BUY_MARGIN_UPDATED" }
-    });
+    // 3. Count RATE_BUY_MARGIN_UPDATED events before Confirm.
+    const auditBefore = await auditCount("RATE_BUY_MARGIN_UPDATED");
 
     // 4. Confirm the pending (now-invalid) margin.
-    await flowB.tapConfirm().gone();
+    await confirmMarginChange(ctx);
 
     // 5. The 200 must NOT have been saved — stored margin unchanged.
-    t.assert.equal(
-      String(RuntimeConfigService.getBuyMarginVnd()),
-      "200",
-      "margin unchanged after invalid confirm"
-    );
+    expect(RuntimeConfigService.getBuyMarginVnd().toString()).toBe("100");
 
-    // 6. No RATE_BUY_MARGIN_UPDATED event must have been emitted.
-    const auditAfter = await prisma.auditLog.count({
-      where: { action: "RATE_BUY_MARGIN_UPDATED" }
-    });
-    t.assert.equal(auditAfter, auditBefore, "no audit event on failed confirm");
+    // 6. No RATE_BUY_MARGIN_UPDATED event may have been emitted.
+    expect(await auditCount("RATE_BUY_MARGIN_UPDATED")).toBe(auditBefore);
 
-    await clearAll();
+    // 7. The Admin was told WHY — never a silent rejection.
+    expect(replies.some((r) => String(r.text).includes("không còn hợp lệ"))).toBe(true);
+
+    clearWizard(adminTg);
   });
 
-  test("confirm-time revalidation: valid BUY confirm with sufficient headroom succeeds", async ({ t, db, seed, clearAll }) => {
-    await seed.admin("admin-reval-ok");
-    const adminId = seed.id("admin-reval-ok");
+  it("valid BUY confirm with sufficient headroom persists the margin and audits it", async () => {
+    const adminTg = "887700102";
+    await armAdmin(adminTg);
 
-    // Base rate 27000, margin 200 → effective 26800 > 0 (valid at confirm).
-    const baseRateC = Decimal.fromString("27000");
-    await prisma.exchangeRate.upsert({
-      where: { pair: "USD/VND" },
-      create: {
-        pair: "USD/VND",
-        baseRate: baseRateC,
-        isTestConfig: true,
-        name: "Base"
-      },
-      update: { baseRate: baseRateC, isTestConfig: true }
-    });
+    // Base rate stays at 27000: 27000 − 200 = 26800 > 0 → valid at Confirm.
+    await setUsdVndBaseRate(27000);
+    const auditBefore = await auditCount("RATE_BUY_MARGIN_UPDATED");
 
-    const flowC = Flow.for(adminId, ctxC);
-    await flowC
-      .tapBuyMarginEdit()
-      .enterValue("200")
-      .gone();
+    const { ctx } = fakeAdminCtx(adminTg);
+    await startBuyMarginEdit(ctx);
+    await handleMarginWizardInput(ctx, "200");
+    await confirmMarginChange(ctx);
 
-    await t.test("confirm succeeds when base rate has not dropped below margin", async () => {
-      await flowC.tapConfirm().gone();
+    expect(RuntimeConfigService.getBuyMarginVnd().toString()).toBe("200");
+    expect(await auditCount("RATE_BUY_MARGIN_UPDATED")).toBe(auditBefore + 1);
 
-      t.assert.equal(
-        String(RuntimeConfigService.getBuyMarginVnd()),
-        "200",
-        "margin persisted after valid confirm"
-      );
-    });
-
-    await clearAll();
+    clearWizard(adminTg);
   });
 
-  test("confirm-time revalidation: SELL margin does not require base-rate headroom check", async ({ t, db, seed, clearAll }) => {
-    await seed.admin("admin-reval-sell");
-    const adminId = seed.id("admin-reval-sell");
+  it("SELL confirm needs no base-rate headroom and still audits its own action", async () => {
+    const adminTg = "887700103";
+    await armAdmin(adminTg);
 
-    // SELL has no effective-rate safety constraint; base rate drop does not reject SELL confirm.
-    const baseRateD = Decimal.fromString("150");
-    await prisma.exchangeRate.upsert({
-      where: { pair: "USD/VND" },
-      create: {
-        pair: "USD/VND",
-        baseRate: baseRateD,
-        isTestConfig: true,
-        name: "Base"
-      },
-      update: { baseRate: baseRateD, isTestConfig: true }
-    });
+    // 1. Healthy base rate so the preview renders (effectiveBuy must be > 0).
+    await setUsdVndBaseRate(27000);
+    const auditBefore = await auditCount("RATE_SELL_MARGIN_UPDATED");
 
-    const flowD = Flow.for(adminId, ctxD);
-    await flowD
-      .tapSellMarginEdit()
-      .enterValue("200")
-      .gone();
+    const { ctx } = fakeAdminCtx(adminTg);
+    await startSellMarginEdit(ctx);
+    await handleMarginWizardInput(ctx, "200");
+    expect(getAdminSession(adminTg).wizard?.step).toBe(2);
 
-    await t.test("SELL confirm succeeds even when base rate < sell margin", async () => {
-      await flowD.tapConfirm().gone();
+    // 2. Drop the base rate BELOW the sell margin (150 < 200). SELL has no
+    //    effective-rate headroom constraint, so Confirm must still pass.
+    await setUsdVndBaseRate(150);
 
-      t.assert.equal(
-        String(RuntimeConfigService.getSellMarginVnd()),
-        "200",
-        "SELL margin persisted (SELL has no baseRate headroom constraint)"
-      );
-    });
+    await confirmMarginChange(ctx);
 
-    await clearAll();
+    expect(RuntimeConfigService.getSellMarginVnd().toString()).toBe("200");
+    expect(await auditCount("RATE_SELL_MARGIN_UPDATED")).toBe(auditBefore + 1);
+
+    clearWizard(adminTg);
   });
 });

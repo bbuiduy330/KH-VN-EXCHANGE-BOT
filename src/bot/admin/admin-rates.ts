@@ -12,6 +12,7 @@
  * every financial value explicitly — nothing is auto-seeded or guessed. The
  * save still goes through the same authoritative setRateAndInvalidate upsert.
  */
+import { Decimal } from "decimal.js";
 import { Composer, InlineKeyboard } from "grammy";
 import { BotContext } from "../middleware/identity.js";
 import { requirePermission } from "../middleware/permissions.js";
@@ -692,19 +693,29 @@ async function handleIndependentMarginInput(
 
   // Step 1: parse and validate input (uses shared domain validator)
   if (Number(wizard.step) === 1) {
-    const isBuy = wizard.kind === "margin_buy_edit";
+    // Narrow the wizard kind ONCE (session state stores it as a plain string);
+    // the dispatcher in handleMarginWizardInput already restricted it to these
+    // two kinds before delegating here.
+    const kind = wizard.kind;
+    if (kind !== "margin_buy_edit" && kind !== "margin_sell_edit") return false;
+
+    const isBuy = kind === "margin_buy_edit";
     const validation = parseAndValidateMargin(
       text,
       isBuy ? (await peekUsdVndRate())?.baseRate : undefined,
       isBuy
     );
     if (!validation.success) {
-      await ctx.reply(`❌ ${validation.error} Nhập lại hoặc /cancel.`).catch(() => {});
+      await ctx.reply(` ${validation.error} Nhập lại hoặc /cancel.`).catch(() => {});
       return true;
     }
+    // A successful validation always carries the validated integer; the result
+    // type keeps `value` nullable, so narrow explicitly (never coerce null).
+    const newValue = validation.value;
+    if (newValue === null) return true;
 
-    updateWizard(adminId, { step: 2, data: { newValue: validation.value } });
-    await showMarginPreview(ctx, adminId, wizard.kind, validation.value);
+    updateWizard(adminId, { step: 2, data: { newValue } });
+    await showMarginPreview(ctx, adminId, kind, newValue);
     return true;
   }
 

@@ -165,7 +165,7 @@ describe("durable customer chat transcript", () => {
     await CustomerChatHistoryService.recordInbound({ customerId, telegramChatId: chatId, telegramMessageId: 102, text: "Anh muốn đổi 100 USD" });
     const rows = await prisma.customerChatMessage.findMany({ where: { customerId, text: "Anh muốn đổi 100 USD" } });
     expect(rows.length).toBe(2);
-    expect(new Set(rows.map((r) => r.telegramMessageId)).size).toBe(2);
+    expect(new Set(rows.map((r: any) => r.telegramMessageId)).size).toBe(2);
   });
 
   it("16. photo metadata only (file_id + caption; nothing else invented)", async () => {
