@@ -29,7 +29,16 @@ import {
 
 const unique = () => `${Date.now()}${Math.floor(Math.random() * 1e6)}`;
 
-async function makeCustomer(): Promise<{ id: string; telegramId: string }> {
+/** Prisma Customer row, reused from the actual service return type. */
+type CustomerRow = Awaited<ReturnType<typeof CustomerService.getOrCreateCustomer>>;
+
+/** Actual test fixture shape: the Telegram id + the created Customer row. */
+interface CustomerFixture {
+  telegramId: string;
+  customer: CustomerRow;
+}
+
+async function makeCustomer(): Promise<CustomerFixture> {
   const telegramId = unique();
   const customer = await CustomerService.getOrCreateCustomer({ telegramId });
   return { telegramId, customer };
