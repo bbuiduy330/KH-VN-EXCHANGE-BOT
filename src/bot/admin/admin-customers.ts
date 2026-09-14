@@ -13,6 +13,7 @@ import { MoneyService } from "../../modules/money/money-service.js";
 import { escapeHtml, staffDisplayName } from "../menus/cskh-panel.js";
 import { customerLabel, shortOrderId } from "./admin-panel.js";
 import { customerIdentity } from "../notifications.js";
+import { resolveCustomer } from "../../modules/customer/customer-resolver.js";
 import { setAdminSearch } from "./admin-session.js";
 import { clearSelectedCustomer, getSelectedCustomer, setSelectedCustomer } from "../state/staff-chat-session.js";
 import { formatAdminDate, formatAdminDateTime } from "../../shared/app-time.js";
@@ -116,11 +117,14 @@ export function renderCrmOverview(orders: any[], lastTransactionAt: Date | strin
 }
 
 export async function showCustomerDetail(ctx: BotContext, customerId: string): Promise<void> {
-  const customer = await prisma.customer.findUnique({ where: { id: customerId } });
+  // Canonical resolver: accepts internal id, Telegram numeric ID or public
+  // Customer Ref — ONE authoritative lookup path for all Admin entry points.
+  const { customer } = await resolveCustomer(customerId);
   if (!customer) {
     await ctx.reply("❌ Không tìm thấy khách hàng.").catch(() => {});
     return;
   }
+  customerId = customer.id;
   const [conv, latestOrder, latestQuote, crmOrders] = await Promise.all([
     prisma.conversation.findUnique({ where: { customerId } }),
     OrderService.getLatestActiveOrderForCustomer(customerId),
@@ -273,11 +277,14 @@ adminCustomersHandler.callbackQuery(/^ops:customer:history:(.+)$/, (ctx) => {
 export async function showCustomerSupport(ctx: BotContext, customerId: string): Promise<void> {
   if (!(await requirePermission(ctx, "customer.message"))) return;
   const adminId = String(ctx.from?.id || "");
-  const customer = await prisma.customer.findUnique({ where: { id: customerId } });
+  // Canonical resolver: callbacks carry the internal Customer.id; refs /
+  // Telegram IDs still resolve safely instead of failing with "not found".
+  const { customer } = await resolveCustomer(customerId);
   if (!customer) {
     await ctx.reply("❌ Không tìm thấy khách hàng.").catch(() => {});
     return;
   }
+  customerId = customer.id;
   const conv = await ConversationService.getOrCreateConversation(customerId);
   const lines = ["💬 <b>HỖ TRỢ KHÁCH</b>", "", `👤 ${escapeHtml(customerLabel(customer))}`];
   const kb = new InlineKeyboard();
@@ -336,7 +343,15 @@ export async function releaseCustomerAsAdmin(ctx: BotContext, customerId: string
   }
 }
 
-adminCustomersHandler.callbackQuery(/^ops:customer:support:(.+)$/, (ctx) => showCustomerSupport(ctx, ctx.match?.[1] || ""));
-adminCustomersHandler.callbackQuery(/^ops:customer:support:claim:(.+)$/, (ctx) => claimCustomerAsAdmin(ctx, ctx.match?.[1] || ""));
-adminCustomersHandler.callbackQuery(/^ops:customer:support:release:(.+)$/, (ctx) => releaseCustomerAsAdmin(ctx, ctx.match?.[1] || ""));
+// ROUTE ORDER MATTERS: claim/release MUST be registered (and excluded from)
+// the generic support route — `ops:customer:support:(.+)` would otherwise
+// swallow `ops:customer:support:claim:<id>` with capture "claim:<id>" and
+// fail the customer lookup ("Không tìm thấy khách hàng").
+export const CUSTOMER_SUPPORT_CLAIM_ROUTE = /^ops:customer:support:claim:(.+)$/;
+export const CUSTOMER_SUPPORT_RELEASE_ROUTE = /^ops:customer:support:release:(.+)$/;
+export const CUSTOMER_SUPPORT_ROUTE = /^ops:customer:support:(?!claim:|release:)(.+)$/;
+
+adminCustomersHandler.callbackQuery(CUSTOMER_SUPPORT_ROUTE, (ctx) => showCustomerSupport(ctx, ctx.match?.[1] || ""));
+adminCustomersHandler.callbackQuery(CUSTOMER_SUPPORT_CLAIM_ROUTE, (ctx) => claimCustomerAsAdmin(ctx, ctx.match?.[1] || ""));
+adminCustomersHandler.callbackQuery(CUSTOMER_SUPPORT_RELEASE_ROUTE, (ctx) => releaseCustomerAsAdmin(ctx, ctx.match?.[1] || ""));
 

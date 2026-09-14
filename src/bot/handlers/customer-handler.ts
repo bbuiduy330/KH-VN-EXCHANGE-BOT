@@ -12,7 +12,7 @@ import { ConversationalAIService } from "../../modules/ai/customer-ai-service.js
 import { FileService } from "../../modules/files/file-service.js";
 import { RuntimeConfigService } from "../../modules/system-config/runtime-config-service.js";
 import { MoneyService } from "../../modules/money/money-service.js";
-import { sendToStaff, sendToAdminNotificationChat, copyMessageToStaff, copyMessageToChat, notifyEligibleStaff, notifyOrderCreated, notifyBillReceived, sendToCustomer, notifyPayoutReady, shouldNotifyPayoutReady } from "../notifications.js";
+import { sendToStaff, sendToAdminNotificationChat, copyMessageToStaff, copyMessageToChat, notifyEligibleStaff, notifySupportRequest, renderSupportRequestText, supportRequestKeyboard, notifyOrderCreated, notifyBillReceived, sendToCustomer, notifyPayoutReady, shouldNotifyPayoutReady } from "../notifications.js";
 import { SystemConfigService } from "../../modules/system-config/system-config-service.js";
 import { generateTransferMemo } from "../../modules/orders/transfer-memo.js";
 import { parsePayoutDestinationText, parsePayoutDestinationPipe, parsePayoutDestinationWithAi, decodePayoutQrImage } from "../../modules/orders/payout-destination.js";
@@ -611,28 +611,28 @@ customerHandler.callbackQuery("customer:menu:support", async (ctx) => {
   await ctx.answerCallbackQuery();
   const telegramId = String(ctx.from?.id || "");
   const customer = await CustomerService.getOrCreateCustomer({ telegramId });
-
-  await ConversationService.getOrCreateConversation(customer.id);
-  await ConversationService.addMessage({
-    customerId: customer.id,
-    senderType: "CUSTOMER",
-    content: "[YÊU CẦU GẶP CSKH TRỰC TIẾP]"
-  });
-
   const locale = locOf(customer);
-  await ctx.reply(t(locale, "support.requested"), { parse_mode: "HTML", reply_markup: getCustomerMenuKeyboard(locale) });
 
-  const notifyText =
-    `🛎 <b>YÊU CẦU HỖ TRỢ TỪ KHÁCH HÀNG:</b>\n` +
-    `• Khách: <b>${customer.fullName || customer.username || customer.telegramId}</b> (ID: <code>${customer.id}</code>)\n` +
-    `• Telegram ID: <code>${customer.telegramId}</code>`;
-  const notifyKb = new InlineKeyboard()
-    .text("👀 Xem khách", `cskh:preview:${customer.id}`)
-    .text("🙋 Nhận khách", `cskh:ticket:claim:${customer.id}`);
+  // Idempotent: an already-active support session is REUSED — one request
+  // produces ONE notification; a second press never re-notifies. After the
+  // session is released (AUTO), a NEW request notifies again.
+  const { newRequest } = await ConversationService.requestHumanSupport(customer.id);
+  if (newRequest) {
+    await ConversationService.addMessage({
+      customerId: customer.id,
+      senderType: "CUSTOMER",
+      content: "[YÊU CẦU GẶP CSKH TRỰC TIẾP]"
+    });
 
-  // Support-group broadcast (kept) + direct DM to eligible active staff (C3).
-  await sendToAdminNotificationChat(notifyText, { parse_mode: "HTML", reply_markup: notifyKb });
-  await notifyEligibleStaff(notifyText, { parse_mode: "HTML", reply_markup: notifyKb });
+    await ctx.reply(t(locale, "support.requested"), { parse_mode: "HTML", reply_markup: getCustomerMenuKeyboard(locale) });
+
+    await notifySupportRequest(renderSupportRequestText(customer), {
+      parse_mode: "HTML",
+      reply_markup: await supportRequestKeyboard(customer.id)
+    });
+  } else {
+    await ctx.reply(t(locale, "support.active_body"), { parse_mode: "HTML", reply_markup: getCustomerMenuKeyboard(locale) });
+  }
 });
 
 // --- 💳 Transfer info + 📷 bill instruction callbacks (requirement N) ---
@@ -893,7 +893,14 @@ async function handleReservedCustomerControl(
         await ctx.reply(renderSupportActiveText(locale), { parse_mode: "HTML", reply_markup: getCustomerReplyKeyboard(locale, true) });
         return true;
       }
-      // Enter HUMAN support request.
+      // Enter HUMAN support request (idempotent — DB-state guarded):
+      // duplicate/rapid presses converge to ONE active request and ONE
+      // notification; after release, a NEW request notifies again.
+      const { newRequest } = await ConversationService.requestHumanSupport(customer.id);
+      if (!newRequest) {
+        await ctx.reply(t(locale, "support.active_body"), { parse_mode: "HTML", reply_markup: getCustomerReplyKeyboard(locale, true) });
+        return true;
+      }
       await ConversationService.addMessage({
         customerId: customer.id,
         senderType: "CUSTOMER",
@@ -901,15 +908,10 @@ async function handleReservedCustomerControl(
       });
       await ctx.reply(t(locale, "support.requested"), { parse_mode: "HTML", reply_markup: getCustomerReplyKeyboard(locale, true) });
 
-      const notifyText =
-        `🛎 <b>YÊU CẦU HỖ TRỢ TỪ KHÁCH HÀNG:</b>\n` +
-        `• Khách: <b>${customer.fullName || customer.username || customer.telegramId}</b> (ID: <code>${customer.id}</code>)\n` +
-        `• Telegram ID: <code>${customer.telegramId}</code>`;
-      const notifyKb = new InlineKeyboard()
-        .text("👀 Xem khách", `cskh:preview:${customer.id}`)
-        .text("🙋 Nhận khách", `cskh:ticket:claim:${customer.id}`);
-      await sendToAdminNotificationChat(notifyText, { parse_mode: "HTML", reply_markup: notifyKb });
-      await notifyEligibleStaff(notifyText, { parse_mode: "HTML", reply_markup: notifyKb });
+      await notifySupportRequest(renderSupportRequestText(customer), {
+        parse_mode: "HTML",
+        reply_markup: await supportRequestKeyboard(customer.id)
+      });
       return true;
     }
     case "language": {
@@ -1637,7 +1639,12 @@ customerHandler.callbackQuery(/^customer:payout:support:([a-zA-Z0-9_-]+)$/, asyn
   const customer = await CustomerService.getOrCreateCustomer({ telegramId });
   const locale = locOf(customer);
 
-  await ConversationService.getOrCreateConversation(customer.id);
+  // Idempotent: reuse an already-active support session — no duplicate notify.
+  const { newRequest } = await ConversationService.requestHumanSupport(customer.id);
+  if (!newRequest) {
+    await ctx.reply(t(locale, "support.active_body"), { parse_mode: "HTML", reply_markup: getCustomerReplyKeyboard(locale, true) });
+    return;
+  }
   await ConversationService.addMessage({
     customerId: customer.id,
     senderType: "CUSTOMER",
@@ -1645,15 +1652,10 @@ customerHandler.callbackQuery(/^customer:payout:support:([a-zA-Z0-9_-]+)$/, asyn
   });
   await ctx.reply(t(locale, "support.requested"), { parse_mode: "HTML", reply_markup: getCustomerReplyKeyboard(locale, true) });
 
-  const notifyText =
-    `🛎 <b>YÊU CẦU HỖ TRỢ TỪ KHÁCH HÀNG (luồng nhận tiền):</b>\n` +
-    `• Khách: <b>${customer.fullName || customer.username || customer.telegramId}</b> (ID: <code>${customer.id}</code>)\n` +
-    `• Telegram ID: <code>${customer.telegramId}</code>`;
-  const notifyKb = new InlineKeyboard()
-    .text("👀 Xem khách", `cskh:preview:${customer.id}`)
-    .text("🙋 Nhận khách", `cskh:ticket:claim:${customer.id}`);
-  await sendToAdminNotificationChat(notifyText, { parse_mode: "HTML", reply_markup: notifyKb });
-  await notifyEligibleStaff(notifyText, { parse_mode: "HTML", reply_markup: notifyKb });
+  await notifySupportRequest(renderSupportRequestText(customer, "luồng nhận tiền"), {
+    parse_mode: "HTML",
+    reply_markup: await supportRequestKeyboard(customer.id)
+  });
 });
 
 /** ctx-bound variant of the destination prompt (chooser re-render). */

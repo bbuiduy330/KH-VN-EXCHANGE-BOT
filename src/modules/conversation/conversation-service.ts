@@ -17,6 +17,24 @@ export class ConversationService {
   }
 
   /**
+   * Customer-facing HUMAN support request (idempotent, DB-state guarded).
+   * AUTO → HUMAN via a conditional updateMany: rapid duplicate button presses
+   * converge to ONE active request (newRequest = false). Staff release or
+   * customer exit returns the conversation to AUTO, after which a NEW support
+   * request legitimately notifies staff again. No new database status.
+   */
+  static async requestHumanSupport(customerId: string): Promise<{ conv: any; newRequest: boolean }> {
+    const conv = await this.getOrCreateConversation(customerId);
+    if (conv.mode === "HUMAN") return { conv, newRequest: false };
+    const result = await prisma.conversation.updateMany({
+      where: { id: conv.id, mode: "AUTO" },
+      data: { mode: "HUMAN" }
+    });
+    const fresh = await prisma.conversation.findUnique({ where: { id: conv.id } });
+    return { conv: fresh, newRequest: result.count === 1 };
+  }
+
+  /**
    * Atomic CSKH Claim:
    * Only succeeds if claimedById IS NULL.
    * Prevents race condition where two staff press claim at the same time.
