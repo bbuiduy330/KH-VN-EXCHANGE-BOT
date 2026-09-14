@@ -26,7 +26,7 @@ import { adminActionsHandler, handleAdminPayoutEvidenceMedia, handleCancelReason
 import { adminCustomersHandler, runCustomerSearch, showCustomerList } from "./admin-customers.js";
 import { adminCskhHandler, showCskhOverview } from "./admin-cskh.js";
 import { adminScreensHandler } from "./admin-screens.js";
-import { adminRatesHandler, showRateManagement, handleRateWizardInput } from "./admin-rates.js";
+import { adminRatesHandler, showRateManagement, handleRateWizardInput, handleQuoteFooterInput, handleMarginWizardInput } from "./admin-rates.js";
 import { adminAccountsHandler, handleAccountWizardInput, handlePriorityInput, handleAccountAddQrMedia, handleAccountQrUpdateMedia, handleVerificationConfigInput } from "./admin-accounts.js";
 import { adminStaffHandler, handleStaffWizardInput, handleStaffNameInput } from "./admin-staff.js";
 import { adminAiHandler, handleAiKeyInput, handleAiModelInput, handleAiVoiceTestMedia } from "./admin-ai.js";
@@ -102,6 +102,8 @@ export async function handleAdminSessionText(ctx: BotContext, text: string): Pro
   if (session.wizard) {
     const kind = session.wizard.kind;
     if (kind === "rate_edit") return handleRateWizardInput(ctx, text);
+    if (kind === "margin_buy_edit" || kind === "margin_sell_edit") return handleMarginWizardInput(ctx, text);
+    if (kind === "quote_footer") return handleQuoteFooterInput(ctx, text);
     if (kind === "account_add") return handleAccountWizardInput(ctx, text);
     if (kind === "account_priority") return handlePriorityInput(ctx, text);
     if (kind === "staff_add") return handleStaffWizardInput(ctx, text);

@@ -2,6 +2,8 @@ import { InlineKeyboard } from "grammy";
 import { Quote, Order, ExchangeRate } from "@prisma/client";
 import { QuoteService } from "../../modules/quotes/quote-service.js";
 import { MoneyService } from "../../modules/money/money-service.js";
+import { RuntimeConfigService } from "../../modules/system-config/runtime-config-service.js";
+import { escapeHtml } from "./cskh-panel.js";
 import { SystemConfigService } from "../../modules/system-config/system-config-service.js";
 import { generateTransferMemo } from "../../modules/orders/transfer-memo.js";
 import {
@@ -103,8 +105,8 @@ export async function renderCustomerWelcomeText(
     if (usdVnd) {
       const { effectiveBuy, effectiveSell } = MoneyService.calculateEffectiveRates(
         usdVnd.baseRate,
-        usdVnd.buyMargin,
-        usdVnd.sellMargin
+        RuntimeConfigService.getBuyMarginVnd(),
+        RuntimeConfigService.getSellMarginVnd()
       );
       ratesBlock =
         `🇺🇸 USD → 🇻🇳 VND\n` +
@@ -183,6 +185,13 @@ export async function renderActiveOrderText(
 /**
  * Shared customer quote card (used by chat flow and /start resume).
  * Labels localized; numeric values from MoneyService unchanged.
+ *
+ * QUOTE FOOTER (📝 Ghi chú báo giá): Admin-configured informational footer,
+ * appended AFTER the complete authoritative quote body. PRESENTATION ONLY —
+ * it NEVER touches rate / amounts / fee / expiry. Only NEWLY rendered quote
+ * messages use the current footer; changing it never rewrites historical
+ * Quote/Order financial data. Admin input is PLAIN TEXT — escaped for the
+ * HTML parse mode (never treated as raw HTML).
  */
 export function renderQuoteCard(
   quote: Quote,
@@ -199,12 +208,18 @@ export function renderQuoteCard(
   const formattedTgt = MoneyService.formatAmount(quote.targetAmount, quote.targetCurrency);
 
   // C — concise, action-first quote. One summary line + rate/fee/expiry.
-  return (
+  const body =
     `${t(loc, "quote.summary", { src: `${formattedSrc} ${quote.sourceCurrency}`, tgt: `${formattedTgt} ${quote.targetCurrency}` })}\n` +
     `${t(loc, "quote.rate", { rate: rateDisplay })}\n` +
     `${t(loc, "quote.fee", { fee: `${quote.fee} ${quote.feeCurrency}` })}\n` +
-    `${t(loc, "quote.expiry", { minutes: expiryMinutes })}`
-  );
+    `${t(loc, "quote.expiry", { minutes: expiryMinutes })}`;
+
+  // Footer: customer's locale → nothing (NO cross-locale fallback unless the
+  // Admin explicitly configured that locale). Escaped plain text, appended
+  // after the body — financial values untouched.
+  const footer = String(RuntimeConfigService.getQuoteFooter(loc) || "").trim();
+  if (!footer) return body;
+  return `${body}\n──────────\n📌 ${escapeHtml(footer)}`;
 }
 
 /** Support-mode banner text. */

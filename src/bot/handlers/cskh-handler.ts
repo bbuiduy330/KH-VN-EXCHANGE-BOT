@@ -11,6 +11,7 @@ import { sendToCustomer, sendToStaff, copyMessageToCustomer } from "../notificat
 import { resolveLocale, t } from "../../modules/i18n/locales.js";
 import { getCskhMenuKeyboard, renderCskhStartText } from "../menus/cskh-menu.js";
 import { clearSelectedCustomer, getSelectedCustomer, setSelectedCustomer } from "../state/staff-chat-session.js";
+import { showCustomerChatHistory } from "../admin/admin-customers.js";
 import { formatAdminDateTime } from "../../shared/app-time.js";
 import {
   ConversationWithCustomer,
@@ -178,7 +179,12 @@ cskhHandler.command("msg", async (ctx) => {
   const customer = await prisma.customer.findUnique({ where: { id: customerId } });
   if (customer) {
     try {
-      const sent = await sendToCustomer(customer.telegramId, `💬 <b>Bộ phận CSKH:</b>\n${content}`);
+      const sent = await sendToCustomer(
+        customer.telegramId,
+        `💬 <b>Bộ phận CSKH:</b>\n${content}`,
+        { parse_mode: "HTML" },
+        { customerId, staffTelegramId: staffTelegramId }
+      );
       if (sent) {
         await ConversationService.markMessageSent(msgRecord.id, sent.message_id);
         await ctx.reply(`✅ ĐĂ£ gửi tin nhắn đến khách <code>${customerId}</code>.`, { parse_mode: "HTML" });
@@ -1114,3 +1120,11 @@ export async function handleStaffMedia(ctx: BotContext): Promise<void> {
 
 
 
+
+// ---------------------------------------------------------------------------
+// ?? Durable chat history for CSKH (support transcript; never exposed to CTV).
+// ---------------------------------------------------------------------------
+cskhHandler.callbackQuery(/^cskh:chathist:([a-zA-Z0-9_-]+)$/, async (ctx) => {
+  if (!(await requirePermission(ctx, "customer.view"))) return;
+  await showCustomerChatHistory(ctx, ctx.match?.[1] || "");
+});

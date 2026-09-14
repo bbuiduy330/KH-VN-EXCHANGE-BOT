@@ -215,6 +215,7 @@ export function getCustomerDetailKeyboard(
     .text("📊 Xem báo giá", `cskh:quote:${conv.customerId}`);
   kb.row()
     .text("🕘 Lịch sử", `cskh:history:${conv.customerId}:1`)
+    .text("💬 Lịch sử chat", `cskh:chathist:${conv.customerId}`);
     .text("⬅️ Danh sách", "cskh:waiting:1");
   kb.row().text("🏠 Menu CSKH", "cskh:home");
   return kb;

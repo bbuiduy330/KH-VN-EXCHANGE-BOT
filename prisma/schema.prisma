@@ -143,6 +143,10 @@ model Customer {
   // ONLY Broadcast campaigns — never order/payment/payout/support messages.
   marketingEnabled  Boolean              @default(true)
   telegramReachable Boolean              @default(true)
+  // TRUE customer-facing activity timestamp (inbound message / support request /
+  // order initiation) — maintained by CustomerChatHistoryService + order flow.
+  // NEVER touched by Admin profile views, audits or schedulers.
+  lastActivityAt    DateTime             @default(now())
   // Partner/CTV attribution (S/T): nullable, assigned only via referral claim
   // or Admin reassignment; NEVER overwritten by a second referral link.
   partnerId         String?
@@ -153,6 +157,11 @@ model Customer {
   orders            Order[]
   quotes            Quote[]
   conversation      Conversation?
+  chatMessages      CustomerChatMessage[]
+
+  // Admin customer list — keyset (lastActivityAt DESC, id DESC) pagination:
+  @@index([lastActivityAt, id])
+  @@index([updatedAt, id])
 }
 
 model CustomerPayoutBank {
@@ -196,6 +205,10 @@ model Order {
   receivingAccountSnapshot Json?
   payoutBankSnapshot       Json?
   status                   OrderStatus         @default(WAITING_PAYMENT)
+  // CANONICAL PUBLIC ORDER REFERENCE — unique, immutable, human-friendly.
+  // Generated once at creation (UPPER last-6 preferred); never rewritten.
+  // transferMemo is the BANK matching reference — NOT an Order ref.
+  publicRef                String?
   customerBillFileId       String?
   customerBillSha256       String?
   aiExtractedData          Json?
@@ -216,6 +229,9 @@ model Order {
   @@index([status])
   @@index([customerId])
   @@index([partnerId])
+  // Admin scalable lists — keyset (createdAt DESC, id DESC) pagination:
+  @@index([createdAt, id])
+  @@index([status, createdAt])
 }
 
 model OrderStateHistory {
@@ -252,6 +268,9 @@ model Conversation {
   id          String           @id @default(cuid())
   customerId  String           @unique
   customer    Customer         @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  // Order-linked support context (nullable): set when a support request starts
+  // from a specific Order — 📦 Mở đơn routing + transcript rows keep it.
+  orderId     String?
   mode        ConversationMode @default(AUTO)
   claimedById String?
   claimedAt   DateTime?
@@ -308,6 +327,9 @@ model AuditLog {
   targetId   String
   details    Json?
   createdAt  DateTime @default(now())
+
+  // Admin activity feed — keyset (createdAt DESC, id DESC) pagination:
+  @@index([createdAt, id])
 }
 
 model FileEvidence {
@@ -423,6 +445,40 @@ model Partner {
   updatedAt           DateTime            @updatedAt
   commissions         Commission[]
   settlements         PartnerSettlement[]
+
+  // Admin CTV list — keyset (createdAt DESC, id DESC) pagination:
+  @@index([createdAt, id])
+}
+
+// ===========================================================================
+// DURABLE CUSTOMER CHAT TRANSCRIPT (Part 2 — operations pass).
+// Metadata-only transcript of CUSTOMER-FACING conversation content. Audit log
+// is a technical record — this is the operational transcript. Survives
+// AUTO↔HUMAN support transitions (claim/release never erase history).
+// Media is stored as Telegram file_id metadata ONLY — never binaries, never
+// secrets. Dedupe on (telegramChatId, telegramMessageId, direction).
+// ===========================================================================
+model CustomerChatMessage {
+  id               String   @id @default(cuid())
+  customerId       String
+  customer         Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  conversationId   String?
+  telegramChatId   String
+  telegramMessageId String?
+  direction        String // INBOUND | OUTBOUND
+  senderType       String // CUSTOMER | BOT | STAFF | SYSTEM
+  staffTelegramId  String?
+  contentType      String   @default("TEXT") // TEXT | PHOTO | DOCUMENT | VOICE | VIDEO | STICKER | OTHER
+  text             String?
+  caption          String?
+  telegramFileId   String?
+  // Nullable Order context (set when the support session is Order-linked).
+  orderId          String?
+  createdAt        DateTime @default(now())
+
+  @@index([customerId, createdAt, id])
+  @@index([orderId, createdAt])
+  @@unique([telegramChatId, telegramMessageId, direction])
 }
 
 model Commission {
@@ -455,6 +511,8 @@ model Commission {
 
   @@unique([orderId, partnerId, level])
   @@index([partnerId, status])
+  // Per-CTV commission list — keyset (createdAt DESC, id DESC) pagination:
+  @@index([partnerId, createdAt, id])
 }
 
 model PartnerSettlement {

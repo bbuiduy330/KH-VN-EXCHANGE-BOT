@@ -71,14 +71,18 @@ export function renderRateDetailText(usdVnd: any): string {
     lines.push("Vui lòng thiết lập tỷ giá đầu tiên.");
     return lines.join("\n");
   }
-  const { effectiveBuy, effectiveSell } = MoneyService.calculateEffectiveRates(usdVnd.baseRate, usdVnd.buyMargin, usdVnd.sellMargin);
+  // For USD/VND the effective margins come from the global SystemSetting
+  // (admin-configurable), NOT the legacy ExchangeRate-row margins.
+  const buyMargin = RuntimeConfigService.getBuyMarginVnd();
+  const sellMargin = RuntimeConfigService.getSellMarginVnd();
+  const { effectiveBuy, effectiveSell } = MoneyService.calculateEffectiveRates(usdVnd.baseRate, buyMargin, sellMargin);
   lines.push(`USD → VND: <b>1 USD = ${MoneyService.formatAmount(effectiveBuy, "VND")} VND</b>`);
   lines.push(`VND → USD: <b>1 USD = ${MoneyService.formatAmount(effectiveSell, "VND")} VND</b>`);
   lines.push(
     "",
     `Base: ${MoneyService.formatAmount(usdVnd.baseRate, "VND")}`,
-    `Buy margin: -${usdVnd.buyMargin}`,
-    `Sell margin: +${usdVnd.sellMargin}`,
+    `Buy margin: -${buyMargin} (hệ thống)`,
+    `Sell margin: +${sellMargin} (hệ thống)`,
     `Phí: ${MoneyService.formatMoney(usdVnd.fee, usdVnd.feeCurrency)}`,
     "",
     `🕒 Cập nhật: ${timeAgo(usdVnd.updatedAt)}`,
@@ -215,6 +219,7 @@ export async function showConfig(ctx: BotContext): Promise<void> {
     `💾 Sao lưu tự động: ${cfg.backupEnabled ? "BẬT" : "TẮT"}`,
     `💵 Phí dịch vụ mặc định: ${cfg.defaultServiceFeeUsd} USD`,
     `⚠️ Ngưỡng giao dịch lớn: ${cfg.largeTransactionThresholdUsd} USD`,
+    `💵 Lợi nhuận mua/bán (USD/VND): ${cfg.buyMarginVnd} / ${cfg.sellMarginVnd} VND`,
     `⏱ Quote hết hạn: ${cfg.quoteExpiryMinutes} phút`,
     `🔔 Cảnh báo chờ thanh toán: ${cfg.paymentWaitAlertMinutes} phút`
   ];

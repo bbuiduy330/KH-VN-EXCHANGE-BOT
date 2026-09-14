@@ -1,6 +1,8 @@
+﻿import { Decimal } from "decimal.js";
 import { prisma } from "../../database/client.js";
 import { env } from "../../config/env.js";
 import { logger } from "../../shared/logger.js";
+import { parseAndValidateMargin } from "./rate-margin-validation.js";
 
 /** Centralized quote validity duration (business rule: exactly 10 minutes). */
 export const QUOTE_VALIDITY_MINUTES = 10;
@@ -17,6 +19,10 @@ export interface BusinessConfig {
   paymentWaitAlertMinutes: number;
   /** Deterministic bank-transfer reference template (stored, no schema change). */
   transferMemoTemplate: string;
+  /** USD/VND buy margin (VND, subtracted from base) â€” global system setting. */
+  buyMarginVnd: string;
+  /** USD/VND sell margin (VND, added to base) â€” global system setting. */
+  sellMarginVnd: string;
   updatedAt: string;
   updatedBy: string;
 }
@@ -35,7 +41,9 @@ export class RuntimeConfigService {
     largeTransactionThresholdUsd: env.LARGE_TRANSACTION_THRESHOLD_USD || 5000,
     quoteExpiryMinutes: env.QUOTE_EXPIRY_MINUTES || QUOTE_VALIDITY_MINUTES,
     paymentWaitAlertMinutes: env.PAYMENT_WAIT_ALERT_MINUTES || 30,
-    transferMemoTemplate: "{shortOrder} CK"
+    transferMemoTemplate: "{shortOrder} CK",
+    buyMarginVnd: "200",
+    sellMarginVnd: "200"
   };
 
   /**
@@ -122,6 +130,18 @@ export class RuntimeConfigService {
     return this.get<string>("adminNotificationChatId", env.ADMIN_NOTIFICATION_CHAT_ID || env.SUPER_ADMIN_TELEGRAM_ID || "");
   }
 
+  /**
+   * đŸ“ Ghi chĂº bĂ¡o giĂ¡ (quote footer) â€” multilingual, Admin-managed plain text.
+   * Keys: quoteFooterEnabled, quoteFooterVi/En/Km/Zh. Customer's locale only â€”
+   * NO cross-locale fallback unless the Admin configured that locale. Returns
+   * "" when disabled/unconfigured (no footer).
+   */
+  static getQuoteFooter(locale: string): string {
+    if (!this.get<boolean>("quoteFooterEnabled", false)) return "";
+    const key = `quoteFooter${String(locale || "vi").slice(0, 2).toUpperCase()}`;
+    return String(this.get<string>(key, "") || "").trim();
+  }
+
   static setAdminNotificationChatId(chatId: string, updatedBy: string = "ADMIN"): Promise<void> {
     return this.set<string>("adminNotificationChatId", chatId, updatedBy);
   }
@@ -185,6 +205,57 @@ export class RuntimeConfigService {
     return this.set<string>("transferMemoTemplate", template, updatedBy);
   }
 
+  static getBuyMarginVnd(): Decimal {
+    return new Decimal(this.get<string>("buyMarginVnd", "200"));
+  }
+
+  static getSellMarginVnd(): Decimal {
+    return new Decimal(this.get<string>("sellMarginVnd", "200"));
+  }
+
+  /**
+   * Returns the current USD/VND baseRate from ExchangeRate, or undefined if
+   * no rate has been configured yet (first-time setup). Used by setBuyMarginVnd
+   * to enforce effective-rate safety independently of the Telegram Admin UI.
+   */
+  private static async getUsdVndBaseRate(): Promise<number | undefined> {
+    const rate = await prisma.exchangeRate.findUnique({ where: { pair: "USD/VND" } });
+    if (!rate) return undefined;
+    const br = Number(rate.baseRate);
+    return Number.isFinite(br) ? br : undefined;
+  }
+
+  static setBuyMarginVnd(value: string | number, updatedBy: string = "ADMIN"): Promise<void> {
+    const raw = String(value);
+    // Step 1: integer / range validation (always enforced)
+    const parsed = parseAndValidateMargin(raw);
+    if (!parsed.success) {
+      throw new Error(parsed.error!);
+    }
+    const marginValue = parsed.value!;
+    // Step 2: effective-rate safety — only if a USD/VND base rate is configured.
+    // If no rate exists yet (first-time setup), skip this check and follow the
+    // existing rate-setup behavior (no fake rate invented).
+    const baseRate = await this.getUsdVndBaseRate();
+    if (baseRate !== undefined) {
+      const effective = baseRate - marginValue;
+      if (effective <= 0) {
+        throw new Error(
+          `baseRate (${baseRate}) − buyMargin (${marginValue}) = ${effective} ≤ 0. Effective buy rate phải > 0.`
+        );
+      }
+    }
+    return this.set<string>("buyMarginVnd", String(marginValue), updatedBy);
+  }
+
+  static setSellMarginVnd(value: string | number, updatedBy: string = "ADMIN"): Promise<void> {
+    const parsed = parseAndValidateMargin(String(value));
+    if (!parsed.success) {
+      throw new Error(parsed.error!);
+    }
+    return this.set<string>("sellMarginVnd", parsed.value, updatedBy);
+  }
+
   static getConfig(): BusinessConfig {
     return {
       geminiTextModel: this.getGeminiTextModel(),
@@ -197,6 +268,8 @@ export class RuntimeConfigService {
       quoteExpiryMinutes: this.getQuoteExpiryMinutes(),
       paymentWaitAlertMinutes: this.getPaymentWaitAlertMinutes(),
       transferMemoTemplate: this.getTransferMemoTemplate(),
+      buyMarginVnd: this.get<string>("buyMarginVnd", "200"),
+      sellMarginVnd: this.get<string>("sellMarginVnd", "200"),
       updatedAt: new Date().toISOString(),
       updatedBy: "SYSTEM"
     };

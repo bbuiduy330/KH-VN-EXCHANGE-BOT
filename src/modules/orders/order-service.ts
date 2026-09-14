@@ -7,6 +7,7 @@ import { FileService } from "../files/file-service.js";
 import { AiProvider } from "../ai/ai-provider.js";
 import { AuditService } from "../audit/audit-service.js";
 import { LocalStorageService } from "../storage/local-storage-service.js";
+import { RuntimeConfigService } from "../system-config/runtime-config-service.js";
 import {
   canCustomerCancel,
   canAdminCancel,
@@ -17,6 +18,7 @@ import {
   CANCELLATION_SOURCES
 } from "./order-safety.js";
 import { logger } from "../../shared/logger.js";
+import { generateOrderRef } from "./order-ref.js";
 
 export class OrderService {
   // -------------------------------------------------------------------------
@@ -128,8 +130,8 @@ export class OrderService {
     const rateMarginSnapshot = rateRow
       ? {
           baseRate: String(rateRow.baseRate),
-          buyMargin: String(rateRow.buyMargin),
-          sellMargin: String(rateRow.sellMargin)
+          buyMargin: String(RuntimeConfigService.getBuyMarginVnd()),
+          sellMargin: String(RuntimeConfigService.getSellMarginVnd())
         }
       : null;
 
@@ -153,9 +155,14 @@ export class OrderService {
     });
 
     const order = await prisma.$transaction(async (tx: any) => {
+      // CANONICAL PUBLIC ORDER REF — generated once (UPPER last-6 preferred;
+      // bounded disambiguation on the rare suffix collision). IMMUTABLE after
+      // creation; never the bank transferMemo.
+      const publicRef = await generateOrderRef(tx, orderId);
       const created = await tx.order.create({
         data: {
           id: orderId,
+          publicRef,
           customerId,
           partnerId: customerRow?.partnerId ?? null,
           transferMemo,
@@ -209,6 +216,11 @@ export class OrderService {
 
       return created;
     });
+
+    // TRUE customer activity: initiating a transaction updates lastActivityAt
+    // (best-effort — never fails Order creation, never blocks financial flow).
+    prisma.customer.update({ where: { id: customerId }, data: { lastActivityAt: new Date() } })
+      .catch(() => {});
 
     // Initialize order folders and archive initial metadata and payment QR locally
     LocalStorageService.archiveOrderMetadata(order.id).catch((err) => {

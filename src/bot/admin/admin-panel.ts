@@ -10,6 +10,7 @@ import { InlineKeyboard } from "grammy";
 import { BotContext } from "../middleware/identity.js";
 import { prisma } from "../../database/client.js";
 import { MoneyService } from "../../modules/money/money-service.js";
+import { RuntimeConfigService } from "../../modules/system-config/runtime-config-service.js";
 import { escapeHtml } from "../menus/cskh-panel.js";
 import { clearAdminSession } from "./admin-session.js";
 
@@ -152,10 +153,12 @@ export async function loadOperationsCenterCounts(): Promise<OperationsCenterCoun
 export async function loadRateDisplay(): Promise<RateDisplay | null> {
   const usdVnd = await prisma.exchangeRate.findUnique({ where: { pair: "USD/VND" } });
   if (!usdVnd) return null;
+  // USD/VND margins are admin-configurable SystemSettings — the same values
+  // used by live quote/order calculations, so the dashboard never diverges.
   const { effectiveBuy, effectiveSell } = MoneyService.calculateEffectiveRates(
     usdVnd.baseRate,
-    usdVnd.buyMargin,
-    usdVnd.sellMargin
+    RuntimeConfigService.getBuyMarginVnd(),
+    RuntimeConfigService.getSellMarginVnd()
   );
   return {
     usdToVnd: MoneyService.formatAmount(effectiveBuy, "VND"),
