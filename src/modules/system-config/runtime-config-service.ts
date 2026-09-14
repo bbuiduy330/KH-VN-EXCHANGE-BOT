@@ -225,14 +225,14 @@ export class RuntimeConfigService {
     return Number.isFinite(br) ? br : undefined;
   }
 
-  static setBuyMarginVnd(value: string | number, updatedBy: string = "ADMIN"): Promise<void> {
+  static async setBuyMarginVnd(value: string | number, updatedBy: string = "ADMIN"): Promise<void> {
     const raw = String(value);
     // Step 1: integer / range validation (always enforced)
     const parsed = parseAndValidateMargin(raw);
-    if (!parsed.success) {
-      throw new Error(parsed.error!);
+    if (!parsed.success || parsed.value === null) {
+      throw new Error(parsed.error ?? "Giá trị biên mua không hợp lệ");
     }
-    const marginValue = parsed.value!;
+    const marginValue = parsed.value;
     // Step 2: effective-rate safety — only if a USD/VND base rate is configured.
     // If no rate exists yet (first-time setup), skip this check and follow the
     // existing rate-setup behavior (no fake rate invented).
@@ -245,15 +245,15 @@ export class RuntimeConfigService {
         );
       }
     }
-    return this.set<string>("buyMarginVnd", String(marginValue), updatedBy);
+    await this.set<string>("buyMarginVnd", String(marginValue), updatedBy);
   }
 
-  static setSellMarginVnd(value: string | number, updatedBy: string = "ADMIN"): Promise<void> {
+  static async setSellMarginVnd(value: string | number, updatedBy: string = "ADMIN"): Promise<void> {
     const parsed = parseAndValidateMargin(String(value));
-    if (!parsed.success) {
-      throw new Error(parsed.error!);
+    if (!parsed.success || parsed.value === null) {
+      throw new Error(parsed.error ?? "Giá trị biên bán không hợp lệ");
     }
-    return this.set<string>("sellMarginVnd", parsed.value, updatedBy);
+    await this.set<string>("sellMarginVnd", String(parsed.value), updatedBy);
   }
 
   static getConfig(): BusinessConfig {

@@ -45,7 +45,8 @@ import { escapeHtml } from "../menus/cskh-panel.js";
 import { resolveEvidenceMime, logEvidenceDiagnostics } from "../../modules/files/media-validation.js";
 import {
   notifyOrderCancelledByCustomer,
-  notifyLateBillOnCancelledOrder
+  notifyLateBillOnCancelledOrder,
+  customerIdentity
 } from "../notifications.js";
 import {
   LOCALE_LABELS,
@@ -735,8 +736,10 @@ function encodeChatCursorRaw(row: { createdAt: Date; id: string }): string {
 function decodeChatCursorRaw(raw: string): { createdAt: Date; id: string } | null {
   try {
     const [iso, id] = Buffer.from(raw, "base64url").toString("utf8").split("|");
+    // strict indexing: both halves must be present before use.
+    if (!iso || !id) return null;
     const d = new Date(iso);
-    return id && !Number.isNaN(d.getTime()) ? { createdAt: d, id } : null;
+    return Number.isNaN(d.getTime()) ? null : { createdAt: d, id };
   } catch {
     return null;
   }

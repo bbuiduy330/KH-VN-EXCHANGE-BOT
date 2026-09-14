@@ -30,12 +30,33 @@ export function formatPublicOrderRef(order: OrderRefLike | string): string {
 }
 
 /**
+ * Candidate public refs, in the documented UX order:
+ *   RIGHT(id,6) → RIGHT(id,8) → RIGHT(id,12) → full id.
+ * Short ids collapse into fewer distinct candidates (Set dedupe); a
+ * missing/blank id yields no candidate at all.
+ */
+export function candidatePublicRefs(orderId: string): string[] {
+  const raw = String(orderId || "").trim().toUpperCase();
+  if (!raw) return [];
+  return [...new Set([raw.slice(-6), raw.slice(-8), raw.slice(-12), raw])];
+}
+
+/**
  * Generate a collision-safe public Order reference inside the caller's
  * transaction. Candidates are tried in the documented UX order; the final
  * full ID is retained as a deterministic fallback for malformed/short IDs.
  */
 export async function generateOrderRef(
-  prisma: { order: { findFirst(args: { where: { publicRef: string } }): Promise<any> } },
+  prisma: {
+    order: {
+      /**
+       * Structural view of the Order delegate — satisfied by both the
+       * PrismaClient and a Prisma transaction client, so callers pass
+       * whatever client their transaction is running on.
+       */
+      findFirst(args: { where: { publicRef: string }; select: { id: true } }): Promise<any>;
+    };
+  },
   orderId: string
 ): Promise<string> {
   for (const candidate of candidatePublicRefs(orderId)) {
