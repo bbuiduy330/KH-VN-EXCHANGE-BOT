@@ -264,6 +264,7 @@ describe("Snapshot safety — existing quotes/orders are frozen", () => {
   });
 });
 
+describe("Confirm-time revalidation", () => {
   // ── Financial safety #2: Confirm-time revalidation
   //
   // If the current base rate changes between Admin input/preview and Confirm,
