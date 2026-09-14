@@ -376,9 +376,6 @@ customerHandler.callbackQuery(/^customer:order:cancel:confirm:([a-zA-Z0-9_-]+)$/
         `customer:support:order:${order.id}`
       )
     });
-      parse_mode: "HTML",
-      reply_markup: getCustomerMenuKeyboard(locale)
-    });
     // Admin notification chat (Vietnamese) — audit already recorded in service.
     const fresh = await OrderService.getOrder(orderId);
     if (fresh) await notifyOrderCancelledByCustomer(fresh);
