@@ -111,7 +111,7 @@ export function renderCustomerPreviewText(conv: ConversationWithCustomer, contex
     `👤 <b>Khách</b>: ${shortCustomerLabel(c)}`,
     c.telegramId
       ? `🆔 Telegram ID: <code>${c.telegramId}</code>`
-      : `🆔 Ref: <code>#${c.id.slice(-6).toUpperCase()}</code>`,
+      : `🔖 Ref: <code>#${c.id.slice(-6).toUpperCase()}</code>`,
     `💬 Trạng thái hỗ trợ: ${conv.mode === "HUMAN" ? (conv.claimedById ? "Đang được nhân viên hỗ trợ" : "Đang chờ nhân viên") : "AI tự động"}`
   ];
   if (conv.claimedById) lines.push(`👨‍💼 Người phụ trách: <code>${conv.claimedById}</code>`);
@@ -253,7 +253,7 @@ export function renderReplyModeText(
     `👤 <b>${escapeHtml(name)}</b>`,
     c.telegramId
       ? `🆔 Telegram ID: <code>${c.telegramId}</code>`
-      : `🆔 Ref: <code>#${c.id.slice(-6).toUpperCase()}</code>`
+      : `🔖 Ref: <code>#${c.id.slice(-6).toUpperCase()}</code>`
   ];
   if (context.need) lines.push(`💱 ${escapeHtml(context.need)}`);
   if (context.order) lines.push(`📦 ${escapeHtml(context.order)}`);

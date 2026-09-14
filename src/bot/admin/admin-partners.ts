@@ -59,7 +59,7 @@ async function showPartners(ctx: BotContext): Promise<void> {
 /** PART B row: 🟢 Name · TG id / 🟡 unbound + Ref + Mã GT (no raw CUID primary). */
 function partnerRow(p: any): string[] {
   if (p.telegramId) {
-    return [`🟢 ${escapeHtml(p.displayName)} · TG <code>${escapeHtml(p.telegramId)}</code>`, `Ref: <code>#${escapeHtml(p.id.slice(-6))}</code>`, `Mã GT: <code>${escapeHtml(p.referralCode)}</code>`];
+    return [`🟢 ${escapeHtml(p.displayName)} · TG <code>${escapeHtml(p.telegramId)}</code>`, `CTV Ref: <code>#${escapeHtml(p.id.slice(-6).toUpperCase())}</code>`, `Mã GT: <code>${escapeHtml(p.referralCode)}</code>`];
   }
   return [`🟡 Chưa liên kết Telegram`, `Tên: ${escapeHtml(p.displayName)}`, `Mã GT: <code>${escapeHtml(p.referralCode)}</code>`];
 }
@@ -309,7 +309,7 @@ export async function handlePartnerBindInput(ctx: BotContext, text: string): Pro
   if (holder && holder.id !== partnerId) {
     clearWizard(adminId);
     await ctx.reply(
-      `❌ <b>Telegram ID đã liên kết với CTV khác.</b>\n\nCTV: ${escapeHtml(holder.displayName)}\nRef: #${escapeHtml(holder.id.slice(-6))}\n\nKhông thể gán trùng. Gửi 🔗/🔄 lại để dùng ID khác.`,
+      `❌ <b>Telegram ID đã liên kết với CTV khác.</b>\n\nCTV: ${escapeHtml(holder.displayName)}\nCTV Ref: #${escapeHtml(holder.id.slice(-6).toUpperCase())}\n\nKhông thể gán trùng. Gửi 🔗/🔄 lại để dùng ID khác.`,
       { parse_mode: "HTML" }
     ).catch(() => {});
     return true;

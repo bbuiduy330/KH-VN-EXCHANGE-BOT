@@ -141,6 +141,7 @@ export async function notifyEligibleStaff(
 ): Promise<void> {
   if (!botInstance) return;
 
+  const seen = new Set<string>();
   let staff: any[] = [];
   try {
     staff = await prisma.staffUser.findMany({ where: { status: "ACTIVE" } });
@@ -150,19 +151,107 @@ export async function notifyEligibleStaff(
   }
 
   for (const s of staff) {
+    const tid = String(s.telegramId || "").trim();
+    if (!tid) continue;
+    if (seen.has(tid)) continue; // dedupe by Telegram numeric ID
+    seen.add(tid);
     try {
-      const eligible = await PermissionService.hasPermission(s.telegramId, "conversation.claim");
+      const eligible = await PermissionService.hasPermission(tid, "conversation.claim");
       if (!eligible) continue;
-      await botInstance.api.sendMessage(s.telegramId, text, options);
+      await botInstance.api.sendMessage(tid, text, options);
     } catch (err: any) {
       const msg = String(err?.message || "");
       if (msg.includes("403") || msg.includes("Forbidden")) {
-        logger.info({ staffTelegramId: s.telegramId }, "notifyEligibleStaff: skip (403/forbidden)");
+        logger.info({ staffTelegramId: tid }, "notifyEligibleStaff: skip (403/forbidden)");
       } else {
-        logger.warn({ err: msg, staffTelegramId: s.telegramId }, "notifyEligibleStaff: send failed");
+        logger.warn({ err: msg, staffTelegramId: tid }, "notifyEligibleStaff: send failed");
       }
     }
   }
+}
+
+/**
+ * Support-request recipient list, deduplicated by Telegram numeric ID.
+ * The configured Admin notification chat (often the SAME person as an
+ * ADMIN/SUPER_ADMIN staff row) and all eligible ACTIVE staff collapse into
+ * ONE Set<string> — every recipient appears exactly once.
+ */
+export async function collectSupportRecipients(): Promise<string[]> {
+  const recipients = new Set<string>();
+  const adminChat = SystemConfigService.getAdminNotificationChatId()?.trim();
+  if (adminChat) recipients.add(adminChat);
+  try {
+    const staff: any[] = await prisma.staffUser.findMany({ where: { status: "ACTIVE" } });
+    for (const s of staff) {
+      const tid = String(s.telegramId || "").trim();
+      if (!tid) continue;
+      const eligible = await PermissionService.hasPermission(tid, "conversation.claim").catch(() => false);
+      if (eligible) recipients.add(tid);
+    }
+  } catch (err: any) {
+    logger.warn({ err: err?.message }, "collectSupportRecipients: failed to list staff");
+  }
+  return [...recipients];
+}
+
+/**
+ * ONE support request → ONE notification per recipient.
+ * Merges the Admin notification chat + eligible staff, deduplicated by
+ * Telegram numeric ID, then sends once per unique recipient.
+ */
+export async function notifySupportRequest(
+  text: string,
+  options: { parse_mode?: "HTML" | "MarkdownV2"; reply_markup?: any } = { parse_mode: "HTML" }
+): Promise<void> {
+  if (!botInstance) return;
+  for (const tid of await collectSupportRecipients()) {
+    try {
+      await botInstance.api.sendMessage(tid, text, options);
+    } catch (err: any) {
+      const msg = String(err?.message || "");
+      if (msg.includes("403") || msg.includes("Forbidden")) {
+        logger.info({ staffTelegramId: tid }, "notifySupportRequest: skip (403/forbidden)");
+      } else {
+        logger.warn({ err: msg, staffTelegramId: tid }, "notifySupportRequest: send failed");
+      }
+    }
+  }
+}
+
+/**
+ * Support-request Admin/CSKH notification text:
+ *   🛎 YÊU CẦU HỖ TRỢ
+ *   👤 name
+ *   🆔 Telegram ID: 123
+ *   🔖 Ref: #ABC123
+ * Shows ONLY display name + Telegram numeric ID + public Customer Ref.
+ * NEVER exposes the internal Customer.id or any banking/payment data.
+ */
+export function renderSupportRequestText(customer: {
+  username?: string | null;
+  fullName?: string | null;
+  telegramId?: string | null;
+  id?: string;
+} | null | undefined, contextLabel?: string): string {
+  const header = contextLabel
+    ? `🛎 <b>YÊU CẦU HỖ TRỢ (${contextLabel})</b>`
+    : `🛎 <b>YÊU CẦU HỖ TRỢ</b>`;
+  return [header, "", customerIdentity(customer)].join("\n");
+}
+
+/**
+ * Support-request action keyboard — existing screens only:
+ * claim ticket (C3) / Admin customer profile / latest active order.
+ * Button payloads carry the internal Customer.id (stable callback identity);
+ * the LABELS never show it.
+ */
+export async function supportRequestKeyboard(customerId: string): Promise<InlineKeyboard> {
+  const kb = new InlineKeyboard()
+    .text("💬 Hỗ trợ khách", `cskh:ticket:claim:${customerId}`)
+    .text("👤 Hồ sơ khách", `ops:customer:detail:${customerId}`);
+  const latest = await OrderService.getLatestActiveOrderForCustomer(customerId).catch(() => null);
+  if (latest) kb.row().text("📦 Giao dịch gần nhất", `ops:order:detail:${latest.id}`);
+  return kb;
 }
 
 // ---------------------------------------------------------------------------
