@@ -13,7 +13,8 @@ import { ConversationalAIService } from "../../modules/ai/customer-ai-service.js
 import { FileService } from "../../modules/files/file-service.js";
 import { RuntimeConfigService } from "../../modules/system-config/runtime-config-service.js";
 import { MoneyService } from "../../modules/money/money-service.js";
-import { PartnerService } from "../../modules/partner/partner-service.js";`r`nimport { sendToStaff, sendToAdminNotificationChat, copyMessageToStaff, copyMessageToChat, notifyEligibleStaff, notifySupportRequest, renderSupportRequestText, renderSupportRecentOrders, supportRequestKeyboard, notifyOrderCreated, notifyBillReceived, sendToCustomer, notifyPayoutReady, shouldNotifyPayoutReady } from "../notifications.js";
+import { PartnerService } from "../../modules/partner/partner-service.js";
+import { sendToStaff, sendToAdminNotificationChat, copyMessageToStaff, copyMessageToChat, notifyEligibleStaff, notifySupportRequest, renderSupportRequestText, renderSupportRecentOrders, supportRequestKeyboard, notifyOrderCreated, notifyBillReceived, sendToCustomer, notifyPayoutReady, shouldNotifyPayoutReady } from "../notifications.js";
 import { SystemConfigService } from "../../modules/system-config/system-config-service.js";
 import { generateTransferMemo } from "../../modules/orders/transfer-memo.js";
 import { parsePayoutDestinationText, parsePayoutDestinationPipe, parsePayoutDestinationWithAi, decodePayoutQrImage } from "../../modules/orders/payout-destination.js";

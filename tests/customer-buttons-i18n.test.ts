@@ -9,7 +9,8 @@
  *   - Ordinary messages do NOT re-attach the 4-button inline navigation block
  *     (regression-guarded against the handler source below).
  */
-import { describe, it, expect } from "vitest";`r`nimport { requireCallbackButton } from "./helpers/callback-button.js";
+import { describe, it, expect } from "vitest";
+import { requireCallbackButton } from "./helpers/callback-button.js";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { InlineKeyboard } from "grammy";
