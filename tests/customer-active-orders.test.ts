@@ -8,7 +8,8 @@
  *   binding the internal Order.id) are the customer's receipt.
  * - Full history is STAFF-ONLY (Admin/CSKH CRM + generic-support context).
  */
-import { describe, it, expect, beforeEach } from "vitest";`r`nimport { requireCallbackButton } from "./helpers/callback-button.js";
+import { describe, it, expect, beforeEach } from "vitest";
+import { requireCallbackButton } from "./helpers/callback-button.js";
 import { inMemoryStore, prisma } from "../src/database/client.js";
 import { RuntimeConfigService } from "../src/modules/system-config/runtime-config-service.js";
 import { QuoteService } from "../src/modules/quotes/quote-service.js";
