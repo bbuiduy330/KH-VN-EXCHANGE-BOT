@@ -84,14 +84,14 @@ describe("NEW_REFERRAL notification", () => {
     expect(outcome.assigned).toBe(true);
 
     expect(sent).toHaveLength(1);
-    expect(sent[0].id).toBe(telegramId);
+    expect(requireAt(sent, 0).id).toBe(telegramId);
     // NULL ⇒ bilingual VI + EN:
-    expect(sent[0].text).toContain(t(resolveLocale("vi"), "ctv.notify_new_referral_title"));
-    expect(sent[0].text).toContain(t(resolveLocale("en"), "ctv.notify_new_referral_title"));
-    expect(sent[0].text).toContain("1");
+    expect(requireAt(sent, 0).text).toContain(t(resolveLocale("vi"), "ctv.notify_new_referral_title"));
+    expect(requireAt(sent, 0).text).toContain(t(resolveLocale("en"), "ctv.notify_new_referral_title"));
+    expect(requireAt(sent, 0).text).toContain("1");
     // Privacy: no referred-customer identity (Telegram ID / name / ref) leaks:
-    expect(sent[0].text).not.toContain(customer.telegramId);
-    expect(sent[0].text).not.toContain(customer.id);
+    expect(requireAt(sent, 0).text).not.toContain(customer.telegramId);
+    expect(requireAt(sent, 0).text).not.toContain(customer.id);
   });
 
   it("repeated /start (ALREADY_ASSIGNED) never re-notifies", async () => {
@@ -120,14 +120,14 @@ describe("NEW_REFERRAL notification", () => {
     const vi = await makeBoundPartner("vi");
     const c1 = await CustomerService.getOrCreateCustomer({ telegramId: uniqueId() });
     await PartnerService.claimReferral(`ref_${vi.partner.referralCode}`, c1.telegramId);
-    expect(sent[0].text).toContain(t(resolveLocale("vi"), "ctv.notify_new_referral_title"));
-    expect(sent[0].text).not.toContain(t(resolveLocale("en"), "ctv.notify_new_referral_title"));
+    expect(requireAt(sent, 0).text).toContain(t(resolveLocale("vi"), "ctv.notify_new_referral_title"));
+    expect(requireAt(sent, 0).text).not.toContain(t(resolveLocale("en"), "ctv.notify_new_referral_title"));
 
     const en = await makeBoundPartner("en");
     const c2 = await CustomerService.getOrCreateCustomer({ telegramId: uniqueId() });
     await PartnerService.claimReferral(`ref_${en.partner.referralCode}`, c2.telegramId);
-    expect(sent[1].text).toContain(t(resolveLocale("en"), "ctv.notify_new_referral_title"));
-    expect(sent[1].text).not.toContain(t(resolveLocale("vi"), "ctv.notify_new_referral_title"));
+    expect(requireAt(sent, 1).text).toContain(t(resolveLocale("en"), "ctv.notify_new_referral_title"));
+    expect(requireAt(sent, 1).text).not.toContain(t(resolveLocale("vi"), "ctv.notify_new_referral_title"));
   });
 
   it("Telegram failure does NOT undo the referral attribution", async () => {
@@ -160,7 +160,7 @@ describe("COMMISSION_EARNED notification", () => {
     ]);
 
     expect(sent).toHaveLength(1);
-    const text = sent[0].text;
+    const text = requireAt(sent, 0).text;
     expect(text).toContain(t(resolveLocale("vi"), "ctv.notify_earned_title"));
     expect(text).toContain(formatPublicOrderRef(order)); // canonical public Ref
     expect(text).not.toContain(order.id); // raw internal id absent
@@ -199,8 +199,8 @@ describe("COMMISSION_EARNED notification", () => {
     ]);
 
     expect(sent).toHaveLength(2);
-    const toL1 = sent.find((s) => s.id === l1.telegramId)!!;
-    const toL2 = sent.find((s) => s.id === l2.telegramId)!!;
+    const toL1 = requireSentTo(l1.telegramId);
+    const toL2 = requireSentTo(l2.telegramId);
     expect(toL1.text).toContain("L1");
     expect(toL1.text).toContain("$1.00");
     expect(toL1.text).not.toContain("$0.40"); // L2 amount never leaks to L1
@@ -246,8 +246,8 @@ describe("Partner.language = NULL bilingual fallback for EVERY notification type
       }
     ]);
     expect(sent).toHaveLength(1);
-    expect(sent[0].text).toContain(t(resolveLocale("vi"), "ctv.notify_network_title"));
-    expect(sent[0].text).toContain(t(resolveLocale("en"), "ctv.notify_network_title"));
+    expect(requireAt(sent, 0).text).toContain(t(resolveLocale("vi"), "ctv.notify_network_title"));
+    expect(requireAt(sent, 0).text).toContain(t(resolveLocale("en"), "ctv.notify_network_title"));
   });
 
   it("COMMISSION_AVAILABLE NULL ⇒ bilingual VI + EN", async () => {
@@ -267,8 +267,8 @@ describe("Partner.language = NULL bilingual fallback for EVERY notification type
     });
     await PartnerService.reconcileAvailableCommissions();
     expect(sent).toHaveLength(1);
-    expect(sent[0].text).toContain(t(resolveLocale("vi"), "ctv.notify_available_title"));
-    expect(sent[0].text).toContain(t(resolveLocale("en"), "ctv.notify_available_title"));
+    expect(requireAt(sent, 0).text).toContain(t(resolveLocale("vi"), "ctv.notify_available_title"));
+    expect(requireAt(sent, 0).text).toContain(t(resolveLocale("en"), "ctv.notify_available_title"));
   });
 
   it("REVERSED NULL ⇒ bilingual VI + EN", async () => {
@@ -287,8 +287,8 @@ describe("Partner.language = NULL bilingual fallback for EVERY notification type
       }
     });
     await PartnerService.reverseCommission("admin-test", commission.id, "duplicate bill review");
-    expect(sent[0].text).toContain(t(resolveLocale("vi"), "ctv.notify_reversed_title"));
-    expect(sent[0].text).toContain(t(resolveLocale("en"), "ctv.notify_reversed_title"));
+    expect(requireAt(sent, 0).text).toContain(t(resolveLocale("vi"), "ctv.notify_reversed_title"));
+    expect(requireAt(sent, 0).text).toContain(t(resolveLocale("en"), "ctv.notify_reversed_title"));
   });
 
   it("in-transaction attempt that ROLLS BACK sends NO commission notification", async () => {
@@ -336,10 +336,10 @@ describe("HELD→AVAILABLE + REVERSED notifications", () => {
     expect(released).toBe(3);
     // ONE aggregated message per Partner:
     expect(sent).toHaveLength(2);
-    const toA = sent.find((s) => s.id === a.telegramId)!!;
+    const toA = requireSentTo(a.telegramId);
     expect(toA.text).toContain("2"); // aggregated count
     expect(toA.text).toContain("$5.00"); // 2 + 3 newly available
-    const toB = sent.find((s) => s.id === b.telegramId)!!;
+    const toB = requireSentTo(b.telegramId);
     expect(toB.text).toContain("$3.00");
 
     // Second run: nothing HELD left → no new notifications (no duplicates).
@@ -368,10 +368,28 @@ describe("HELD→AVAILABLE + REVERSED notifications", () => {
     await PartnerService.reverseCommission("admin-test", commission.id, "duplicate bill review");
 
     expect(sent).toHaveLength(1);
-    expect(sent[0].text).toContain(t(resolveLocale("vi"), "ctv.notify_reversed_title"));
-    expect(sent[0].text).toContain("-$1.00");
-    expect(sent[0].text).toContain("duplicate bill review");
+    expect(requireAt(sent, 0).text).toContain(t(resolveLocale("vi"), "ctv.notify_reversed_title"));
+    expect(requireAt(sent, 0).text).toContain("-$1.00");
+    expect(requireAt(sent, 0).text).toContain("duplicate bill review");
     const fresh: any = await prisma.commission.findUnique({ where: { id: commission.id } });
     expect(fresh.status).toBe("REVERSED"); // persisted truth unchanged
   });
 });
+
+/** Strict indexed access for noUncheckedIndexedAccess (no `!` needed). */
+function requireAt<T>(items: readonly T[], index: number): T {
+  const value = items[index];
+  if (value === undefined) {
+    throw new Error(`Expected a captured notification at index ${index}`);
+  }
+  return value;
+}
+
+/** Strict find by recipient Telegram ID for captured notifications. */
+function requireSentTo(telegramId: string): Captured {
+  const found = sent.find((s) => s.id === telegramId);
+  if (!found) {
+    throw new Error(`Expected a notification sent to ${telegramId}`);
+  }
+  return found;
+}

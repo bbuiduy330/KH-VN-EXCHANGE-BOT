@@ -75,7 +75,7 @@ describe("Message-specific inline buttons: localized labels, STABLE callback_dat
   it("quote confirm: localized label, identical callback across locales", () => {
     const callbacks = LOCALES.map((loc) => {
       const kb = quoteConfirmKb(loc, "Q-1");
-      const btn = kb.inline_keyboard.flat()[0];
+      const btn = requireCallbackButton(kb.inline_keyboard.flat()[0]);
       expect(String(btn.text)).toBe(t(resolveLocale(loc), "quote.confirm_btn"));
       expect(String(btn.text)).not.toContain("\uFFFD");
       return String(btn.callback_data);
@@ -112,10 +112,12 @@ describe("Message-specific inline buttons: localized labels, STABLE callback_dat
         .text(t(locT, "clearchat.back"), "customer:clearchat:back")
         .text(t(locT, "menu.support"), "customer:menu:support");
       const btns = kb.inline_keyboard.flat().map((b) => requireCallbackButton(b));
-      expect(String(btns[0].text)).toBe(t(locT, "clearchat.back"));
-      expect(String(btns[1].text)).toBe(t(locT, "menu.support"));
-      expect(String(btns[0].callback_data)).toBe("customer:clearchat:back");
-      expect(String(btns[1].callback_data)).toBe("customer:menu:support");
+      const back = requireCallbackButton(btns[0]);
+      const support = requireCallbackButton(btns[1]);
+      expect(String(back.text)).toBe(t(locT, "clearchat.back"));
+      expect(String(support.text)).toBe(t(locT, "menu.support"));
+      expect(String(back.callback_data)).toBe("customer:clearchat:back");
+      expect(String(support.callback_data)).toBe("customer:menu:support");
     }
   });
 
@@ -125,7 +127,7 @@ describe("Message-specific inline buttons: localized labels, STABLE callback_dat
         t(resolveLocale(loc), "payout.support_btn"),
         "customer:support:order:O-9"
       );
-      const btn = kb.inline_keyboard.flat()[0];
+      const btn = requireCallbackButton(kb.inline_keyboard.flat()[0]);
       expect(String(btn.text)).toBe(t(resolveLocale(loc), "payout.support_btn"));
       return String(btn.callback_data);
     });
