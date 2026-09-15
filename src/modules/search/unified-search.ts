@@ -124,6 +124,7 @@ const SCAN_CAP = 1000;
  */
 export async function unifiedSearch(rawQuery: string): Promise<UnifiedSearchResults> {
   const { prisma } = await import("../../database/client.js");
+  const { formatPublicOrderRef } = await import("../orders/order-ref.js");
   const hints = parseQueryHints(rawQuery);
   const q = hints.raw;
   const empty: UnifiedSearchResults = { customers: [], orders: [], partners: [] };
@@ -162,15 +163,18 @@ export async function unifiedSearch(rawQuery: string): Promise<UnifiedSearchResu
     take: SCAN_CAP,
     select: {
       id: true, customerId: true, sourceAmount: true, targetAmount: true,
-      sourceCurrency: true, targetCurrency: true, status: true, transferMemo: true
+      sourceCurrency: true, targetCurrency: true, status: true, transferMemo: true,
+      publicRef: true
     }
   });
   const customerById = new Map(customerRows.map((c: any) => [c.id, c]));
   for (const o of orderRows) {
     const customer: any = customerById.get(o.customerId);
-    const ref = String(o.id || "").slice(-6).toUpperCase();
+    // CANONICAL PUBLIC ORDER REF — stored publicRef (or legacy suffix fallback).
+    const ref = formatPublicOrderRef(o);
     let rank = Math.max(
       rankTextMatch(q, ref),
+      rankTextMatch(q, String(o.publicRef ?? "")),
       rankTextMatch(q, String(o.transferMemo ?? "")),
       rankTextMatch(q, String(o.id || "")),
       customer ? rankFields(q, [customer.fullName, customer.username]) : 0,
@@ -193,7 +197,7 @@ export async function unifiedSearch(rawQuery: string): Promise<UnifiedSearchResu
       orders.push({
         kind: "order",
         id: o.id,
-        title: `#${ref} · ${who} · ${Number(o.sourceAmount)} ${o.sourceCurrency} → ${Number(o.targetAmount)} ${o.targetCurrency}`,
+        title: `${ref} · ${who} · ${Number(o.sourceAmount)} ${o.sourceCurrency} → ${Number(o.targetAmount)} ${o.targetCurrency}`,
         subtitle: o.status,
         rank
       });

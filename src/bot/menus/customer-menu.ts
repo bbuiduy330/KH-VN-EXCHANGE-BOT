@@ -6,6 +6,7 @@ import { RuntimeConfigService } from "../../modules/system-config/runtime-config
 import { escapeHtml } from "./cskh-panel.js";
 import { SystemConfigService } from "../../modules/system-config/system-config-service.js";
 import { generateTransferMemo } from "../../modules/orders/transfer-memo.js";
+import { formatPublicOrderRef } from "../../modules/orders/order-ref.js";
 import {
   DEFAULT_LOCALE,
   LOCALE_LABELS,
@@ -146,7 +147,7 @@ export async function renderActiveOrderText(
 
   let msg =
     `${t(loc, "order.active_title")}\n\n` +
-    `${t(loc, "order.id", { id: order.id })}\n` +
+    `${t(loc, "order.id", { id: formatPublicOrderRef(order) })}\n` +
     `${t(loc, "order.exchange", { src: `${srcAmt} ${order.sourceCurrency}`, tgt: `${tgtAmt} ${order.targetCurrency}` })}\n` +
     `${t(loc, "order.status", { status: statusLabel === statusKey ? order.status : statusLabel })}\n`;
 
@@ -208,11 +209,69 @@ export function renderQuoteCard(
   const formattedTgt = MoneyService.formatAmount(quote.targetAmount, quote.targetCurrency);
 
   // C — concise, action-first quote. One summary line + rate/fee/expiry.
-  const body =
-    `${t(loc, "quote.summary", { src: `${formattedSrc} ${quote.sourceCurrency}`, tgt: `${formattedTgt} ${quote.targetCurrency}` })}\n` +
-    `${t(loc, "quote.rate", { rate: rateDisplay })}\n` +
-    `${t(loc, "quote.fee", { fee: `${quote.fee} ${quote.feeCurrency}` })}\n` +
-    `${t(loc, "quote.expiry", { minutes: expiryMinutes })}`;
+  let body: string;
+  if (
+    (quote.rateSide === "SOURCE_FIXED" || quote.rateSide === "TARGET_FIXED") &&
+    quote.displayRate !== null
+  ) {
+    // TRANSPARENT BREAKDOWN — the quote froze its fixed side + authoritative
+    // display rate + USD conversion chain, so the card can show the real
+    // calculation. The displayed rate is the Quote's OWN frozen rate via
+    // formatFrozenRate — NEVER sourceAmount/targetAmount (fee + rounding make
+    // that ratio differ from the actual FX rate).
+    const rateSide = quote.rateSide;
+    const displayRate = quote.displayRate;
+    const rateDisplayFrozen = MoneyService.formatFrozenRate(
+      rateSide,
+      quote.sourceCurrency,
+      quote.targetCurrency,
+      displayRate
+    );
+    const srcAmt = `${formattedSrc} ${quote.sourceCurrency}`;
+    const tgtAmt = `${formattedTgt} ${quote.targetCurrency}`;
+    const lines: string[] = [
+      t(loc, "quote.summary", { src: srcAmt, tgt: tgtAmt }),
+      t(loc, "quote.line.rate", { rate: rateDisplayFrozen })
+    ];
+    if (quote.conversionUsd !== null) {
+      // SOURCE_FIXED: informational gross conversion (currency-rounded, the net
+      // is what matters). TARGET_FIXED: the payer chain is computed on the
+      // EXACT conversion, so show it exactly (e.g. 78.125 USD).
+      const conversion = quote.conversionUsd;
+      const shown =
+        rateSide === "SOURCE_FIXED" || conversion.isInteger()
+          ? MoneyService.formatAmount(conversion, "USD")
+          : conversion.toString();
+      lines.push(t(loc, "quote.line.conversion", { amount: `${shown} USD` }));
+    }
+    if (quote.feeUsd !== null) {
+      const feeShown = `${MoneyService.formatAmount(quote.feeUsd, "USD")} USD`;
+      lines.push(t(loc, rateSide === "SOURCE_FIXED" ? "quote.line.fee_minus" : "quote.line.fee_plus", { fee: feeShown }));
+    }
+    if (rateSide === "SOURCE_FIXED") {
+      // Fee absorbed from the USD side: the frozen target IS the net received.
+      lines.push(t(loc, "quote.line.net_received", { amount: tgtAmt }));
+    } else {
+      // Fee added on top of the payer: the requested target stays EXACT — it is
+      // NEVER recomputed from the rounded payer amount.
+      if (quote.payerAmountExact !== null) {
+        lines.push(t(loc, "quote.line.total_to_pay", { amount: `${quote.payerAmountExact.toString()} ${quote.sourceCurrency}` }));
+        lines.push(t(loc, "quote.line.payment_rounded", { amount: srcAmt }));
+      } else {
+        lines.push(t(loc, "quote.line.total_to_pay", { amount: srcAmt }));
+      }
+      lines.push(t(loc, "quote.line.customer_receives", { amount: tgtAmt }));
+    }
+    lines.push(t(loc, "quote.expiry", { minutes: expiryMinutes }));
+    body = lines.join("\n");
+  } else {
+    // Legacy compact card — pre-transparency rows keep their original rendering.
+    body =
+      `${t(loc, "quote.summary", { src: `${formattedSrc} ${quote.sourceCurrency}`, tgt: `${formattedTgt} ${quote.targetCurrency}` })}\n` +
+      `${t(loc, "quote.rate", { rate: rateDisplay })}\n` +
+      `${t(loc, "quote.fee", { fee: `${quote.fee} ${quote.feeCurrency}` })}\n` +
+      `${t(loc, "quote.expiry", { minutes: expiryMinutes })}`;
+  }
 
   // Footer: customer's locale → nothing (NO cross-locale fallback unless the
   // Admin explicitly configured that locale). Escaped plain text, appended

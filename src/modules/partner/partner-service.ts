@@ -263,6 +263,22 @@ export class PartnerService {
     return `****${n.slice(-4)}`;
   }
 
+  /**
+   * CTV UI language — vi | en ONLY (product decision; independent from the
+   * Customer's vi/en/km/zh locale). Persisted on Partner.language; NULL means
+   * the partner has not chosen yet (the /ctv picker shows next time).
+   */
+  static async setLanguage(partnerId: string, language: string, updatedBy: string): Promise<void> {
+    const lang = String(language || "").trim().toLowerCase();
+    if (lang !== "vi" && lang !== "en") {
+      throw new Error("Partner language must be 'vi' or 'en'.");
+    }
+    await prisma.partner.update({
+      where: { id: partnerId },
+      data: { language: lang }
+    });
+  }
+
   static async setPayoutDestination(
     partnerId: string,
     data: { text: string }

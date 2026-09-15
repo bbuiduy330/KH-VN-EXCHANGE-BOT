@@ -4,6 +4,7 @@ import { BotContext } from "../middleware/identity.js";
 import { requirePermission } from "../middleware/permissions.js";
 import { ConversationService } from "../../modules/conversation/conversation-service.js";
 import { OrderService } from "../../modules/orders/order-service.js";
+import { formatPublicOrderRef } from "../../modules/orders/order-ref.js";
 import { QuoteService } from "../../modules/quotes/quote-service.js";
 import { PermissionService } from "../../modules/permissions/permission-service.js";
 import { prisma } from "../../database/client.js";
@@ -875,7 +876,7 @@ cskhHandler.callbackQuery(/^cskh:order:([a-zA-Z0-9_-]+)$/, async (ctx) => {
   const src = `${Number(order.sourceAmount)} ${order.sourceCurrency}`;
   const tgt = `${Number(order.targetAmount)} ${order.targetCurrency}`;
   const text =
-    `📦 <b>Đơn hàng</b> <code>${order.id.slice(-6)}</code>\n\n` +
+    `📦 <b>Đơn hàng</b> <code>${formatPublicOrderRef(order)}</code>\n\n` +
     `• Trạng thái: <code>${order.status}</code>\n` +
     `• Đổi: <b>${src}</b> ➔ <b>${tgt}</b>\n` +
     `• Tỷ giá: <b>${Number(order.rate)}</b> · Phí: <b>${Number(order.fee)} ${order.feeCurrency}</b>\n` +

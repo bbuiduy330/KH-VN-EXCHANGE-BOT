@@ -69,6 +69,16 @@ model Quote {
   baseRate       Decimal     @db.Decimal(18, 6)
   fee            Decimal     @db.Decimal(18, 6)
   feeCurrency    String
+  // TRANSPARENT QUOTE BREAKDOWN — ADDITIVE, all nullable (NULL ⇒ legacy quote,
+  // rendered by the legacy compact card; historical financial amounts are never
+  // rewritten). Freezes WHICH side the customer fixed and the AUTHORITATIVE
+  // display rate, so a later render never derives the rate from
+  // sourceAmount/targetAmount (the fee + rounding make that ratio wrong).
+  rateSide         String?
+  displayRate      Decimal? @db.Decimal(18, 6)
+  conversionUsd    Decimal? @db.Decimal(18, 6)
+  feeUsd           Decimal? @db.Decimal(18, 6)
+  payerAmountExact Decimal? @db.Decimal(18, 6)
   status         QuoteStatus @default(PENDING)
   expiresAt      DateTime
   confirmedAt    DateTime?
@@ -436,6 +446,10 @@ model Partner {
   // Reference information only — Admin manually reviews and pays.
   payoutDestinationText String?
   payoutQrFileId        String?
+  // CTV UI language: "vi" | "en" (NULL = picker shown on next /ctv).
+  // Independent from Customer.language — one person may be a km customer
+  // and an en partner. Never inferred from customer locale.
+  language              String?
   // E1 — 5-level CTV hierarchy (L2..L5 upline). Commission originates ONLY
   // from real COMPLETED customer Orders — never for recruiting.
   parentPartnerId String?

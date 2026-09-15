@@ -32,6 +32,7 @@ import { OrderService } from "../orders/order-service.js";
 import { FileService } from "../files/file-service.js";
 import { AUTO_CANCEL_MIN } from "../orders/payment-reminder-service.js";
 import { MoneyService } from "../money/money-service.js";
+import { formatPublicOrderRef } from "../orders/order-ref.js";
 import { renderPaymentCardSafe } from "./payment-qr-card-renderer.js";
 import { prisma } from "../../database/client.js";
 
@@ -352,7 +353,8 @@ export class PaymentQrService {
     const currency = String(order.sourceCurrency || "");
     // FROZEN Order.transferMemo (legacy-null fallback inside the accessor).
     const memo = await OrderService.getOrderTransferMemo(order);
-    const orderRef = `#${order.id.slice(-6).toUpperCase()}`;
+    // CANONICAL PUBLIC ORDER REF — never a raw/truncated internal Order.id.
+    const orderRef = formatPublicOrderRef(order);
     const fileBuffer = snapshot.qrFilePath
       ? await FileService.getFile(String(snapshot.qrFilePath)).catch(() => null)
       : null;

@@ -1,7 +1,7 @@
 import { Decimal } from "decimal.js";
 import { prisma } from "../../database/client.js";
 import { RuntimeConfigService } from "../system-config/runtime-config-service.js";
-import { MoneyService } from "../money/money-service.js";
+import { MoneyService, RateSide } from "../money/money-service.js";
 import { AuditService } from "../audit/audit-service.js";
 
 export interface QuoteCalculation {
@@ -9,11 +9,33 @@ export interface QuoteCalculation {
   targetCurrency: string;
   sourceAmount: Decimal;
   targetAmount: Decimal;
+  /**
+   * FROZEN internal multiplier — historical semantics, unchanged.
+   *   source-side USD->VND : effectiveBuy (VND per USD)
+   *   source-side VND->USD : 1 / effectiveSell (USD per VND)
+   *   target-side          : the applicable VND-per-USD rate itself
+   * Kept byte-identical so historical Quote/Order snapshots keep their meaning.
+   */
   effectiveRate: Decimal;
   baseRate: Decimal;
   fee: Decimal;
   feeCurrency: string;
   expiresAt: Date;
+  /** Which side the customer explicitly FIXED. */
+  rateSide: RateSide;
+  /**
+   * AUTHORITATIVE frozen display rate — the rate the customer is shown.
+   * Always the applicable VND-per-USD rate (>= 1) for the USD<->VND business.
+   * NEVER derived from sourceAmount/targetAmount (fee + rounding would make
+   * that ratio differ from the real FX rate).
+   */
+  displayRate: Decimal;
+  /** Pure FX conversion in USD BEFORE the service fee; null with no USD leg. */
+  conversionUsd: Decimal | null;
+  /** Service fee in USD (positive magnitude); null when fee is not USD. */
+  feeUsd: Decimal | null;
+  /** TARGET_FIXED only: exact payer amount BEFORE currency rounding. */
+  payerAmountExact: Decimal | null;
 }
 
 export class QuoteService {
@@ -212,6 +234,25 @@ export class QuoteService {
     const expiryMinutes = RuntimeConfigService.getQuoteExpiryMinutes();
     const expiresAt = new Date(Date.now() + expiryMinutes * 60 * 1000);
 
+    // TRANSPARENT BREAKDOWN — every value below is frozen at quote time.
+    // displayRate is the AUTHORITATIVE applicable rate, taken directly from the
+    // frozen rate representation and NEVER from sourceAmount/targetAmount.
+    //   rateDirect  (USD->VND): the stored multiplier IS already VND-per-USD.
+    //   rateInverse (VND->USD): the stored multiplier is USD-per-VND, so the
+    //                           applicable sell rate is its exact reciprocal.
+    const displayRate = rateDirect ? effectiveRate : new Decimal(1).dividedBy(effectiveRate);
+    // USD conversion leg. SOURCE_FIXED with a USD fee: the fee is absorbed from
+    // the USD principal BEFORE conversion (100 USD - 3 USD = 97 USD converted),
+    // so the shown conversion reconciles exactly with the frozen target.
+    const conversionUsd =
+      src === "USD"
+        ? feeCurrency === "USD"
+          ? sourceAmount.minus(fee)
+          : sourceAmount
+        : tgt === "USD"
+          ? sourceAmount.times(effectiveRate)
+          : null;
+
     return {
       sourceCurrency: src,
       targetCurrency: tgt,
@@ -221,7 +262,12 @@ export class QuoteService {
       baseRate,
       fee,
       feeCurrency,
-      expiresAt
+      expiresAt,
+      rateSide: "SOURCE_FIXED" as RateSide,
+      displayRate,
+      conversionUsd,
+      feeUsd: feeCurrency === "USD" ? fee : null,
+      payerAmountExact: null
     };
   }
 
@@ -248,6 +294,11 @@ export class QuoteService {
         baseRate: calc.baseRate,
         fee: calc.fee,
         feeCurrency: calc.feeCurrency,
+        rateSide: calc.rateSide,
+        displayRate: calc.displayRate,
+        conversionUsd: calc.conversionUsd,
+        feeUsd: calc.feeUsd,
+        payerAmountExact: calc.payerAmountExact,
         status: "PENDING",
         expiresAt: calc.expiresAt
       }
@@ -335,7 +386,11 @@ export class QuoteService {
 
     // Round the source UP onto the currency grid, then bump by one grid step
     // until the forward result covers the requested target (rounding-safe).
-    sourceAmount = MoneyService.roundSourceAmount(sourceAmount, src);
+    // The EXACT payer amount is kept for the transparent breakdown ("exact
+    // 81.125 -> payment rounded 81.13"). It is DISPLAY-ONLY and never replaces
+    // the rounded, payable source amount.
+    const payerAmountPreRounding = sourceAmount;
+    sourceAmount = MoneyService.roundPayerAmount(sourceAmount, src);
     const step = new Decimal(src === "USD" ? "0.01" : "1");
     let guard = 0;
     while (forwardTarget(sourceAmount).lessThan(desiredTarget) && guard < 10000) {
@@ -349,16 +404,38 @@ export class QuoteService {
     const expiryMinutes = RuntimeConfigService.getQuoteExpiryMinutes();
     const expiresAt = new Date(Date.now() + expiryMinutes * 60 * 1000);
 
+    // FIXED-AMOUNT PRINCIPLE — the customer asked to RECEIVE `desiredTarget`
+    // exactly, so the frozen targetAmount IS the customer's requested amount and
+    // is NEVER recomputed from the rounded payer amount. That recomputation was
+    // what produced "81.13 USD -> 2 000 100 VND" instead of "-> 2 000 000 VND".
+    // Safety: sourceAmount was rounded UP onto the currency grid and bumped
+    // until forwardTarget(sourceAmount) >= desiredTarget, so freezing the
+    // requested target can never underfund the customer.
+    const frozenTarget = MoneyService.roundTargetAmount(desiredTarget, tgt);
+
+    // TRANSPARENT BREAKDOWN. Target-side quotes store the applicable
+    // VND-per-USD rate on both branches (buy side for USD->VND, sell side for
+    // VND->USD), so displayRate is that frozen rate as-is — never derived from
+    // sourceAmount/targetAmount.
+    const displayRate = effectiveRate;
+    const conversionUsd =
+      src === "USD" ? desiredTarget.dividedBy(displayRate) : tgt === "USD" ? frozenTarget : null;
+
     return {
       sourceCurrency: src,
       targetCurrency: tgt,
       sourceAmount,
-      targetAmount: MoneyService.roundTargetAmount(forwardTarget(sourceAmount), tgt),
+      targetAmount: frozenTarget,
       effectiveRate,
       baseRate,
       fee,
       feeCurrency,
-      expiresAt
+      expiresAt,
+      rateSide: "TARGET_FIXED" as RateSide,
+      displayRate,
+      conversionUsd,
+      feeUsd: feeCurrency === "USD" ? fee : null,
+      payerAmountExact: sourceAmount.equals(payerAmountPreRounding) ? null : payerAmountPreRounding
     };
   }
 
@@ -385,6 +462,11 @@ export class QuoteService {
         baseRate: calc.baseRate,
         fee: calc.fee,
         feeCurrency: calc.feeCurrency,
+        rateSide: calc.rateSide,
+        displayRate: calc.displayRate,
+        conversionUsd: calc.conversionUsd,
+        feeUsd: calc.feeUsd,
+        payerAmountExact: calc.payerAmountExact,
         status: "PENDING",
         expiresAt: calc.expiresAt
       }
