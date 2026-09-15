@@ -113,7 +113,7 @@ describe("Partner locale is INDEPENDENT from Customer locale", () => {
     const customer = await CustomerService.getOrCreateCustomer({ telegramId: uniqueId() });
     await CustomerService.setLanguage(customer.id, "km");
 
-    await PartnerService.setLanguage(partner.id, "en");
+    await PartnerService.setLanguage(partner.id, "en", "test");
     const freshCustomer = await CustomerService.getOrCreateCustomer({ telegramId: customer.telegramId });
     expect(freshCustomer.language).toBe("km");
 

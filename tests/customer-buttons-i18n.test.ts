@@ -9,7 +9,7 @@
  *   - Ordinary messages do NOT re-attach the 4-button inline navigation block
  *     (regression-guarded against the handler source below).
  */
-import { describe, it, expect } from "vitest";
+import { describe, it, expect } from "vitest";`r`nimport { requireCallbackButton } from "./helpers/callback-button.js";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { InlineKeyboard } from "grammy";
@@ -92,12 +92,12 @@ describe("Message-specific inline buttons: localized labels, STABLE callback_dat
         .row()
         .text(t(locT, "order.payinfo_btn"), "customer:order:payinfo:O-1")
         .text(t(locT, "order.bill_btn"), "customer:bill:upload:O-1");
-      const btns = kb.inline_keyboard.flat();
+      const btns = kb.inline_keyboard.flat().map((b) => requireCallbackButton(b));
       for (const b of btns) {
         expect(String(b.text)).not.toMatch(/^(order|payout|menu)\./);
         expect(String(b.text)).not.toContain("\uFFFD");
       }
-      const data = btns.map((b) => String(b.callback_data)).join("|");
+      const data = btns.map((b) => String(requireCallbackButton(b).callback_data)).join("|");
       expect(data).toBe(
         "customer:order:cancel:confirm:O-1|customer:order:keep:O-1|customer:order:payinfo:O-1|customer:bill:upload:O-1"
       );
@@ -110,7 +110,7 @@ describe("Message-specific inline buttons: localized labels, STABLE callback_dat
       const kb = new InlineKeyboard()
         .text(t(locT, "clearchat.back"), "customer:clearchat:back")
         .text(t(locT, "menu.support"), "customer:menu:support");
-      const btns = kb.inline_keyboard.flat();
+      const btns = kb.inline_keyboard.flat().map((b) => requireCallbackButton(b));
       expect(String(btns[0].text)).toBe(t(locT, "clearchat.back"));
       expect(String(btns[1].text)).toBe(t(locT, "menu.support"));
       expect(String(btns[0].callback_data)).toBe("customer:clearchat:back");
@@ -134,7 +134,7 @@ describe("Message-specific inline buttons: localized labels, STABLE callback_dat
 
   it("language picker stays inline and locale-neutral (choices are the locales)", () => {
     const kb = getLanguageSelectorKeyboard();
-    const data = kb.inline_keyboard.flat().map((b) => String(b.callback_data));
+    const data = kb.inline_keyboard.flat().map((b) => String(requireCallbackButton(b).callback_data));
     expect(data).toEqual(["customer:lang:vi", "customer:lang:en", "customer:lang:km", "customer:lang:zh"]);
   });
 });

@@ -1,4 +1,5 @@
 import { Composer, InlineKeyboard, InputFile } from "grammy";
+import QRCode from "qrcode";
 import { BotContext } from "../middleware/identity.js";
 import { env } from "../../config/env.js";
 import { logger } from "../../shared/logger.js";
@@ -12,7 +13,7 @@ import { ConversationalAIService } from "../../modules/ai/customer-ai-service.js
 import { FileService } from "../../modules/files/file-service.js";
 import { RuntimeConfigService } from "../../modules/system-config/runtime-config-service.js";
 import { MoneyService } from "../../modules/money/money-service.js";
-import { sendToStaff, sendToAdminNotificationChat, copyMessageToStaff, copyMessageToChat, notifyEligibleStaff, notifySupportRequest, renderSupportRequestText, renderSupportRecentOrders, supportRequestKeyboard, notifyOrderCreated, notifyBillReceived, sendToCustomer, notifyPayoutReady, shouldNotifyPayoutReady } from "../notifications.js";
+import { PartnerService } from "../../modules/partner/partner-service.js";`r`nimport { sendToStaff, sendToAdminNotificationChat, copyMessageToStaff, copyMessageToChat, notifyEligibleStaff, notifySupportRequest, renderSupportRequestText, renderSupportRecentOrders, supportRequestKeyboard, notifyOrderCreated, notifyBillReceived, sendToCustomer, notifyPayoutReady, shouldNotifyPayoutReady } from "../notifications.js";
 import { SystemConfigService } from "../../modules/system-config/system-config-service.js";
 import { generateTransferMemo } from "../../modules/orders/transfer-memo.js";
 import { parsePayoutDestinationText, parsePayoutDestinationPipe, parsePayoutDestinationWithAi, decodePayoutQrImage } from "../../modules/orders/payout-destination.js";
@@ -1999,7 +2000,7 @@ customerHandler.command("ctv", async (ctx) => {
 
 export async function showCtvDashboard(ctx: BotContext): Promise<void> {
   const telegramId = String(ctx.from?.id || "");
-  const { PartnerService } = await import("../../modules/partner/partner-service.js");
+
   const { getBotInstance } = await import("../notifications.js");
 
   const partner = await PartnerService.getPartnerByTelegramId(telegramId);
@@ -2061,7 +2062,7 @@ export async function showCtvDashboard(ctx: BotContext): Promise<void> {
  * and fully independent from the Customer's vi/en/km/zh locale. NULL (not yet
  * chosen) falls back to Vietnamese, which only the pre-picker messages use.
  */
-function ctvT(partner: { language?: string | null }, key: string, vars?: Record<string, unknown>): string {
+function ctvT(partner: { language?: string | null }, key: string, vars?: Record<string, string | number>): string {
   return t(partner?.language === "en" ? "en" : "vi", key, vars);
 }
 
@@ -2087,7 +2088,7 @@ customerHandler.callbackQuery("ctv:home", async (ctx) => {
 customerHandler.callbackQuery("ctv:lang", async (ctx) => {
   await ctx.answerCallbackQuery();
   const telegramId = String(ctx.from?.id || "");
-  const { PartnerService } = await import("../../modules/partner/partner-service.js");
+
   const partner = await PartnerService.getPartnerByTelegramId(telegramId);
   if (!partner || partner.status !== "ACTIVE") return;
   await ctx.reply(ctvT(partner, "ctv.pick_title"), {
@@ -2102,7 +2103,7 @@ customerHandler.callbackQuery(/^ctv:lang:(vi|en)$/, async (ctx) => {
   await ctx.answerCallbackQuery();
   const chosen = ctx.match?.[1] === "en" ? "en" : "vi";
   const telegramId = String(ctx.from?.id || "");
-  const { PartnerService } = await import("../../modules/partner/partner-service.js");
+
   const partner = await PartnerService.getPartnerByTelegramId(telegramId);
   if (!partner || partner.status !== "ACTIVE") return;
   await PartnerService.setLanguage(partner.id, chosen, telegramId);
@@ -2114,25 +2115,49 @@ customerHandler.callbackQuery(/^ctv:lang:(vi|en)$/, async (ctx) => {
 customerHandler.callbackQuery("ctv:link", async (ctx) => {
   await ctx.answerCallbackQuery();
   const telegramId = String(ctx.from?.id || "");
-  const { PartnerService } = await import("../../modules/partner/partner-service.js");
+
   const { getBotInstance } = await import("../notifications.js");
   const partner = await PartnerService.getPartnerByTelegramId(telegramId);
   if (!partner || partner.status !== "ACTIVE") return;
   const me = (getBotInstance() as any)?.botInfo?.username as string | undefined;
   const link = me ? `https://t.me/${me}?start=${PartnerService.referralPayload(partner)}` : null;
-  await ctx.reply(
-    link
-      ? `${ctvT(partner, "ctv.link_title")}\n<code>${link}</code>\n\n${ctvT(partner, "ctv.link_hint")}`
-      : ctvT(partner, "ctv.link_no_username"),
-    { parse_mode: "HTML" }
-  );
+  if (!link) {
+    await ctx.reply(ctvT(partner, "ctv.link_no_username"), { parse_mode: "HTML" });
+    return;
+  }
+  // Caption carries the EXACT same authoritative referral URL the QR encodes —
+  // byte-for-byte identical deep-link (bot username + referral payload).
+  const caption =
+    `${ctvT(partner, "ctv.qr_title")}\n\n` +
+    `${ctvT(partner, "ctv.qr_code_label")}: <code>${escapeHtml(partner.referralCode)}</code>\n\n` +
+    `${ctvT(partner, "ctv.qr_instruction")}\n\n` +
+    `${ctvT(partner, "ctv.qr_link_label")}\n<code>${link}</code>`;
+  try {
+    // REFERRAL QR — locally generated PNG (no external QR APIs, no DB storage:
+    // derived data rendered on demand). Deliberately separate from the
+    // KHQR/VietQR payment-QR business logic — this is NOT a payment QR.
+    const qrBuffer = await QRCode.toBuffer(link, {
+      errorCorrectionLevel: "M",
+      margin: 2,
+      scale: 6
+    });
+    await ctx.replyWithPhoto(new InputFile(qrBuffer, "referral-qr.png"), {
+      caption,
+      parse_mode: "HTML"
+    });
+  } catch (err: any) {
+    // QR failure must never break referral sharing: fall back to the
+    // localized text (code + link), never a stack trace.
+    logger.warn({ err: err?.message }, "ctv referral QR generation failed");
+    await ctx.reply(caption, { parse_mode: "HTML" });
+  }
 });
 
 /** PART F — commission history rows use ONLY safe business references. */
 customerHandler.callbackQuery("ctv:commissions", async (ctx) => {
   await ctx.answerCallbackQuery();
   const telegramId = String(ctx.from?.id || "");
-  const { PartnerService } = await import("../../modules/partner/partner-service.js");
+
   const partner = await PartnerService.getPartnerByTelegramId(telegramId);
   if (!partner || partner.status !== "ACTIVE") return;
   const commissions = await PartnerService.listPartnerCommissions(partner.id, 15);
@@ -2168,7 +2193,7 @@ customerHandler.callbackQuery("ctv:commissions", async (ctx) => {
 customerHandler.callbackQuery("ctv:settlements", async (ctx) => {
   await ctx.answerCallbackQuery();
   const telegramId = String(ctx.from?.id || "");
-  const { PartnerService } = await import("../../modules/partner/partner-service.js");
+
   const partner = await PartnerService.getPartnerByTelegramId(telegramId);
   if (!partner || partner.status !== "ACTIVE") return;
   const settlements = await PartnerService.listPartnerSettlements(partner.id, 10);
@@ -2195,7 +2220,7 @@ customerHandler.callbackQuery("ctv:settlements", async (ctx) => {
 customerHandler.callbackQuery("ctv:payout", async (ctx) => {
   await ctx.answerCallbackQuery();
   const telegramId = String(ctx.from?.id || "");
-  const { PartnerService } = await import("../../modules/partner/partner-service.js");
+
   const partner = await PartnerService.getPartnerByTelegramId(telegramId);
   if (!partner || partner.status !== "ACTIVE") return;
   // V2 — free-form payout destination (reference info only).
@@ -2228,7 +2253,7 @@ customerHandler.callbackQuery("ctv:payout", async (ctx) => {
 customerHandler.callbackQuery("ctv:payout:edit", async (ctx) => {
   await ctx.answerCallbackQuery();
   const telegramId = String(ctx.from?.id || "");
-  const { PartnerService } = await import("../../modules/partner/partner-service.js");
+
   const partner = await PartnerService.getPartnerByTelegramId(telegramId);
   if (!partner || partner.status !== "ACTIVE") return;
   setPartnerPayoutSession(telegramId, partner.id);
@@ -2238,7 +2263,7 @@ customerHandler.callbackQuery("ctv:payout:edit", async (ctx) => {
 customerHandler.callbackQuery("ctv:payout:qr", async (ctx) => {
   await ctx.answerCallbackQuery();
   const telegramId = String(ctx.from?.id || "");
-  const { PartnerService } = await import("../../modules/partner/partner-service.js");
+
   const partner = await PartnerService.getPartnerByTelegramId(telegramId);
   if (!partner || partner.status !== "ACTIVE") return;
   setPartnerPayoutSession(telegramId, partner.id);
@@ -2252,7 +2277,7 @@ customerHandler.callbackQuery("ctv:payout:confirm:go", async (ctx) => {
   const session = getPartnerPayoutSession(telegramId);
   if (!session?.pending) return;
   try {
-    const { PartnerService } = await import("../../modules/partner/partner-service.js");
+
     await PartnerService.setPayoutDestination(session.partnerId, { text: session.pending.text });
     clearPartnerPayoutSession(telegramId);
     const destText = session.pending.text;

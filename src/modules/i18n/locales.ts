@@ -299,6 +299,36 @@ add("ctv.dash_link_missing", "🔗 Link: liên hệ Admin (bot chưa có usernam
 add("ctv.link_title", "🔗 <b>Link giới thiệu của bạn:</b>", "🔗 <b>Your referral link:</b>", "🔗 <b>Your referral link:</b>", "🔗 <b>Your referral link:</b>");
 add("ctv.link_hint", "Khách bấm link sẽ được gán về CTV của bạn (chỉ khách mới / chưa gán).", "Customers tapping this link are attributed to you (new / unassigned customers only).", "Customers tapping this link are attributed to you (new / unassigned customers only).", "Customers tapping this link are attributed to you (new / unassigned customers only).");
 add("ctv.link_no_username", "⚠️ Bot chưa có username công khai. Vui lòng liên hệ Admin.", "⚠️ The bot has no public username yet. Please contact the Admin.", "⚠️ The bot has no public username yet. Please contact the Admin.", "⚠️ The bot has no public username yet. Please contact the Admin.");
+// REFERRAL QR (delivered with the referral link; generated on demand, never
+// persisted — it encodes the EXACT same authoritative referral URL).
+add("ctv.qr_title", "🤝 <b>MÃ GIỚI THIỆU</b>", "🤝 <b>REFERRAL</b>", "🤝 <b>REFERRAL</b>", "🤝 <b>REFERRAL</b>");
+add("ctv.qr_code_label", "Mã CTV", "Partner code", "Partner code", "Partner code");
+add("ctv.qr_instruction", "📱 Đưa mã QR này cho khách quét để tham gia.", "📱 Show this QR code to a nearby customer to scan and join.", "📱 Show this QR code to a nearby customer to scan and join.", "📱 Show this QR code to a nearby customer to scan and join.");
+add("ctv.qr_link_label", "🔗 Link giới thiệu:", "🔗 Referral link:", "🔗 Referral link:", "🔗 Referral link:");
+// PROACTIVE PARTNER NOTIFICATIONS (vi|en from Partner.language; NULL ⇒ the
+// caller renders concise bilingual VI+EN). Presentation only — amounts/status
+// always come from persisted authoritative Commission/Settlement rows.
+add("ctv.notify_new_referral_title", "🎉 <b>CÓ NGƯỜI MỚI THAM GIA</b>", "🎉 <b>NEW REFERRAL</b>", "🎉 <b>NEW REFERRAL</b>", "🎉 <b>NEW REFERRAL</b>");
+add("ctv.notify_new_referral_body", "Một người dùng mới đã tham gia qua link giới thiệu của bạn.", "A new user has joined through your referral link.", "A new user has joined through your referral link.", "A new user has joined through your referral link.");
+add("ctv.notify_new_referral_count", "👥 Tổng số người giới thiệu: <b>{count}</b>", "👥 Total referrals: <b>{count}</b>", "👥 Total referrals: <b>{count}</b>", "👥 Total referrals: <b>{count}</b>");
+add("ctv.notify_earned_title", "💰 <b>PHÁT SINH HOA HỒNG</b>", "💰 <b>COMMISSION EARNED</b>", "💰 <b>COMMISSION EARNED</b>", "💰 <b>COMMISSION EARNED</b>");
+add("ctv.notify_network_title", "💰 <b>HOA HỒNG MẠNG LƯỚI</b>", "💰 <b>NETWORK COMMISSION</b>", "💰 <b>NETWORK COMMISSION</b>", "💰 <b>NETWORK COMMISSION</b>");
+add("ctv.notify_order", "Đơn: {ref}", "Order: {ref}", "Order: {ref}", "Order: {ref}");
+add("ctv.notify_level", "Cấp: L{level}", "Level: L{level}", "Level: L{level}", "Level: L{level}");
+add("ctv.notify_level_yours", "Cấp của bạn: L{level}", "Your level: L{level}", "Your level: L{level}", "Your level: L{level}");
+add("ctv.notify_fixed", "Hoa hồng cố định: {amount}", "Fixed commission: {amount}", "Fixed commission: {amount}", "Fixed commission: {amount}");
+add("ctv.notify_spread", "Thưởng chênh lệch: {amount}", "Rate-share bonus: {amount}", "Rate-share bonus: {amount}", "Rate-share bonus: {amount}");
+add("ctv.notify_total", "Tổng: {amount}", "Total: {amount}", "Total: {amount}", "Total: {amount}");
+add("ctv.notify_amount", "Hoa hồng: {amount}", "Commission: {amount}", "Commission: {amount}", "Commission: {amount}");
+add("ctv.notify_status", "Trạng thái: {status}", "Status: {status}", "Status: {status}", "Status: {status}");
+add("ctv.notify_available_title", "✅ <b>HOA HỒNG ĐÃ KHẢ DỤNG</b>", "✅ <b>COMMISSION AVAILABLE</b>", "✅ <b>COMMISSION AVAILABLE</b>", "✅ <b>COMMISSION AVAILABLE</b>");
+add("ctv.notify_available_body", "+{amount} hiện đã có thể thanh toán.", "+{amount} is now available for payout.", "+{amount} is now available for payout.", "+{amount} is now available for payout.");
+add("ctv.notify_available_balance", "💰 Hoa hồng khả dụng: {amount}", "💰 Available commission: {amount}", "💰 Available commission: {amount}", "💰 Available commission: {amount}");
+add("ctv.notify_available_count", "✅ {count} khoản hoa hồng đã khả dụng", "✅ {count} commissions are now available", "✅ {count} commissions are now available", "✅ {count} commissions are now available");
+add("ctv.notify_reversed_title", "⚠️ <b>HOA HỒNG ĐÃ ĐƯỢC HOÀN TÁC</b>", "⚠️ <b>COMMISSION REVERSED</b>", "⚠️ <b>COMMISSION REVERSED</b>", "⚠️ <b>COMMISSION REVERSED</b>");
+add("ctv.notify_reversed_amount", "Số tiền: -{amount}", "Amount: -{amount}", "Amount: -{amount}", "Amount: -{amount}");
+add("ctv.notify_reason", "Lý do: {reason}", "Reason: {reason}", "Reason: {reason}", "Reason: {reason}");
+add("ctv.btn_view_commissions", "💰 Xem hoa hồng", "💰 View commission", "💰 View commission", "💰 View commission");
 add("ctv.commissions_title", "💰 <b>HOA HỒNG GẦN NHẤT</b>", "💰 <b>RECENT COMMISSIONS</b>", "💰 <b>RECENT COMMISSIONS</b>", "💰 <b>RECENT COMMISSIONS</b>");
 add("ctv.commissions_empty", "Chưa có hoa hồng nào.", "No commissions yet.", "No commissions yet.", "No commissions yet.");
 add("ctv.level_direct", "Đơn trực tiếp", "Direct order", "Direct order", "Direct order");
