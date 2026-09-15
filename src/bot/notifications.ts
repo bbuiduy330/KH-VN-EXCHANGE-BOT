@@ -888,14 +888,14 @@ export async function notifyPartnerCommissionEarned(
               t(loc, "ctv.notify_fixed", { amount: usd(row.baseCommissionUsd) })
             ];
             if (Number(row.spreadBonusUsd ?? 0) > 0) {
-              texts.push(t(loc, "ctv.notify_spread", { amount: usd(row.spreadBonusUsd) }));
+              lines.push(t(loc, "ctv.notify_spread", { amount: usd(row.spreadBonusUsd) }));
             }
-            texts.push(
+            lines.push(
               t(loc, "ctv.notify_total", { amount: usd(row.totalUsd) }),
               "",
               t(loc, "ctv.notify_status", { status: ctvNotifyStatusWord(loc, row.status) })
             );
-            return texts.join("\n");
+            return lines.join("\n");
           }
           return [
             t(loc, "ctv.notify_network_title"),
