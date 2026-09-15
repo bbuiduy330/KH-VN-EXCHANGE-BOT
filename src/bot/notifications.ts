@@ -768,3 +768,232 @@ export async function notifyPartnerSettlementPaid(settlementId: string): Promise
   }
 }
 
+// ===========================================================================
+// PROACTIVE PARTNER NOTIFICATIONS (presentation only — persistence ALWAYS
+// commits first; these helpers run afterwards, are best-effort (never throw)
+// and read ONLY persisted authoritative values). Partner language:
+// Partner.language vi|en; NULL ⇒ concise bilingual VI+EN; never read from
+// Customer.language; NULL is never persisted.
+// ===========================================================================
+
+/** Partner UI locales in render order: vi|en selected, NULL ⇒ bilingual. */
+function ctvNotifyLocales(language: string | null | undefined): Array<"vi" | "en"> {
+  return language === "en" ? ["en"] : language === "vi" ? ["vi"] : ["vi", "en"];
+}
+
+/** Localized DB status word for partner notifications (never the raw enum). */
+function ctvNotifyStatusWord(loc: "vi" | "en", status: string): string {
+  const map: Record<string, string> = {
+    HELD: "ctv.status_held",
+    AVAILABLE: "ctv.status_available",
+    PAID: "ctv.status_paid",
+    REVERSED: "ctv.status_reversed"
+  };
+  const key = map[status];
+  return key ? t(loc, key) : status;
+}
+
+/** Best-effort send — Telegram failure is logged and NEVER propagated. */
+async function sendPartnerNotify(
+  partner: { id: string; telegramId?: string | null },
+  text: string,
+  kb?: InlineKeyboard
+): Promise<boolean> {
+  try {
+    const bot = getBotInstance();
+    if (!bot || !partner.telegramId) return false;
+    await bot.api.sendMessage(String(partner.telegramId), text, {
+      parse_mode: "HTML",
+      ...(kb ? { reply_markup: kb } : {})
+    });
+    return true;
+  } catch (err: any) {
+    logger.warn({ err: err?.message, partnerId: partner.id }, "Partner notification failed (non-fatal)");
+    return false;
+  }
+}
+
+/** Bilingual join helper: NULL-language partners get VI + ——— + EN. */
+function ctvJoinBilingual(parts: string[]): string {
+  return parts.length === 2 ? `${parts[0]}\n\n———\n\n${parts[1]}` : parts[0] ?? "";
+}
+
+/** NEW_REFERRAL — fired ONLY after a new referral attribution was persisted. */
+export async function notifyPartnerNewReferral(partnerId: string): Promise<boolean> {
+  try {
+    const partner = await prisma.partner.findUnique({
+      where: { id: partnerId },
+      select: { id: true, telegramId: true, language: true }
+    });
+    if (!partner) return false;
+    const total = await prisma.customer.count({ where: { partnerId } });
+    const kb = new InlineKeyboard().text(t("vi", "ctv.btn_link"), "ctv:link");
+    const texts = ctvNotifyLocales(partner.language).map((loc) =>
+      [
+        t(loc, "ctv.notify_new_referral_title"),
+        "",
+        t(loc, "ctv.notify_new_referral_body"),
+        t(loc, "ctv.notify_new_referral_count", { count: total })
+      ].join("\n")
+    );
+    return await sendPartnerNotify(partner, ctvJoinBilingual(texts), kb);
+  } catch (err: any) {
+    logger.warn({ err: err?.message, partnerId }, "notifyPartnerNewReferral failed (non-fatal)");
+    return false;
+  }
+}
+
+/**
+ * COMMISSION_EARNED — called AFTER persisted Commission rows exist for a
+ * completed Order (one row per upline level). Each Partner sees ONLY their
+ * own persisted row (level / amount / status) with the canonical public
+ * Order Ref. One notification per Partner per Order; amounts are NEVER
+ * recalculated — rendered straight from the persisted rows.
+ */
+export async function notifyPartnerCommissionEarned(
+  orderId: string,
+  created: Array<{
+    partnerId: string;
+    level: number;
+    baseCommissionUsd: any;
+    spreadBonusUsd: any;
+    totalUsd: any;
+    status: string;
+  }>
+): Promise<void> {
+  try {
+    if (created.length === 0) return;
+    const [order, partners] = await Promise.all([
+      prisma.order.findUnique({ where: { id: orderId }, select: { id: true, publicRef: true } }),
+      prisma.partner.findMany({
+        where: { id: { in: [...new Set(created.map((c: any) => c.partnerId))] } },
+        select: { id: true, telegramId: true, language: true }
+      })
+    ]);
+    const orderRef = order
+      ? formatPublicOrderRef(order as any)
+      : `#${String(orderId).slice(-6).toUpperCase()}`;
+    for (const row of created) {
+      try {
+        const partner = partners.find((p: any) => p.id === row.partnerId);
+        if (!partner) continue;
+        const texts = ctvNotifyLocales(partner.language).map((loc) => {
+          if (Number(row.level) === 1) {
+            const lines = [
+              t(loc, "ctv.notify_earned_title"),
+              "",
+              t(loc, "ctv.notify_order", { ref: orderRef }),
+              t(loc, "ctv.notify_level", { level: row.level }),
+              "",
+              t(loc, "ctv.notify_fixed", { amount: usd(row.baseCommissionUsd) })
+            ];
+            if (Number(row.spreadBonusUsd ?? 0) > 0) {
+              texts.push(t(loc, "ctv.notify_spread", { amount: usd(row.spreadBonusUsd) }));
+            }
+            texts.push(
+              t(loc, "ctv.notify_total", { amount: usd(row.totalUsd) }),
+              "",
+              t(loc, "ctv.notify_status", { status: ctvNotifyStatusWord(loc, row.status) })
+            );
+            return texts.join("\n");
+          }
+          return [
+            t(loc, "ctv.notify_network_title"),
+            "",
+            t(loc, "ctv.notify_order", { ref: orderRef }),
+            t(loc, "ctv.notify_level_yours", { level: row.level }),
+            t(loc, "ctv.notify_amount", { amount: usd(row.totalUsd) }),
+            t(loc, "ctv.notify_status", { status: ctvNotifyStatusWord(loc, row.status) })
+          ].join("\n");
+        });
+        const kb = new InlineKeyboard().text(t("vi", "ctv.btn_view_commissions"), "ctv:commissions");
+        await sendPartnerNotify(partner, ctvJoinBilingual(texts), kb);
+      } catch (err: any) {
+        logger.warn(
+          { err: err?.message, partnerId: row.partnerId },
+          "Partner commission-earned notification failed (non-fatal)"
+        );
+      }
+    }
+  } catch (err: any) {
+    logger.warn({ err: err?.message, orderId }, "notifyPartnerCommissionEarned failed (non-fatal)");
+  }
+}
+
+/** Shared USD display for partner notifications (locale-neutral numbers). */
+function usd(amount: any): string {
+  return `$${Number(amount ?? 0).toFixed(2)}`;
+}
+
+/**
+ * HELD → AVAILABLE — aggregated per Partner per release run: count + total
+ * newly available + resulting available balance. Fired only for rows the
+ * run actually transitioned (guarded updateMany), so scheduler retries
+ * never duplicate the notification.
+ */
+export async function notifyPartnerCommissionsAvailable(
+  partnerId: string,
+  count: number,
+  newlyAvailableUsd: any
+): Promise<void> {
+  try {
+    const partner = await prisma.partner.findUnique({
+      where: { id: partnerId },
+      select: { id: true, telegramId: true, language: true }
+    });
+    if (!partner) return;
+    const agg = await prisma.commission.aggregate({
+      _sum: { totalUsd: true },
+      where: { partnerId, status: "AVAILABLE" }
+    });
+    const balance = `$${Number(agg._sum.totalUsd ?? 0).toFixed(2)}`;
+    const kb = new InlineKeyboard().text(t("vi", "ctv.btn_view_commissions"), "ctv:commissions");
+    const texts = ctvNotifyLocales(partner.language).map((loc) =>
+      [
+        t(loc, "ctv.notify_available_title"),
+        "",
+        t(loc, "ctv.notify_available_body", { amount: usd(newlyAvailableUsd) }),
+        t(loc, "ctv.notify_available_count", { count }),
+        t(loc, "ctv.notify_available_balance", { amount: balance })
+      ].join("\n")
+    );
+    await sendPartnerNotify(partner, ctvJoinBilingual(texts), kb);
+  } catch (err: any) {
+    logger.warn({ err: err?.message, partnerId }, "notifyPartnerCommissionsAvailable failed (non-fatal)");
+  }
+}
+
+/** COMMISSION REVERSED — fired ONLY on the actual Admin reversal transition. */
+export async function notifyPartnerCommissionReversed(commission: {
+  partnerId: string;
+  orderId: string;
+  totalUsd: any;
+  reversedReason?: string | null;
+}): Promise<void> {
+  try {
+    const [partner, order] = await Promise.all([
+      prisma.partner.findUnique({
+        where: { id: commission.partnerId },
+        select: { id: true, telegramId: true, language: true }
+      }),
+      prisma.order.findUnique({ where: { id: commission.orderId }, select: { id: true, publicRef: true } })
+    ]);
+    if (!partner) return;
+    const orderRef = formatPublicOrderRef({ id: commission.orderId, publicRef: order?.publicRef ?? null });
+    const kb = new InlineKeyboard().text(t("vi", "ctv.btn_view_commissions"), "ctv:commissions");
+    const texts = ctvNotifyLocales(partner.language).map((loc) =>
+      [
+        t(loc, "ctv.notify_reversed_title"),
+        "",
+        t(loc, "ctv.notify_order", { ref: orderRef }),
+        t(loc, "ctv.notify_reversed_amount", { amount: usd(commission.totalUsd) }),
+        ...(commission.reversedReason
+          ? [t(loc, "ctv.notify_reason", { reason: escapeHtml(String(commission.reversedReason)) })]
+          : [])
+      ].join("\n")
+    );
+    await sendPartnerNotify(partner, ctvJoinBilingual(texts));
+  } catch (err: any) {
+    logger.warn({ err: err?.message }, "notifyPartnerCommissionReversed failed (non-fatal)");
+  }
+}

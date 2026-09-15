@@ -8,7 +8,7 @@
  *   binding the internal Order.id) are the customer's receipt.
  * - Full history is STAFF-ONLY (Admin/CSKH CRM + generic-support context).
  */
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach } from "vitest";`r`nimport { requireCallbackButton } from "./helpers/callback-button.js";
 import { inMemoryStore, prisma } from "../src/database/client.js";
 import { RuntimeConfigService } from "../src/modules/system-config/runtime-config-service.js";
 import { QuoteService } from "../src/modules/quotes/quote-service.js";
@@ -70,7 +70,7 @@ describe("Active Orders is ACTIVE-ONLY", () => {
         for (const b of row) expect(b.text).not.toMatch(/Lịch sử|History|历史|ប្រវត្តិ/i);
       }
       // No callback route into a customer history browser.
-      const allCallbacks = inline.inline_keyboard.flat().map((b) => b.callback_data).join(" ");
+      const allCallbacks = inline.inline_keyboard.flat() .map((b) => requireCallbackButton(b).callback_data).join(" ");
       expect(allCallbacks).not.toContain("customer:history");
     }
   });

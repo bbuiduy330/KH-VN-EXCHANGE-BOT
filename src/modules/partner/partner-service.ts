@@ -447,6 +447,16 @@ export class PartnerService {
       targetId: customer.id,
       details: { partnerId: partner.id, referralCode: code }
     });
+    // C1/C2/C14 — persist FIRST, notify AFTER (best-effort, never throws).
+    // Idempotent by construction: only a genuinely NEW assignment reaches this
+    // point (ALREADY_ASSIGNED / PRIOR_COMPLETED paths return earlier without
+    // persisting), so repeated /start or deep-link reopens never re-notify.
+    try {
+      const { notifyPartnerNewReferral } = await import("../../bot/notifications.js");
+      await notifyPartnerNewReferral(partner.id);
+    } catch (notifyErr: any) {
+      logger.warn({ err: notifyErr?.message }, "Partner new-referral notification failed (non-fatal)");
+    }
     return { assigned: true, reason: "OK" };
   }
 
@@ -503,6 +513,23 @@ export class PartnerService {
    * Missing/disabled upline is skipped — never redistributed. Risk flag is
    * evaluated once on the direct (L1) Partner and applies to the whole chain.
    */
+  /**
+   * In-transaction commission-creation notices awaiting commit (C14). Keyed by
+   * orderId; flushed + cleared by the post-commit backstop call (no tx). A
+   * crash loses only the notification — never business state.
+   */
+  private static pendingCommissionNotices = new Map<
+    string,
+    Array<{
+      partnerId: string;
+      level: number;
+      baseCommissionUsd: Decimal;
+      spreadBonusUsd: Decimal;
+      totalUsd: Decimal;
+      status: string;
+    }>
+  >();
+
   static async onOrderCompleted(orderId: string, tx?: any): Promise<void> {
     try {
       const db = tx ?? prisma;
@@ -510,8 +537,23 @@ export class PartnerService {
       if (!order || order.status !== "COMPLETED") return;
       if (!order.partnerId) return;
 
+      // TRANSACTION BOUNDARY (C14): Partner notifications must fire only AFTER
+      // the authoritative Commission rows are durably COMMITTED. When invoked
+      // with a caller transaction, created rows are stashed in memory (never
+      // notified) and flushed by the ALWAYS-invoked post-commit backstop call
+      // (onOrderCompleted WITHOUT tx). Without a tx every write below is
+      // already committed, so notifications go out directly.
+      const stashed = tx ? null : PartnerService.pendingCommissionNotices.get(orderId);
+      if (!tx && stashed) PartnerService.pendingCommissionNotices.delete(orderId);
+
       const existing = await db.commission.findFirst({ where: { orderId } });
-      if (existing) return;
+      if (existing) {
+        if (stashed && stashed.length > 0) {
+          const { notifyPartnerCommissionEarned } = await import("../../bot/notifications.js");
+          await notifyPartnerCommissionEarned(orderId, stashed);
+        }
+        return;
+      }
 
       // Bounded hierarchy scan (CTV count is small by design).
       const allPartners: any[] = await db.partner.findMany({
@@ -529,6 +571,16 @@ export class PartnerService {
       if (!l1Partner || l1Partner.status === "DISABLED") return;
       const riskFlag = await this.evaluateRiskFlags(l1Partner, order);
       const holdHours = l1Partner.holdHours ?? 72;
+      // C4/C15 — rows actually persisted in THIS pass (per partner/level);
+      // used after the loop for one deduplicated Partner notification each.
+      const createdRows: Array<{
+        partnerId: string;
+        level: number;
+        baseCommissionUsd: Decimal;
+        spreadBonusUsd: Decimal;
+        totalUsd: Decimal;
+        status: string;
+      }> = [];
 
       for (const link of chain) {
         const partner = partnerById.get(link.partnerId);
@@ -569,6 +621,14 @@ export class PartnerService {
               spreadBasis: spreadBasis ?? undefined
             }
           });
+          createdRows.push({
+            partnerId: partner.id,
+            level: link.level,
+            baseCommissionUsd: fixed,
+            spreadBonusUsd: share,
+            totalUsd: total,
+            status: "HELD"
+          });
           await AuditService.log({
             actorId: "SYSTEM",
             actorRole: "SYSTEM",
@@ -595,6 +655,22 @@ export class PartnerService {
           }
           throw createErr;
         }
+      }
+      // C4/C14/C15 — persistence FIRST; notify AFTER the rows exist. The
+      // deferred dynamic import means a caller-supplied transaction commits
+      // before any Telegram send; a failed send never touches Order/Commission.
+      if (createdRows.length > 0) {
+        if (tx) {
+          // In-transaction: rows are NOT committed yet — stash for the
+          // post-commit backstop call; never notify inside the transaction.
+          const prior = PartnerService.pendingCommissionNotices.get(orderId) ?? [];
+          PartnerService.pendingCommissionNotices.set(orderId, [...prior, ...createdRows]);
+          return;
+        }
+        const stashed = PartnerService.pendingCommissionNotices.get(orderId) ?? [];
+        PartnerService.pendingCommissionNotices.delete(orderId);
+        const { notifyPartnerCommissionEarned } = await import("../../bot/notifications.js");
+        await notifyPartnerCommissionEarned(orderId, [...stashed, ...createdRows]);
       }
     } catch (err: any) {
       // Commission failure must NEVER break the authoritative financial flow.
@@ -747,21 +823,52 @@ export class PartnerService {
    * Nothing is auto-paid — AVAILABLE is only settlement eligibility.
    */
   static async reconcileAvailableCommissions(): Promise<number> {
-    const result = await prisma.commission.updateMany({
+    // C9/C10 — find the rows ABOUT to transition, then transition each with a
+    // PER-ID guarded update (`status: "HELD"` in the where): a row counts as
+    // owned (and is notified) ONLY when THIS run's update matched. A concurrent
+    // worker/retry that already transitioned a row yields count 0 for it —
+    // never a duplicate AVAILABLE notification.
+    const due: any[] = await prisma.commission.findMany({
       where: { status: "HELD", riskFlag: null, availableAt: { lte: new Date() } },
-      data: { status: "AVAILABLE" }
+      select: { id: true, partnerId: true, totalUsd: true }
     });
-    if (result.count > 0) {
+    const owned: any[] = [];
+    for (const c of due) {
+      const res = await prisma.commission.updateMany({
+        where: { id: c.id, status: "HELD" },
+        data: { status: "AVAILABLE" }
+      });
+      if (res.count === 1) owned.push(c);
+    }
+    const count = owned.length;
+    if (count > 0) {
       await AuditService.log({
         actorId: "SYSTEM",
         actorRole: "SYSTEM",
         action: "PARTNER_COMMISSIONS_AUTO_AVAILABLE",
         targetType: "PARTNER",
         targetId: "BULK",
-        details: { count: result.count }
+        details: { count }
       }).catch(() => {});
+      // Aggregate per Partner per release run (presentation only, best-effort;
+      // a failed Telegram send never affects the persisted transition).
+      const byPartner = new Map<string, { count: number; total: Decimal }>();
+      for (const c of owned) {
+        const agg = byPartner.get(c.partnerId) ?? { count: 0, total: new Decimal(0) };
+        agg.count += 1;
+        agg.total = agg.total.plus(new Decimal(c.totalUsd ?? 0));
+        byPartner.set(c.partnerId, agg);
+      }
+      try {
+        const { notifyPartnerCommissionsAvailable } = await import("../../bot/notifications.js");
+        for (const [partnerId, agg] of byPartner) {
+          await notifyPartnerCommissionsAvailable(partnerId, agg.count, agg.total);
+        }
+      } catch (notifyErr: any) {
+        logger.warn({ err: notifyErr?.message }, "Partner AVAILABLE notifications failed (non-fatal)");
+      }
     }
-    return result.count;
+    return count;
   }
 
   private static reconciliationTimer: ReturnType<typeof setInterval> | null = null;
@@ -856,6 +963,14 @@ export class PartnerService {
       targetId: commissionId,
       details: { orderId: c.orderId, partnerId: c.partnerId }
     });
+    // C9 — Admin manual release is also a HELD→AVAILABLE transition (persisted
+    // first; notification is best-effort presentation).
+    try {
+      const { notifyPartnerCommissionsAvailable } = await import("../../bot/notifications.js");
+      await notifyPartnerCommissionsAvailable(c.partnerId, 1, c.totalUsd);
+    } catch (notifyErr: any) {
+      logger.warn({ err: notifyErr?.message }, "Partner release notification failed (non-fatal)");
+    }
   }
 
   static async reverseCommission(adminId: string, commissionId: string, reason: string): Promise<void> {
@@ -875,6 +990,16 @@ export class PartnerService {
       targetId: commissionId,
       details: { orderId: c.orderId, reason: reason.trim() }
     });
+    // C12 — the lifecycle DOES transition Commission → REVERSED (Admin action),
+    // so the affected Partner is notified with the persisted amount. Persist
+    // first, notify after; the Admin-authored audited reason is the only
+    // context shown (no risk/security internals).
+    try {
+      const { notifyPartnerCommissionReversed } = await import("../../bot/notifications.js");
+      await notifyPartnerCommissionReversed(c);
+    } catch (notifyErr: any) {
+      logger.warn({ err: notifyErr?.message }, "Partner reversal notification failed (non-fatal)");
+    }
   }
 
   static async listPartnerCommissions(partnerId: string, take: number = 20): Promise<any[]> {

@@ -61,10 +61,14 @@ export async function showAccountDetail(ctx: BotContext, accountId: string): Pro
     `Trạng thái: ${a.isActive ? "🟢 Đang hoạt động" : "⚪ Tạm ngưng"}\n` +
     `Mặc định: ${a.isDefault ? "⭐ Có" : "—"} · Ưu tiên: ${a.priority}\n` +
     `QR: ${a.qrFilePath ? `✅ có · v${a.qrVersion}` : "— chưa có"}\n` +
+    `📷 Chế độ QR: ${String(a.qrProvider ?? "").toUpperCase() === "STATIC" ? "🖼 Chỉ QR tĩnh (STATIC_ONLY)" : "⚙️ Tự động (AUTO)"}\n` +
     `🔔 Xác nhận tiền tự động: ${escapeHtml(readiness.label)}\n`;
 
   const kb = new InlineKeyboard()
     .row().text("🖼 Cập nhật QR", `ops:account:qr:${a.id}`)
+    .row()
+    .text("🖼 Chỉ QR tĩnh", `ops:account:qrmode:STATIC_ONLY:${a.id}`)
+    .text("⚙️ Tự động", `ops:account:qrmode:AUTO:${a.id}`)
     .row().text("⭐ Đặt mặc định", `ops:account:default:preview:${a.id}`)
     .text("↕️ Ưu tiên", `ops:account:priority:${a.id}`)
     .row().text("🔔 Xác nhận tiền tự động", `ops:account:verify:${a.id}`)
@@ -82,6 +86,26 @@ export async function showAccountDetail(ctx: BotContext, accountId: string): Pro
   }
   await ctx.reply(text, { parse_mode: "HTML", reply_markup: kb });
 }
+
+// 📷 Chế độ QR — AUTO | STATIC_ONLY (product decision: until U-Pay confirms
+// Dynamic Corporate KHQR, production uses the official Admin-uploaded static
+// QR as PRIMARY). Persisted on the EXISTING PaymentAccount.qrProvider metadata
+// ("STATIC" | null) — no schema change. FROZEN into receivingAccountSnapshot
+// at Order creation; later changes never rewrite existing payment cards.
+adminAccountsHandler.callbackQuery(/^ops:account:qrmode:(AUTO|STATIC_ONLY):([a-zA-Z0-9_-]+)$/, async (ctx) => {
+  // MUTATION — same write/edit permission as every other PaymentAccount
+  // configuration change (QR upload, default, priority, verification, toggle).
+  if (!(await requirePermission(ctx, "payment_account.edit"))) return;
+  await ctx.answerCallbackQuery();
+  const mode = ctx.match?.[1] === "STATIC_ONLY" ? "STATIC_ONLY" : "AUTO";
+  const accountId = ctx.match?.[2] || "";
+  try {
+    await PaymentAccountService.setQrMode(accountId, mode, String(ctx.from?.id || ""));
+    await showAccountDetail(ctx, accountId);
+  } catch (err: any) {
+    await ctx.reply(`❌ ${escapeHtml(err?.message || "Không đổi được chế độ QR.")}`).catch(() => {});
+  }
+});
 
 // ---------------------------------------------------------------------------
 // F9 — 🔔 Xác nhận tiền tự động (verification provider config wizard)

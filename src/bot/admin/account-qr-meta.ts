@@ -91,6 +91,9 @@ export function resolveVietQrBank(input: string): ResolvedBank | null {
  * capability validation PaymentQrService uses at Order runtime.
  */
 export function readinessLine(r: QrReadiness): string {
+  if (r.provider === "STATIC") {
+    return "🖼 Chế độ QR: <b>chỉ QR tĩnh (STATIC_ONLY)</b> — dùng QR chính thức do Admin tải lên";
+  }
   const label = r.provider === "VIETQR" ? "VietQR" : "KHQR";
   if (r.ready) {
     return `🟢 ${label} động — Sẵn sàng`;

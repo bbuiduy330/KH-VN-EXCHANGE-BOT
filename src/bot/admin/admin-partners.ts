@@ -119,13 +119,13 @@ async function showPartnerDetail(ctx: BotContext, partnerId: string): Promise<vo
   const s = await PartnerService.partnerSummary(partnerId);
   const commissions = await PartnerService.listPartnerCommissions(partnerId, 5);
   // Batch-fetch the canonical public Order Refs (ONE query — no N+1).
-  const orderRefs = new Map(
+  const orderRefs = new Map<string, string | null>(
     (
       await prisma.order.findMany({
         where: { id: { in: [...new Set(commissions.map((c: any) => c.orderId))] } },
         select: { id: true, publicRef: true }
       })
-    ).map((o: any) => [o.id, o.publicRef])
+    ).map((o: { id: string; publicRef: string | null }): [string, string | null] => [o.id, o.publicRef])
   );
   const lines = [
     `🤝 <b>CTV: ${escapeHtml(p.displayName)}</b> · ${p.status === "ACTIVE" ? "🟢 ACTIVE" : "⛔ DISABLED"}`,

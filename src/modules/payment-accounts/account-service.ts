@@ -168,6 +168,35 @@ export class PaymentAccountService {
   }
 
   /**
+   * QR MODE (product decision until U-Pay confirms Dynamic Corporate KHQR):
+   *   AUTO         — dynamic KHQR/VIETQR when the account metadata supports it,
+   *                  static fallback, text fallback (existing behavior).
+   *   STATIC_ONLY  — the official Admin-uploaded static QR is PRIMARY; dynamic
+   *                  generators are never invoked for orders frozen to this
+   *                  account.
+   * Persisted on the EXISTING PaymentAccount.qrProvider metadata field
+   * ("STATIC" | null) — NO schema change; null/other values keep AUTO.
+   */
+  static async setQrMode(accountId: string, mode: string, adminId: string): Promise<void> {
+    const m = String(mode || "").toUpperCase().trim();
+    if (m !== "AUTO" && m !== "STATIC_ONLY") {
+      throw new Error("Chế độ QR chỉ hỗ trợ AUTO hoặc STATIC_ONLY.");
+    }
+    await prisma.paymentAccount.update({
+      where: { id: accountId },
+      data: { qrProvider: m === "STATIC_ONLY" ? "STATIC" : null }
+    });
+    await AuditService.log({
+      actorId: adminId,
+      actorRole: "ADMIN",
+      action: "PAYMENT_ACCOUNT_QR_MODE_SET",
+      targetType: "PAYMENT_ACCOUNT",
+      targetId: accountId,
+      details: { qrMode: m }
+    });
+  }
+
+  /**
    * Set an account as default for its currency atomically
    */
   static async setDefaultAccount(accountId: string, actorId: string = "system") {

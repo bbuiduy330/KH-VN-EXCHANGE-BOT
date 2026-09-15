@@ -4,6 +4,27 @@ import { OrderService } from "../src/modules/orders/order-service.js";
 import { PaymentAccountService } from "../src/modules/payment-accounts/account-service.js";
 import { CustomerService } from "../src/modules/customer/customer-service.js";
 import { QuoteCalculation } from "../src/modules/quotes/quote-service.js";
+
+/**
+ * SOURCE_FIXED VND→USD fixture builder for the fields added by quote
+ * transparency. Preserves each fixture's original financial meaning:
+ * displayRate = the frozen effective SELL rate (VND per USD, pre-fee),
+ * conversionUsd = the gross pre-fee USD conversion leg, payerAmountExact =
+ * null (source-fixed ⇒ the payer amount is exactly the customer's input).
+ */
+function sourceFixedVndQuoteFields(o: {
+  sourceAmount: Decimal;
+  effectiveRate: Decimal;
+  fee: Decimal;
+}): Pick<QuoteCalculation, "rateSide" | "displayRate" | "conversionUsd" | "feeUsd" | "payerAmountExact"> {
+  return {
+    rateSide: "SOURCE_FIXED",
+    displayRate: o.effectiveRate,
+    conversionUsd: o.sourceAmount.dividedBy(o.effectiveRate),
+    feeUsd: o.fee,
+    payerAmountExact: null
+  };
+}
 import { prisma } from "../src/database/client.js";
 
 describe("State Machine, Account Versioning & Fraud Prevention Tests", () => {
@@ -141,7 +162,12 @@ describe("State Machine, Account Versioning & Fraud Prevention Tests", () => {
         effectiveRate: new Decimal(26315),
         fee: new Decimal(2),
         feeCurrency: "USD",
-        expiresAt: new Date(Date.now() + 60000)
+        expiresAt: new Date(Date.now() + 60000),
+        ...sourceFixedVndQuoteFields({
+          sourceAmount: new Decimal(10000000),
+          effectiveRate: new Decimal(26315),
+          fee: new Decimal(2)
+        })
       };
 
       const order = await OrderService.createOrderFromQuote(customerId, mockQuote);
@@ -202,7 +228,12 @@ describe("State Machine, Account Versioning & Fraud Prevention Tests", () => {
         effectiveRate: new Decimal(26300),
         fee: new Decimal(0),
         feeCurrency: "USD",
-        expiresAt: new Date(Date.now() + 60000)
+        expiresAt: new Date(Date.now() + 60000),
+        ...sourceFixedVndQuoteFields({
+          sourceAmount: new Decimal(500),
+          effectiveRate: new Decimal(26300),
+          fee: new Decimal(0)
+        })
       };
 
       const order = await OrderService.createOrderFromQuote(customerId, mockQuote);
@@ -229,7 +260,12 @@ describe("State Machine, Account Versioning & Fraud Prevention Tests", () => {
         effectiveRate: new Decimal(26315),
         fee: new Decimal(0),
         feeCurrency: "USD",
-        expiresAt: new Date(Date.now() + 60000)
+        expiresAt: new Date(Date.now() + 60000),
+        ...sourceFixedVndQuoteFields({
+          sourceAmount: new Decimal(5000000),
+          effectiveRate: new Decimal(26315),
+          fee: new Decimal(0)
+        })
       };
 
       // Order 1 receives the bill
@@ -253,7 +289,12 @@ describe("State Machine, Account Versioning & Fraud Prevention Tests", () => {
         effectiveRate: new Decimal(26315),
         fee: new Decimal(0),
         feeCurrency: "USD",
-        expiresAt: new Date(Date.now() + 60000)
+        expiresAt: new Date(Date.now() + 60000),
+        ...sourceFixedVndQuoteFields({
+          sourceAmount: new Decimal(5000000),
+          effectiveRate: new Decimal(26315),
+          fee: new Decimal(0)
+        })
       };
 
       const order2 = await OrderService.createOrderFromQuote(customerId, mockQuote2);

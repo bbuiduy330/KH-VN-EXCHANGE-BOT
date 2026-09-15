@@ -154,6 +154,12 @@ export function getQrReadiness(account: {
   const currency = String(account.currency ?? "").toUpperCase();
   const missing: string[] = [];
 
+  // STATIC_ONLY accounts skip dynamic readiness entirely — the official
+  // Admin-uploaded static QR is the selected PRIMARY payment QR.
+  if (String(account.qrProvider ?? "").toUpperCase() === "STATIC") {
+    return { provider: "STATIC", ready: true, missing: [] };
+  }
+
   if (currency === "USD") {
     const cap = detectKhqrCapability(account);
     const bakong = String(account.khqrBakongAccountId ?? "").trim();
@@ -381,7 +387,40 @@ export class PaymentQrService {
       };
     }
 
-    // 2. Dynamic generation by incoming payment currency.
+    // QR MODE (explicit per-account selection, FROZEN in receivingAccountSnapshot
+    // via PaymentAccount.qrProvider — see PaymentAccountService.setQrMode):
+    //   "STATIC"          ⇒ STATIC_ONLY: the official Admin-uploaded static QR
+    //                       is PRIMARY; dynamic KHQR/VIETQR generators are
+    //                       NEVER invoked for this Order.
+    //   null / KHQR / VIETQR ⇒ AUTO: dynamic when supported → static fallback
+    //                       → text fallback (existing behavior, unchanged).
+    const qrMode = String(snapshot.qrProvider ?? "").toUpperCase();
+    const staticOnly = qrMode === "STATIC";
+
+    if (staticOnly) {
+      // STATIC_ONLY: official static QR directly — amount/memo/deadline stay in
+      // the surrounding payment card/text; customer UX is unchanged.
+      if (fileBuffer) {
+        return { type: "STATIC", imageBuffer: fileBuffer, amount, currency, memo, orderRef };
+      }
+      // CONFIG problem — distinct diagnostic; customer still gets the safe
+      // text payment fallback (never a dynamic generator call).
+      logger.warn(
+        { orderRef, currency, code: "QR_STATIC_ONLY_NO_FILE" },
+        "PaymentQr: STATIC_ONLY mode but the static QR file is unavailable — text payment info fallback"
+      );
+      return {
+        type: "NONE",
+        imageBuffer: null,
+        amount,
+        currency,
+        memo,
+        orderRef,
+        degradedReason: "STATIC_ONLY_NO_FILE"
+      };
+    }
+
+    // 2. Dynamic generation by incoming payment currency (AUTO mode only).
     try {
       if (currency === "USD") {
         const cap = detectKhqrCapability(order.receivingAccountSnapshot);
