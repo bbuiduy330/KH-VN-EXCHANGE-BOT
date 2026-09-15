@@ -8,6 +8,7 @@ import { Composer, InlineKeyboard, InputFile } from "grammy";
 import { BotContext } from "../middleware/identity.js";
 import { requireRole } from "../middleware/permissions.js";
 import { PartnerService } from "../../modules/partner/partner-service.js";
+import { formatPublicOrderRef } from "../../modules/orders/order-ref.js";
 import { escapeHtml } from "../menus/cskh-panel.js";
 import { startWizard, getAdminSession, isSessionExpired, clearWizard, updateWizard } from "./admin-session.js";
 import { setAdminSearch } from "./admin-session.js";
@@ -117,6 +118,15 @@ async function showPartnerDetail(ctx: BotContext, partnerId: string): Promise<vo
   }
   const s = await PartnerService.partnerSummary(partnerId);
   const commissions = await PartnerService.listPartnerCommissions(partnerId, 5);
+  // Batch-fetch the canonical public Order Refs (ONE query — no N+1).
+  const orderRefs = new Map(
+    (
+      await prisma.order.findMany({
+        where: { id: { in: [...new Set(commissions.map((c: any) => c.orderId))] } },
+        select: { id: true, publicRef: true }
+      })
+    ).map((o: any) => [o.id, o.publicRef])
+  );
   const lines = [
     `🤝 <b>CTV: ${escapeHtml(p.displayName)}</b> · ${p.status === "ACTIVE" ? "🟢 ACTIVE" : "⛔ DISABLED"}`,
     `🔖 Code: <code>${p.referralCode}</code>`,
@@ -135,9 +145,9 @@ async function showPartnerDetail(ctx: BotContext, partnerId: string): Promise<vo
   const kb = new InlineKeyboard();
   for (const c of commissions) {
     const st = PartnerService.effectiveStatus(c);
-    lines.push(`📦 ${c.orderId.slice(-6)} · ${usd(c.totalUsd)} · ${st}${c.riskFlag ? ` · ⚠️ ${c.riskFlag}` : ""}`);
+    lines.push(`📦 ${formatPublicOrderRef({ id: c.orderId, publicRef: orderRefs.get(c.orderId) })} · ${usd(c.totalUsd)} · ${st}${c.riskFlag ? ` · ⚠️ ${c.riskFlag}` : ""}`);
     if (st === "HELD") {
-      kb.text(`🔓 Mở ${c.orderId.slice(-6)}`, `ops:partner:release:${c.id}`).row();
+      kb.text(`🔓 Mở ${formatPublicOrderRef({ id: c.orderId, publicRef: orderRefs.get(c.orderId) })}`, `ops:partner:release:${c.id}`).row();
     }
   }
   const link = partnerLink(p);

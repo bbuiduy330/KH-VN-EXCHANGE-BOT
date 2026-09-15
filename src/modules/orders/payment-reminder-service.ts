@@ -20,6 +20,7 @@ import { prisma } from "../../database/client.js";
 import { logger } from "../../shared/logger.js";
 import { InlineKeyboard } from "grammy";
 import { OrderService } from "./order-service.js";
+import { formatPublicOrderRef } from "./order-ref.js";
 // Namespace import so tests can spy on send/notification functions.
 import * as notifications from "../../bot/notifications.js";
 import { resolveLocale, t } from "../i18n/locales.js";
@@ -76,7 +77,7 @@ export function renderPaymentReminderMessage(order: any, reminderNumber: number)
   const amount = `${MoneyService.formatAmount(order.sourceAmount, order.sourceCurrency)} ${order.sourceCurrency}`;
   const text =
     `${t(locale, "reminder.title", { number: String(reminderNumber) })}\n\n` +
-    `${t(locale, "order.id", { id: order.id })}\n` +
+    `${t(locale, "order.id", { id: formatPublicOrderRef(order) })}\n` +
     `${t(locale, "order.transfer_amount", { amount, currency: order.sourceCurrency })}\n\n` +
     `${t(locale, "reminder.pay_now")}\n` +
     `${t(locale, "reminder.transferred_hint")}\n\n` +
@@ -139,7 +140,7 @@ async function autoCancel(order: any, remindersSent: number): Promise<void> {
   await notifications.sendToCustomer(
     String(order.customer?.telegramId || ""),
     `${t(locale, "autocancel.customer_title")}\n\n` +
-      `${t(locale, "order.id", { id: order.id })}\n` +
+      `${t(locale, "order.id", { id: formatPublicOrderRef(order) })}\n` +
       t(locale, "autocancel.customer_body"),
     { parse_mode: "HTML" }
   ).catch(() => {});

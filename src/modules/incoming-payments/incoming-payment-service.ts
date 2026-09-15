@@ -29,7 +29,7 @@ import { AuditService } from "../audit/audit-service.js";
 import { SystemSecretService } from "../system-config/system-secret-service.js";
 import { OrderService } from "../orders/order-service.js";
 import { sendToAdminNotificationChat, sendToCustomer } from "../../bot/notifications.js";
-import { shortOrderId } from "../../bot/admin/admin-panel.js";
+import { formatPublicOrderRef } from "../orders/order-ref.js";
 import { escapeHtml } from "../../bot/menus/cskh-panel.js";
 import { formatAdminDateTime } from "../../shared/app-time.js";
 
@@ -224,7 +224,7 @@ export async function matchAndApplyIncomingEvent(eventId: string): Promise<void>
       const { resolveLocale, t } = await import("../i18n/locales.js");
       await sendToCustomer(
         String(customer.telegramId),
-        t(resolveLocale(customer.language), "order.status_reply_payout_info", { id: order.id }),
+        t(resolveLocale(customer.language), "order.status_reply_payout_info", { id: formatPublicOrderRef(order) }),
         { parse_mode: "HTML" }
       ).catch(() => {});
     }
@@ -272,7 +272,7 @@ async function notifyProviderEvent(event: any, order: any, title: string, reason
   const customer = order.customer;
   const lines = [
     title,
-    `📦 Đơn: <b>${shortOrderId(order.id)}</b>`,
+    `📦 Đơn: <b>${formatPublicOrderRef(order)}</b>`,
     customer ? `👤 Khách: ${escapeHtml(customer.fullName || customer.username || "—")}${customer.telegramId ? ` · TG <code>${escapeHtml(customer.telegramId)}</code>` : ""}` : "",
     `💱 Kỳ vọng: <b>${Number(order.sourceAmount)} ${order.sourceCurrency}</b>`,
     `💱 Nhận: <b>${event.amount != null ? Number(event.amount) : "—"} ${event.currency ?? order.sourceCurrency}</b>`,

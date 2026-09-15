@@ -1,5 +1,16 @@
 import { Decimal } from "decimal.js";
 
+/**
+ * Which side of the transaction the customer explicitly FIXED — the number the
+ * customer typed, which must NEVER be rewritten because the other side needs
+ * currency rounding.
+ * SOURCE_FIXED — the customer said how much they GIVE/PAY: `sourceAmount` stays
+ *                exact and the service fee is absorbed from the USD side.
+ * TARGET_FIXED — the customer said how much they want to RECEIVE: `targetAmount`
+ *                stays exact and the service fee is added on top of the payer.
+ */
+export type RateSide = "SOURCE_FIXED" | "TARGET_FIXED";
+
 export class MoneyService {
   private static readonly CURRENCY_DECIMALS: Record<string, number> = {
     USD: 2,
@@ -112,7 +123,7 @@ export class MoneyService {
    * quote never yields less than the customer's requested target amount.
    * Used only by target-amount quoting (QuoteService.calculateQuoteFromTarget).
    */
-  static roundSourceAmount(amount: Decimal | number | string, currency: string): Decimal {
+  static roundPayerAmount(amount: Decimal | number | string, currency: string): Decimal {
     const dec = new Decimal(amount);
     const code = currency.toUpperCase().trim();
     if (code === "VND") {
@@ -285,6 +296,46 @@ export class MoneyService {
     }
     // Fallback (historical pairs): keep a readable 4-decimal form.
     return `1 ${src} = ${rate.toFixed(4)} ${tgt}`;
+  }
+
+  /**
+   * Direction-aware formatting of the AUTHORITATIVE FROZEN quote rate.
+   *
+   * The value passed here is the Quote/Order's own frozen rate representation
+   * (`displayRate`) — never `sourceAmount / targetAmount` and never
+   * `targetAmount / sourceAmount`, because the service fee and currency
+   * rounding make that ratio differ from the real FX rate.
+   *
+   * Direction is decided EXPLICITLY from `rateSide` + the currency direction —
+   * never from the rate's magnitude:
+   *   SOURCE_FIXED on USD->VND : frozen buy side  (customer sells USD)  → 1 USD = X VND
+   *   SOURCE_FIXED on VND->USD : frozen sell side (customer buys USD)   → 1 USD = X VND
+   *   TARGET_FIXED             : same applicable VND-per-USD rate, quoted
+   *                              from the requested target side.
+   * Within the USD<->VND business `displayRate` is ALWAYS the applicable
+   * VND-per-USD rate (>= 1), so it is rendered as-is.
+   */
+  static formatFrozenRate(
+    rateSide: RateSide,
+    sourceCurrency: string,
+    targetCurrency: string,
+    displayRate: Decimal | number | string
+  ): string {
+    const src = sourceCurrency.toUpperCase().trim();
+    const tgt = targetCurrency.toUpperCase().trim();
+    const rate = new Decimal(displayRate);
+
+    const isUsdVndPair = (src === "USD" && tgt === "VND") || (src === "VND" && tgt === "USD");
+    if (isUsdVndPair) {
+      // displayRate is frozen as VND-per-USD on BOTH sides of the pair.
+      return `1 USD = ${this.formatAmount(rate, "VND")} VND`;
+    }
+
+    // Generic pair fallback: state the frozen rate in its natural direction.
+    if (rateSide === "TARGET_FIXED") {
+      return `1 ${tgt} = ${this.formatAmount(new Decimal(1).dividedBy(rate), src)} ${src}`;
+    }
+    return `1 ${src} = ${this.formatAmount(rate, tgt)} ${tgt}`;
   }
 
   private static groupThousands(intPart: string): string {

@@ -85,7 +85,7 @@ function add(key: string, vi: string, en: string, km: string, zh: string) {
 
 // Menu
 add("menu.exchange", "💱 Đổi tiền", "💱 Exchange", "💱 ផ្លាស់ប្តូររូបិយប័ណ្ណ", "💱 兑换");
-add("menu.orders", "📦 Đơn của tôi", "📦 My orders", "📦 ការបញ្ជាទិញរបស់ខ្ញុំ", "📦 我的订单");
+add("menu.orders", "📦 Đơn đang xử lý", "📦 Active orders", "📦 ការបញ្ជាទិញកំពុងដំណើរការ", "📦 处理中订单");
 add("menu.support", "💬 Hỗ trợ", "💬 Support", "💬 ជំនួយ", "💬 客服");
 add("menu.language", "🌐 Ngôn ngữ", "🌐 Language", "🌐 ភាសា", "🌐 语言");
 add("menu.exit_support", "↩️ Quay lại đổi tiền", "↩️ Back to exchange", "↩️ ត្រឡប់ទៅការផ្លាស់ប្តូរ", "↩️ 返回兑换");
@@ -160,6 +160,9 @@ add("order.date", "• Ngày: {date}", "• Date: {date}", "• កាលបរ�
 add("order.list_recent_title", "📦 <b>DANH SÁCH ĐƠN HÀNG GẦN ĐÂY:</b>", "📦 <b>RECENT ORDERS:</b>", "📦 <b>ការបញ្ជាទិញថ្មីៗ:</b>", "📦 <b>近期订单：</b>");
 add("order.cancel_none", "Bạn không có đơn hàng nào đang chờ để hủy.", "You have no pending order to cancel.", "អ្នកមិនមានការបញ្ជាទិញកំពុងរង់ចាំដើម្បីបោះបង់ទេ។", "您没有可取消的待处理订单。");
 add("order.cancel_success", "✅ Đã hủy đơn hàng <code>{id}</code> thành công.", "✅ Order <code>{id}</code> has been cancelled.", "✅ ការបញ្ជាទិញ <code>{id}</code> ត្រូវបានបោះបង់ដោយជោគជ័យ។", "✅ 订单 <code>{id}</code> 已成功取消。");
+// DEDICATED order-linked support label — visibly different from the generic
+// bottom-menu "💬 Hỗ trợ/Support". Callback payload keeps the internal Order.id.
+add("order.support_this_btn", "💬 Hỗ trợ đơn này", "💬 Support this order", "💬 ជំនួយសម្រាប់ការបញ្ជាទិញនេះ", "💬 咨询此订单");
 add("order.cancel_error", "❌ Không thể hủy đơn: {error}", "❌ Could not cancel the order: {error}", "❌ មិនអាចបោះបង់ការបញ្ជាទិញ: {error}", "❌ 无法取消订单：{error}");
 
 // --- Order actions on the active-order view (customer, all locales) ---
@@ -256,6 +259,87 @@ add("order.status_reply_payout_sent", "Dạ em cảm ơn {name} ạ! Hệ thốn
 // My Orders = ACTIVE ONLY (terminal COMPLETED/CANCELLED never shown; history
 // stays in the DB for audit — this is customer VISIBILITY only).
 add("order.active_empty", "Hiện quý khách không có giao dịch đang xử lý.", "You currently have no transactions in progress.", "បច្ចុប្បន្នអ្នកមិនមានប្រតិបត្តិការកំពុងដំណើរការទេ។", "您目前没有正在处理的交易。");
+// ACTIVE ORDERS title (product decision: customers have NO transaction-history
+// browser — "My Orders" is explicitly ACTIVE-ONLY; history is staff-only).
+add("order.active_title", "📦 <b>ĐƠN ĐANG XỬ LÝ</b>", "📦 <b>ACTIVE ORDERS</b>", "📦 <b>ការបញ្ជាទិញកំពុងដំណើរការ</b>", "📦 <b>处理中的订单</b>");
+// ---------------------------------------------------------------------------
+// CTV / PARTNER UI — vi | en ONLY (product decision). Partner language is
+// stored on Partner.language and is INDEPENDENT from Customer.language.
+// The km/zh slots below intentionally MIRROR the EN value: the partner UI
+// never renders km/zh, but the project's add() signature requires 4 locales.
+// ---------------------------------------------------------------------------
+add("ctv.not_linked", "⚠️ Tài khoản Telegram này chưa được liên kết với CTV.\nVui lòng liên hệ quản trị viên.", "⚠️ This Telegram account is not linked to a partner.\nPlease contact the administrator.", "⚠️ This Telegram account is not linked to a partner.\nPlease contact the administrator.", "⚠️ This Telegram account is not linked to a partner.\nPlease contact the administrator.");
+add("ctv.disabled", "⛔ Tài khoản CTV hiện đang tạm ngưng.", "⛔ This partner account is currently suspended.", "⛔ This partner account is currently suspended.", "⛔ This partner account is currently suspended.");
+add("ctv.pick_title", "🤝 <b>CTV / PARTNER</b>\n\nChọn ngôn ngữ / Choose language:", "🤝 <b>CTV / PARTNER</b>\n\nChọn ngôn ngữ / Choose language:", "🤝 <b>CTV / PARTNER</b>\n\nChọn ngôn ngữ / Choose language:", "🤝 <b>CTV / PARTNER</b>\n\nChọn ngôn ngữ / Choose language:");
+add("ctv.lang_changed", "🌐 Đã chuyển sang Tiếng Việt.", "🌐 Switched to English.", "🌐 Switched to English.", "🌐 Switched to English.");
+add("ctv.btn_link", "🔗 Link giới thiệu", "🔗 Referral link", "🔗 Referral link", "🔗 Referral link");
+add("ctv.btn_commissions", "💰 Hoa hồng", "💰 Commission", "💰 Commission", "💰 Commission");
+add("ctv.btn_settlements", "💸 Lịch sử thanh toán", "💸 Payout history", "💸 Payout history", "💸 Payout history");
+add("ctv.btn_payout", "🏦 Tài khoản nhận HH", "🏦 Payout details", "🏦 Payout details", "🏦 Payout details");
+add("ctv.btn_refresh", "🔄 Làm mới", "🔄 Refresh", "🔄 Refresh", "🔄 Refresh");
+add("ctv.btn_language", "🌐 Ngôn ngữ", "🌐 Language", "🌐 Language", "🌐 Language");
+add("ctv.btn_back", "⬅️ Về dashboard", "⬅️ Back to dashboard", "⬅️ Back to dashboard", "⬅️ Back to dashboard");
+add("ctv.btn_edit_payout", "✏️ Cập nhật thông tin", "✏️ Update details", "✏️ Update details", "✏️ Update details");
+add("ctv.btn_send_qr", "🖼 Gửi ảnh QR", "🖼 Send QR image", "🖼 Send QR image", "🖼 Send QR image");
+add("ctv.btn_confirm", "✅ Xác nhận", "✅ Confirm", "✅ Confirm", "✅ Confirm");
+add("ctv.btn_cancel", "↩️ Hủy", "↩️ Cancel", "↩️ Cancel", "↩️ Cancel");
+add("ctv.dash_title", "🤝 <b>CTV — {name}</b>", "🤝 <b>PARTNER — {name}</b>", "🤝 <b>PARTNER — {name}</b>", "🤝 <b>PARTNER — {name}</b>");
+add("ctv.dash_ref", "🔗 Mã giới thiệu: <code>{code}</code>", "🔗 Referral code: <code>{code}</code>", "🔗 Referral code: <code>{code}</code>", "🔗 Referral code: <code>{code}</code>");
+add("ctv.dash_referred", "👥 Khách giới thiệu: <b>{count}</b>", "👥 Referred customers: <b>{count}</b>", "👥 Referred customers: <b>{count}</b>", "👥 Referred customers: <b>{count}</b>");
+add("ctv.dash_completed", "✅ Giao dịch hoàn tất: <b>{count}</b>", "✅ Completed transactions: <b>{count}</b>", "✅ Completed transactions: <b>{count}</b>", "✅ Completed transactions: <b>{count}</b>");
+add("ctv.dash_payout_line", "💳 Nhận hoa hồng: {state}", "💳 Payout details: {state}", "💳 Payout details: {state}", "💳 Payout details: {state}");
+add("ctv.state_payout_set", "✅ đã thiết lập", "✅ set up", "✅ set up", "✅ set up");
+add("ctv.state_payout_missing", "⚠️ chưa có", "⚠️ not set up", "⚠️ not set up", "⚠️ not set up");
+add("ctv.dash_commissions", "💰 Hoa hồng:", "💰 Commission:", "💰 Commission:", "💰 Commission:");
+add("ctv.dash_pending", "• Đang chờ: <b>{amount}</b>", "• Pending: <b>{amount}</b>", "• Pending: <b>{amount}</b>", "• Pending: <b>{amount}</b>");
+add("ctv.dash_available", "• Có thể rút: <b>{amount}</b>", "• Available: <b>{amount}</b>", "• Available: <b>{amount}</b>", "• Available: <b>{amount}</b>");
+add("ctv.dash_paid", "• Đã thanh toán: <b>{amount}</b>", "• Paid: <b>{amount}</b>", "• Paid: <b>{amount}</b>", "• Paid: <b>{amount}</b>");
+add("ctv.dash_link", "🔗 Link: <code>{link}</code>", "🔗 Link: <code>{link}</code>", "🔗 Link: <code>{link}</code>", "🔗 Link: <code>{link}</code>");
+add("ctv.dash_link_missing", "🔗 Link: liên hệ Admin (bot chưa có username).", "🔗 Link: contact Admin (bot has no username yet).", "🔗 Link: contact Admin (bot has no username yet).", "🔗 Link: contact Admin (bot has no username yet).");
+add("ctv.link_title", "🔗 <b>Link giới thiệu của bạn:</b>", "🔗 <b>Your referral link:</b>", "🔗 <b>Your referral link:</b>", "🔗 <b>Your referral link:</b>");
+add("ctv.link_hint", "Khách bấm link sẽ được gán về CTV của bạn (chỉ khách mới / chưa gán).", "Customers tapping this link are attributed to you (new / unassigned customers only).", "Customers tapping this link are attributed to you (new / unassigned customers only).", "Customers tapping this link are attributed to you (new / unassigned customers only).");
+add("ctv.link_no_username", "⚠️ Bot chưa có username công khai. Vui lòng liên hệ Admin.", "⚠️ The bot has no public username yet. Please contact the Admin.", "⚠️ The bot has no public username yet. Please contact the Admin.", "⚠️ The bot has no public username yet. Please contact the Admin.");
+add("ctv.commissions_title", "💰 <b>HOA HỒNG GẦN NHẤT</b>", "💰 <b>RECENT COMMISSIONS</b>", "💰 <b>RECENT COMMISSIONS</b>", "💰 <b>RECENT COMMISSIONS</b>");
+add("ctv.commissions_empty", "Chưa có hoa hồng nào.", "No commissions yet.", "No commissions yet.", "No commissions yet.");
+add("ctv.level_direct", "Đơn trực tiếp", "Direct order", "Direct order", "Direct order");
+add("ctv.level_n", "Hoa hồng tầng {level}", "Level {level} commission", "Level {level} commission", "Level {level} commission");
+add("ctv.commission_fixed", "{amount} cố định", "{amount} fixed", "{amount} fixed", "{amount} fixed");
+add("ctv.commission_spread", "+ {amount} chia sẻ tỷ giá", "+ {amount} rate-share bonus", "+ {amount} rate-share bonus", "+ {amount} rate-share bonus");
+add("ctv.settlements_title", "💸 <b>LỊCH SỬ THANH TOÁN HOA HỒNG</b>", "💸 <b>PAYOUT HISTORY</b>", "💸 <b>PAYOUT HISTORY</b>", "💸 <b>PAYOUT HISTORY</b>");
+add("ctv.settlements_empty", "Chưa có đợt thanh toán nào.", "No payouts yet.", "No payouts yet.", "No payouts yet.");
+add("ctv.settlement_items", "{count} hoa hồng", "{count} commissions", "{count} commissions", "{count} commissions");
+add("ctv.payout_title", "💳 <b>THÔNG TIN NHẬN HOA HỒNG</b>", "💳 <b>PAYOUT DETAILS</b>", "💳 <b>PAYOUT DETAILS</b>", "💳 <b>PAYOUT DETAILS</b>");
+add("ctv.payout_empty", "Chưa có thông tin nhận hoa hồng.", "No payout details yet.", "No payout details yet.", "No payout details yet.");
+add("ctv.payout_bank_label", "🏦 Ngân hàng: <b>{value}</b>", "🏦 Bank: <b>{value}</b>", "🏦 Bank: <b>{value}</b>", "🏦 Bank: <b>{value}</b>");
+add("ctv.payout_account_label", "💳 Số TK: <code>{value}</code>", "💳 Account No.: <code>{value}</code>", "💳 Account No.: <code>{value}</code>", "💳 Account No.: <code>{value}</code>");
+add("ctv.payout_holder_label", "👤 Chủ TK: {value}", "👤 Account holder: {value}", "👤 Account holder: {value}", "👤 Account holder: {value}");
+add("ctv.payout_qr_line", "🖼 Ảnh QR: {state}", "🖼 QR image: {state}", "🖼 QR image: {state}", "🖼 QR image: {state}");
+add("ctv.state_qr_set", "✅ đã tải lên (Admin xem thủ công)", "✅ uploaded (Admin reviews manually)", "✅ uploaded (Admin reviews manually)", "✅ uploaded (Admin reviews manually)");
+add("ctv.state_qr_missing", "— chưa có", "— not uploaded", "— not uploaded", "— not uploaded");
+add("ctv.payout_edit_title", "💳 <b>CẬP NHẬT THÔNG TIN NHẬN HOA HỒNG</b>\n\nGửi thông tin nhận tiền ở dạng tự do, ví dụ:\n<code>ABA 001234567 - BUI DUY</code>\n<code>Bakong: abc@bakong</code>\n<code>Vietcombank 1234567890 Nguyen Van A</code>\n\n<i>Chỉ cần rõ ràng để Admin chuyển tiền — không bắt buộc mẫu nào.</i>\n\nGửi /cancel để hủy.", "💳 <b>UPDATE PAYOUT DETAILS</b>\n\nSend your payout details as free-form text, e.g.:\n<code>ABA 001234567 - BUI DUY</code>\n<code>Bakong: abc@bakong</code>\n<code>Vietcombank 1234567890 Nguyen Van A</code>\n\n<i>Just make it clear enough for Admin to pay you — no fixed format required.</i>\n\nSend /cancel to abort.", "💳 <b>UPDATE PAYOUT DETAILS</b>\n\nSend your payout details as free-form text, e.g.:\n<code>ABA 001234567 - BUI DUY</code>\n<code>Bakong: abc@bakong</code>\n<code>Vietcombank 1234567890 Nguyen Van A</code>\n\n<i>Just make it clear enough for Admin to pay you — no fixed format required.</i>\n\nSend /cancel to abort.", "💳 <b>UPDATE PAYOUT DETAILS</b>\n\nSend your payout details as free-form text, e.g.:\n<code>ABA 001234567 - BUI DUY</code>\n<code>Bakong: abc@bakong</code>\n<code>Vietcombank 1234567890 Nguyen Van A</code>\n\n<i>Just make it clear enough for Admin to pay you — no fixed format required.</i>\n\nSend /cancel to abort.");
+add("ctv.payout_qr_title", "🖼 <b>GỬI ẢNH QR NHẬN HOA HỒNG</b>\n\nGửi ảnh QR (PNG/JPG) vào khung chat.\n\n<i>Ảnh chỉ mang tính THAM KHẢO — không OCR, không kiểm tra tự động; Admin xem thủ công khi chi trả.</i>\n\nGửi /cancel để hủy.", "🖼 <b>SEND YOUR PAYOUT QR IMAGE</b>\n\nSend the QR image (PNG/JPG) into this chat.\n\n<i>The image is REFERENCE ONLY — no OCR, no automatic checks; Admin reviews it manually when paying.</i>\n\nSend /cancel to abort.", "🖼 <b>SEND YOUR PAYOUT QR IMAGE</b>\n\nSend the QR image (PNG/JPG) into this chat.\n\n<i>The image is REFERENCE ONLY — no OCR, no automatic checks; Admin reviews it manually when paying.</i>\n\nSend /cancel to abort.", "🖼 <b>SEND YOUR PAYOUT QR IMAGE</b>\n\nSend the QR image (PNG/JPG) into this chat.\n\n<i>The image is REFERENCE ONLY — no OCR, no automatic checks; Admin reviews it manually when paying.</i>\n\nSend /cancel to abort.");
+add("ctv.payout_confirm_title", "⚠️ <b>XÁC NHẬN THÔNG TIN NHẬN HOA HỒNG</b>", "⚠️ <b>CONFIRM PAYOUT DETAILS</b>", "⚠️ <b>CONFIRM PAYOUT DETAILS</b>", "⚠️ <b>CONFIRM PAYOUT DETAILS</b>");
+add("ctv.payout_confirm_hint", "<i>Chỉ là thông tin tham khảo — Admin sẽ xem thủ công khi chi trả.</i>", "<i>Reference information only — Admin reviews it manually when paying.</i>", "<i>Reference information only — Admin reviews it manually when paying.</i>", "<i>Reference information only — Admin reviews it manually when paying.</i>");
+add("ctv.payout_saved", "✅ <b>ĐÃ LƯU THÔNG TIN NHẬN HOA HỒNG</b>", "✅ <b>PAYOUT DETAILS SAVED</b>", "✅ <b>PAYOUT DETAILS SAVED</b>", "✅ <b>PAYOUT DETAILS SAVED</b>");
+add("ctv.payout_save_failed", "❌ Không lưu được thông tin.", "❌ Could not save the details.", "❌ Could not save the details.", "❌ Could not save the details.");
+add("ctv.payout_cancelled", "Đã hủy cập nhật thông tin nhận hoa hồng.", "Payout details update cancelled.", "Payout details update cancelled.", "Payout details update cancelled.");
+add("ctv.payout_invalid", "❌ Thông tin chưa hợp lệ: không được trống, tối đa 500 ký tự và không bắt đầu bằng \"/\".\nGửi lại hoặc /cancel để hủy.", "❌ Invalid details: must be non-empty, at most 500 characters and must not start with \"/\".\nSend again or /cancel to abort.", "❌ Invalid details: must be non-empty, at most 500 characters and must not start with \"/\".\nSend again or /cancel to abort.", "❌ Invalid details: must be non-empty, at most 500 characters and must not start with \"/\".\nSend again or /cancel to abort.");
+add("ctv.qr_need_image", "📷 Vui lòng gửi ẢNH QR (PNG/JPG), hoặc /cancel để hủy.", "📷 Please send a QR IMAGE (PNG/JPG), or /cancel to abort.", "📷 Please send a QR IMAGE (PNG/JPG), or /cancel to abort.", "📷 Please send a QR IMAGE (PNG/JPG), or /cancel to abort.");
+add("ctv.qr_too_large", "⚠️ Ảnh quá lớn (giới hạn {limit}MB). Vui lòng nén/gửi ảnh nhỏ hơn.", "⚠️ Image too large (limit {limit}MB). Please compress/send a smaller image.", "⚠️ Image too large (limit {limit}MB). Please compress/send a smaller image.", "⚠️ Image too large (limit {limit}MB). Please compress/send a smaller image.");
+add("ctv.qr_invalid", "❌ Ảnh không hợp lệ hoặc quá lớn. Vui lòng gửi lại.", "❌ Invalid or oversized image. Please send it again.", "❌ Invalid or oversized image. Please send it again.", "❌ Invalid or oversized image. Please send it again.");
+add("ctv.qr_not_image", "❌ Vui lòng gửi ẢNH QR (PNG/JPG) — tệp này không phải ảnh.", "❌ Please send a QR IMAGE (PNG/JPG) — this file is not an image.", "❌ Please send a QR IMAGE (PNG/JPG) — this file is not an image.", "❌ Please send a QR IMAGE (PNG/JPG) — this file is not an image.");
+add("ctv.qr_saved", "✅ <b>ĐÃ LƯU ẢNH QR NHẬN HOA HỒNG</b>\n🖼 Ảnh chỉ mang tính THAM KHẢO — Admin sẽ xem thủ công khi chi trả.", "✅ <b>PAYOUT QR IMAGE SAVED</b>\n🖼 The image is REFERENCE ONLY — Admin reviews it manually when paying.", "✅ <b>PAYOUT QR IMAGE SAVED</b>\n🖼 The image is REFERENCE ONLY — Admin reviews it manually when paying.", "✅ <b>PAYOUT QR IMAGE SAVED</b>\n🖼 The image is REFERENCE ONLY — Admin reviews it manually when paying.");
+add("ctv.qr_save_failed", "❌ Không lưu được ảnh QR: {reason}", "❌ Could not save the QR image: {reason}", "❌ Could not save the QR image: {reason}", "❌ Could not save the QR image: {reason}");
+add("ctv.status_held", "Đang chờ", "Pending", "Pending", "Pending");
+add("ctv.status_available", "Khả dụng", "Available", "Available", "Available");
+add("ctv.status_paid", "Đã thanh toán", "Paid", "Paid", "Paid");
+add("ctv.status_reversed", "Đã hoàn tác", "Reversed", "Reversed", "Reversed");
+add("ctv.settlement_paid_title", "💸 <b>HOA HỒNG ĐÃ ĐƯỢC THANH TOÁN</b>", "💸 <b>COMMISSION PAID</b>", "💸 <b>COMMISSION PAID</b>", "💸 <b>COMMISSION PAID</b>");
+add("ctv.settlement_paid_amount", "💵 Số tiền: <b>{amount}</b>", "💵 Amount: <b>{amount}</b>", "💵 Amount: <b>{amount}</b>", "💵 Amount: <b>{amount}</b>");
+add("ctv.settlement_paid_items", "📦 Số hoa hồng: <b>{count}</b>", "📦 Commissions: <b>{count}</b>", "📦 Commissions: <b>{count}</b>", "📦 Commissions: <b>{count}</b>");
+add("ctv.settlement_paid_time", "🕒 Thời gian: {time}", "🕒 Time: {time}", "🕒 Time: {time}", "🕒 Time: {time}");
+add("ctv.settlement_paid_thanks", "Cảm ơn bạn đã đồng hành! 🤝", "Thank you for partnering with us! 🤝", "Thank you for partnering with us! 🤝", "Thank you for partnering with us! 🤝");
+add("ctv.proof_caption", "🧾 Bằng chứng chuyển tiền hoa hồng (tham khảo).", "🧾 Commission payout proof (reference).", "🧾 Commission payout proof (reference).", "🧾 Commission payout proof (reference).");
 // CLEAR CHAT — TELEGRAM MESSAGE CLEANUP ONLY. Never deletes/changes any
 // business record: Customer/Orders/Quotes/FileEvidence/AuditLog/commissions
 // and all backend data remain fully intact (display-only visibility rule).
@@ -278,6 +362,8 @@ add("payout.prompt", "🏦 Để nhận <b>{amount} {currency}</b>, anh/chị vu
 add("support.active_title", "💬 <b>BẠN ĐANG ĐƯỢC NHÂN VIÊN HỖ TRỢ TRỰC TIẾP</b>", "💬 <b>YOU ARE BEING HELPED BY SUPPORT STAFF</b>", "💬 <b>អ្នកកំពុងទទួលជំនួយពីបុគ្គលិក</b>", "💬 <b>客服正在为您服务</b>");
 add("support.active_body", "Anh/chị vui lòng tiếp tục nhắn tin tại khung chat này.\nNhân viên CSKH sẽ phản hồi anh/chị ngay.\n\nMuốn tự đổi tiền theo tỷ giá tự động? Bấm <b>↩️ Quay lại đổi tiền</b>.", "Please continue messaging in this chat.\nA support agent will reply soon.\n\nWant automatic exchange instead? Tap <b>↩️ Back to exchange</b>.", "សូមបន្តផ្ញើសារនៅទីនេះ។\nបុគ្គលិកនឹងឆ្លើយតបឆាប់ៗ។\n\nចង់ផ្លាស់ប្តូរស្វ័យប្រវត្តិ? ចុច <b>↩️ ត្រឡប់ទៅការផ្លាស់ប្តូរ</b>។", "请继续在此聊天留言。\n客服将尽快回复。\n\n若要自动兑换，请点击 <b>↩️ 返回兑换</b>。");
 add("support.requested", "✅ Đã gửi yêu cầu hỗ trợ. Nhân viên sẽ liên hệ anh/chị sớm nhất.\nTrong lúc chờ, anh/chị vẫn có thể nhắn tin tại đây.", "✅ Support request sent. Staff will contact you soon.\nYou can keep messaging here while waiting.", "✅ បានផ្ញើសំណើជំនួយ។ បុគ្គលិកនឹងទាក់ទងឆាប់ៗ។\nអ្នកនៅតែអាចផ្ញើសារនៅទីនេះ។", "✅ 已发送客服请求，工作人员将尽快联系您。\n等待期间仍可在此留言。");
+// Order-linked support confirmation — shows ONLY the canonical public Order Ref.
+add("support.requested_order", "💬 Yêu cầu hỗ trợ cho đơn {id} đã được gửi.\nNhân viên sẽ hỗ trợ bạn sớm nhất có thể.", "💬 Support request for order {id} has been sent.\nOur staff will assist you shortly.", "💬 សំណើជំនួយសម្រាប់ការបញ្ជាទិញ {id} ត្រូវបានផ្ញើ។\nបុគ្គលិកនឹងជួយអ្នកឆាប់ៗ។", "💬 订单 {id} 的客服请求已发送。\n客服人员会尽快为您处理。");
 add("support.exited", "✅ Đã kết thúc hỗ trợ trực tiếp. Anh/chị có thể đổi tiền tự động ngay.", "✅ Live support ended. You can use automatic exchange now.", "✅ បានបញ្ចប់ជំនួយផ្ទាល់។ ឥឡូវអ្នកអាចផ្លាស់ប្តូរស្វ័យប្រវត្តិបាន។", "✅ 已结束人工客服，您可以继续使用自动兑换。");
 add("support.media_waiting", "💬 Yêu cầu hỗ trợ của anh/chị đã được ghi nhận. Media đã lưu; nhân viên sẽ xem khi tiếp nhận.", "💬 Your support request is noted. Media is saved; staff will see it when they take the ticket.", "💬 សំណើជំនួយត្រូវបានកត់ត្រា។ មេឌៀត្រូវបានរក្សាទុក។", "💬 已记录您的客服请求。媒体已保存，客服接入后可查看。");
 add("support.media_relayed", "✅ Đã chuyển tới nhân viên hỗ trợ.", "✅ Forwarded to support staff.", "✅ បានបញ្ជូនទៅបុគ្គលិកជំនួយ។", "✅ 已转发给客服。");
@@ -296,6 +382,9 @@ add("status.PAYMENT_CONFIRMED", "Đã xác nhận tiền vào", "Payment confirm
 add("status.WAITING_PAYOUT", "Cần thông tin nhận tiền", "Awaiting your bank details", "ត្រូវការព័ត៌មានគណនីទទួល", "待提供收款信息");
 add("status.PAYOUT_SENT", "Đã chi tiền", "Payout sent", "បានចំណាយ", "已出款");
 add("status.MANUAL_REVIEW", "Đang xem xét", "Under review", "កំពុងពិនិត្យ", "人工审核中");
+// Neutral customer-facing wording for the internal risk/ops status — Admin/CSKH
+// keep the precise internal term; the customer must NEVER see raw enum text.
+add("status.PAYMENT_MISMATCH", "Đang được kiểm tra", "Under review", "កំពុងពិនិត្យ", "审核中");
 add("status.SUSPICIOUS", "Cần kiểm tra thêm", "Needs review", "ត្រូវពិនិត្យបន្ថែម", "需进一步检查");
 add("status.COMPLETED", "Hoàn tất", "Completed", "បានបញ្ចប់", "已完成");
 add("status.CANCELLED", "Đã hủy", "Cancelled", "បានលុបចោល", "已取消");
@@ -312,6 +401,18 @@ add("rate.skip", "⏭ Bỏ qua", "⏭ Skip", "⏭ រំលង", "⏭ 跳过");
 add("rate.thanks", "🙏 Cảm ơn phản hồi của bạn!", "🙏 Thanks for your feedback!", "🙏 អរគុណសម្រាប់មតិយោបល់!", "🙏 感谢您的反馈！");
 add("rate.thanks_skip", "👋 Cảm ơn bạn đã sử dụng dịch vụ!", "👋 Thanks for using our service!", "👋 អរគុណសម្រាប់ការប្រើប្រាស់សេវាកម្ម!", "👋 感谢您使用我们的服务！");
 add("quote.summary", "💱 <b>{src} → {tgt}</b>", "💱 <b>{src} → {tgt}</b>", "💱 <b>{src} → {tgt}</b>", "💱 <b>{src} → {tgt}</b>");
+// --- Transparent Quote breakdown (rate source + fixed-side fee placement) ---
+// The rate placeholder receives the ALREADY-FORMATTED frozen rate string
+// ("1 USD = 25 900 VND"). The {fee}/{amount} placeholders receive pre-formatted
+// Decimal values. Financial logic never branches by locale.
+add("quote.line.rate", "• Tỷ giá: <b>{rate}</b>", "• Rate: <b>{rate}</b>", "• អត្រាប្តូរប្រាក់: <b>{rate}</b>", "• 汇率：<b>{rate}</b>");
+add("quote.line.conversion", "• Quy đổi: <b>{amount}</b>", "• Conversion: <b>{amount}</b>", "• ការបម្លែង: <b>{amount}</b>", "• 换算：<b>{amount}</b>");
+add("quote.line.fee_minus", "• Phí dịch vụ: <b>-{fee}</b>", "• Service fee: <b>-{fee}</b>", "• ថ្លៃសេវា: <b>-{fee}</b>", "• 服务费：<b>-{fee}</b>");
+add("quote.line.fee_plus", "• Phí dịch vụ: <b>+{fee}</b>", "• Service fee: <b>+{fee}</b>", "• ថ្លៃសេវា: <b>+{fee}</b>", "• 服务费：<b>+{fee}</b>");
+add("quote.line.net_received", "• Thực nhận: <b>{amount}</b>", "• Net received: <b>{amount}</b>", "• ចំនួនទទួលបាន: <b>{amount}</b>", "• 实收：<b>{amount}</b>");
+add("quote.line.total_to_pay", "• Tổng cần trả: <b>{amount}</b>", "• Total to pay: <b>{amount}</b>", "• សរុបត្រូវបង់: <b>{amount}</b>", "• 应付总额：<b>{amount}</b>");
+add("quote.line.payment_rounded", "• Làm tròn thanh toán: <b>{amount}</b>", "• Payment rounded: <b>{amount}</b>", "• បង្គត់ចំនួនត្រូវបង់: <b>{amount}</b>", "• 支付金额取整：<b>{amount}</b>");
+add("quote.line.customer_receives", "• Khách nhận: <b>{amount}</b>", "• You receive: <b>{amount}</b>", "• អ្នកទទួលបាន: <b>{amount}</b>", "• 您将收到：<b>{amount}</b>");
 
 // --- Dynamic payment QR V1 (customer card, all locales) ---
 add("paymentqr.pay_line", "Chuyển: <b>{amount} {currency}</b>", "Transfer: <b>{amount} {currency}</b>", "ផ្ទេរ: <b>{amount} {currency}</b>", "转账：<b>{amount} {currency}</b>");

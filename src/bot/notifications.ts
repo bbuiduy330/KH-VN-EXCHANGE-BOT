@@ -6,6 +6,7 @@ import { prisma } from "../database/client.js";
 import { PermissionService } from "../modules/permissions/permission-service.js";
 import { MoneyService } from "../modules/money/money-service.js";
 import { OrderService } from "../modules/orders/order-service.js";
+import { formatPublicOrderRef, orderPublicRef } from "../modules/orders/order-ref.js";
 import { getCustomerBillEvidence } from "../modules/orders/bill-evidence.js";
 import { LocalStorageService } from "../modules/storage/local-storage-service.js";
 import { FileService } from "../modules/files/file-service.js";
@@ -276,8 +277,32 @@ export function renderSupportRequestText(customer: {
 }
 
 /**
+ * STAFF-ONLY recent-order context appended to GENERIC support notifications
+ * (§ customer has no history browser — this context is for Admin/CSKH only).
+ * Active order first if one exists, otherwise the latest 2-3 transactions of
+ * any status (COMPLETED/CANCELLED included). Bounded take=3 keyset-free query.
+ * Uses the canonical public Order Ref — never the raw internal Order.id.
+ */
+export async function renderSupportRecentOrders(customerId: string): Promise<string> {
+  const recent: any[] = await prisma.order
+    .findMany({
+      where: { customerId },
+      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+      take: 3
+    })
+    .catch(() => []);
+  if (recent.length === 0) return "";
+  const lines = recent.map(
+    (o) =>
+      `${formatPublicOrderRef(o)} · ${MoneyService.formatMoney(o.sourceAmount, o.sourceCurrency)} → ${MoneyService.formatMoney(o.targetAmount, o.targetCurrency)} · ${t("vi", `status.${o.status}`)} · ${formatAdminDateTime(o.createdAt)}`
+  );
+  return `\n\n📌 Giao dịch gần nhất\n${lines.join("\n")}`;
+}
+
+/**
  * Support-request action keyboard — existing screens only:
- * claim ticket (C3) / Admin customer profile / latest active order.
+ * claim ticket (C3) / Admin customer profile / latest active order / the
+ * STAFF-ONLY full transaction browser (📋 Giao dịch khách → CRM history).
  * Button payloads carry the internal Customer.id (stable callback identity);
  * the LABELS never show it.
  */
@@ -287,6 +312,7 @@ export async function supportRequestKeyboard(customerId: string): Promise<Inline
     .text("👤 Hồ sơ khách", `ops:customer:detail:${customerId}`);
   const latest = await OrderService.getLatestActiveOrderForCustomer(customerId).catch(() => null);
   if (latest) kb.row().text("📦 Giao dịch gần nhất", `ops:order:detail:${latest.id}`);
+  kb.row().text("📋 Giao dịch khách", `ops:customer:history:${customerId}:all`);
   return kb;
 }
 
@@ -419,7 +445,7 @@ export async function notifyOrderCreated(order: any, customer: any): Promise<voi
   const text =
     `✅ <b>KHÁCH ĐÃ XÁC NHẬN ĐỔI TIỀN</b> <i>(thông báo nội bộ Admin)</i>\n\n` +
     `${customerIdentity(customer)}\n` +
-    `📦 ${shortId(order.id)}\n\n` +
+    `📦 ${formatPublicOrderRef(order)}\n\n` +
     `💱 ${MoneyService.formatMoney(order.sourceAmount, order.sourceCurrency)} → ${MoneyService.formatMoney(order.targetAmount, order.targetCurrency)}\n` +
     `📊 Tỷ giá khóa: ${MoneyService.formatEffectiveRate(order.sourceCurrency, order.targetCurrency, order.rate)}\n` +
     (memo ? `🔖 Nội dung CK khách cần dùng: <code>${escapeHtml(memo)}</code>\n` : "") +
@@ -450,7 +476,7 @@ export async function notifyBillReceived(order: any, opts?: { risk?: "DUPLICATE_
   const text =
     `📷 <b>CÓ BILL MỚI — CHỜ XÁC MINH</b>\n\n` +
     `${customerIdentity(order.customer)}\n` +
-    `📦 ${shortId(order.id)}\n` +
+    `📦 ${formatPublicOrderRef(order)}\n` +
     `💱 ${MoneyService.formatMoney(order.sourceAmount, order.sourceCurrency)} → ${MoneyService.formatMoney(order.targetAmount, order.targetCurrency)}\n\n` +
     riskLine +
     `⚠️ Xử lý tài chính thực hiện trong <b>chat riêng với bot</b> → 🔴 Việc cần xử lý.`;
@@ -479,12 +505,12 @@ export async function notifyBillReceived(order: any, opts?: { risk?: "DUPLICATE_
         if (chatId && botInstance) {
           if (isPdf) {
             await botInstance.api.sendDocument(chatId, new InputFile(buffer, evidence.fileName || "bill.pdf"), {
-              caption: `📷 Biên lai khách · đơn ${shortId(order.id)}`,
+              caption: `📷 Biên lai khách · đơn ${formatPublicOrderRef(order)}`,
               parse_mode: "HTML"
             });
           } else {
             await botInstance.api.sendPhoto(chatId, new InputFile(buffer), {
-              caption: `📷 Biên lai khách · đơn ${shortId(order.id)}`,
+              caption: `📷 Biên lai khách · đơn ${formatPublicOrderRef(order)}`,
               parse_mode: "HTML"
             });
           }
@@ -528,12 +554,12 @@ export async function sendPayoutReceiptToCustomer(order: any): Promise<boolean> 
     const chatId = String(customer.telegramId);
     if (isPdf) {
       await botInstance.api.sendDocument(chatId, new InputFile(buffer, evidence?.fileName || "receipt.pdf"), {
-        caption: `${t(locale, "payout.received_title")}\n${t(locale, "payout.receipt_caption", { id: order.id })}`,
+        caption: `${t(locale, "payout.received_title")}\n${t(locale, "payout.receipt_caption", { id: orderPublicRef(order) })}`,
         parse_mode: "HTML"
       });
     } else {
       await botInstance.api.sendPhoto(chatId, new InputFile(buffer), {
-        caption: `${t(locale, "payout.received_title")}\n${t(locale, "payout.receipt_caption", { id: order.id })}`,
+        caption: `${t(locale, "payout.received_title")}\n${t(locale, "payout.receipt_caption", { id: orderPublicRef(order) })}`,
         parse_mode: "HTML"
       });
     }
@@ -564,10 +590,14 @@ export async function notifyOrderCompletedWithRating(order: any): Promise<void> 
     .text("⭐⭐⭐⭐ 4", `customer:rate:${order.id}:4`)
     .text("⭐⭐⭐⭐⭐ 5", `customer:rate:${order.id}:5`)
     .row()
-    .text(t(locale, "rate.skip"), `customer:rate:skip:${order.id}`);
+    .text(t(locale, "rate.skip"), `customer:rate:skip:${order.id}`)
+    .row()
+    // Quick support for THIS exact order — internal Order.id only in the
+    // callback payload; the customer-facing label never shows it.
+    .text(t(locale, "order.support_this_btn"), `customer:support:order:${order.id}`);
   await sendToCustomer(
     String(customer.telegramId),
-    `${t(locale, "order.completed_title", { id: order.id })}\n\n${t(locale, "rate.title")}`,
+    `${t(locale, "order.completed_title", { id: orderPublicRef(order) })}\n\n${t(locale, "rate.title")}`,
     { parse_mode: "HTML", reply_markup: kb }
   );
 }
@@ -577,7 +607,7 @@ export async function notifyPayoutReady(order: any): Promise<void> {
   const text =
     `💸 <b>CẦN THANH TOÁN KHÁCH</b>\n\n` +
     `${customerIdentity(order.customer)}\n` +
-    `📦 ${shortId(order.id)}\n\n` +
+    `📦 ${formatPublicOrderRef(order)}\n\n` +
     `Khách nhận:\n${MoneyService.formatMoney(order.targetAmount, order.targetCurrency)}\n\n` +
     `⚠️ Xử lý tài chính thực hiện trong <b>chat riêng với bot</b> → 🔴 Việc cần xử lý.`;
 
@@ -600,7 +630,7 @@ export async function notifyAwaitingPayoutInfo(order: any): Promise<void> {
   const text =
     `🟡 <b>ĐÃ NHẬN TIỀN — CHỜ KHÁCH GỬI TK/QR NHẬN</b>\n\n` +
     `${customerIdentity(order.customer)}\n` +
-    `📦 ${shortId(order.id)}\n` +
+    `📦 ${formatPublicOrderRef(order)}\n` +
     `💰 Cần chi trả: ${MoneyService.formatMoney(order.targetAmount, order.targetCurrency)}\n\n` +
     `Đơn CHƯA SẴN SÀNG payout. Khách đã được yêu cầu chọn tài khoản nhận tiền; ` +
     `khi khách xác nhận, hệ thống sẽ báo 💸 Sẵn sàng payout.`;
@@ -626,7 +656,7 @@ export async function notifyOrderCancelledByCustomer(order: any): Promise<void> 
   const text =
     `❌ <b>KHÁCH ĐÃ HỦY ĐƠN</b>\n\n` +
     `${customerIdentity(order.customer)}\n` +
-    `📦 ${shortId(order.id)}\n` +
+    `📦 ${formatPublicOrderRef(order)}\n` +
     `💱 ${MoneyService.formatMoney(order.sourceAmount, order.sourceCurrency)} → ${MoneyService.formatMoney(order.targetAmount, order.targetCurrency)}\n` +
     `📍 Trạng thái: <b>CANCELLED</b>\n` +
     `🔖 Nguồn: <b>CUSTOMER_CANCELLED</b>`;
@@ -640,7 +670,7 @@ export async function notifyOrderCancelledByAdmin(order: any, adminLabel: string
   const text =
     `❌ <b>ADMIN ĐÃ HỦY ĐƠN</b>\n\n` +
     `${customerIdentity(order.customer)}\n` +
-    `📦 ${shortId(order.id)}\n` +
+    `📦 ${formatPublicOrderRef(order)}\n` +
     `🔐 Admin: <b>${escapeHtml(adminLabel)}</b>\n` +
     `📝 Lý do: <b>${escapeHtml(reason)}</b>\n` +
     `📍 Trạng thái: <b>CANCELLED</b>\n` +
@@ -655,7 +685,7 @@ export async function notifyOrderAutoCancelled(order: any, remindersSent: number
   const text =
     `⏰ <b>TỰ ĐỘNG HỦY ĐƠN — QUÁ HẠN THANH TOÁN</b>\n\n` +
     `${customerIdentity(order.customer)}\n` +
-    `📦 Mã đơn: ${shortId(order.id)}\n` +
+    `📦 Mã đơn: ${formatPublicOrderRef(order)}\n` +
     `🕒 Tạo lúc: ${formatAdminDateTime(order.createdAt)} (GMT+7)\n` +
     `🔔 Số lần nhắc đã gửi: <b>${remindersSent}</b>\n` +
     `📝 Lý do: quá hạn thanh toán (${remindersSent} lần nhắc không hiệu lực)\n` +
@@ -670,7 +700,7 @@ export async function notifyLateBillOnCancelledOrder(order: any): Promise<void> 
   const text =
     `🚨 <b>BIÊN LAI GỬI SAU KHI ĐƠN ĐÃ HỦY — CẦN XEM XÉT THỦ CÔNG</b>\n\n` +
     `${customerIdentity(order.customer)}\n` +
-    `📦 ${shortId(order.id)}\n\n` +
+    `📦 ${formatPublicOrderRef(order)}\n\n` +
     `Khách vừa gửi bằng chứng chuyển tiền cho một đơn đã ở trạng thái <b>CANCELLED</b>. ` +
     `KHÔNG tự động mở lại đơn. Vui lòng xem biên lai gốc trong kho lưu trữ và quyết định thủ công ` +
     `(xem xét thủ công / hoàn tiền nếu cần).`;
@@ -700,12 +730,20 @@ export async function notifyPartnerSettlementPaid(settlementId: string): Promise
     if (!bot) return { sent: false, reason: "no_bot" };
     if (!telegramId) return { sent: false, reason: "no_telegram" };
 
-    const text =
-      `💸 <b>HOA HỒNG ĐÃ ĐƯỢC THANH TOÁN</b>\n\n` +
-      `💵 Số tiền: <b>$${Number(settlement.totalUsd ?? 0).toFixed(2)}</b>\n` +
-      `📦 Số hoa hồng: <b>${settlement.itemCount}</b>\n` +
-      `🕒 Thời gian: ${formatAdminDateTime(settlement.paidAt ?? new Date())}\n\n` +
-      `Cảm ơn bạn đã đồng hành! 🤝`;
+    // Partner locale (vi|en) — independent from Customer.locale.
+    // Partner.language NULL = the partner has not picked a language yet (has
+    // never opened /ctv): automatic notifications use CONCISE BILINGUAL
+    // VI + EN text and never silently assume Vietnamese, and NULL is never
+    // persisted as a language.
+    const partnerLang = settlement.partner?.language;
+    const ctvLoc = partnerLang === "en" ? "en" : "vi";
+    const renderSettlement = (loc: "vi" | "en"): string =>
+      `${t(loc, "ctv.settlement_paid_title")}\n\n` +
+      `${t(loc, "ctv.settlement_paid_amount", { amount: `$${Number(settlement.totalUsd ?? 0).toFixed(2)}` })}\n` +
+      `${t(loc, "ctv.settlement_paid_items", { count: settlement.itemCount })}\n` +
+      `${t(loc, "ctv.settlement_paid_time", { time: formatAdminDateTime(settlement.paidAt ?? new Date()) })}\n\n` +
+      `${t(loc, "ctv.settlement_paid_thanks")}`;
+    const text = !partnerLang ? `${renderSettlement("vi")}\n\n———\n\n${renderSettlement("en")}` : renderSettlement(ctvLoc);
     await bot.api.sendMessage(telegramId, text, { parse_mode: "HTML" });
 
     if (settlement.payoutProofFileId) {
@@ -713,10 +751,13 @@ export async function notifyPartnerSettlementPaid(settlementId: string): Promise
       const buffer = evidence?.filePath ? await FileService.getFile(evidence.filePath) : null;
       if (buffer && buffer.length > 0) {
         const file = new InputFile(buffer, evidence!.fileName || `settlement_${settlement.id.slice(-6)}`);
+        const proofCaption = !partnerLang
+          ? `${t("vi", "ctv.proof_caption")}\n${t("en", "ctv.proof_caption")}`
+          : t(ctvLoc, "ctv.proof_caption");
         if (String(evidence!.mimeType || "").startsWith("image/")) {
-          await bot.api.sendPhoto(telegramId, file, { caption: "🧾 Bằng chứng chuyển tiền hoa hồng (tham khảo)." });
+          await bot.api.sendPhoto(telegramId, file, { caption: proofCaption });
         } else {
-          await bot.api.sendDocument(telegramId, file, { caption: "🧾 Bằng chứng chuyển tiền hoa hồng (tham khảo)." });
+          await bot.api.sendDocument(telegramId, file, { caption: proofCaption });
         }
       }
     }

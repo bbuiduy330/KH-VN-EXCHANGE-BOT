@@ -12,7 +12,7 @@ import { ConversationalAIService } from "../../modules/ai/customer-ai-service.js
 import { FileService } from "../../modules/files/file-service.js";
 import { RuntimeConfigService } from "../../modules/system-config/runtime-config-service.js";
 import { MoneyService } from "../../modules/money/money-service.js";
-import { sendToStaff, sendToAdminNotificationChat, copyMessageToStaff, copyMessageToChat, notifyEligibleStaff, notifySupportRequest, renderSupportRequestText, supportRequestKeyboard, notifyOrderCreated, notifyBillReceived, sendToCustomer, notifyPayoutReady, shouldNotifyPayoutReady } from "../notifications.js";
+import { sendToStaff, sendToAdminNotificationChat, copyMessageToStaff, copyMessageToChat, notifyEligibleStaff, notifySupportRequest, renderSupportRequestText, renderSupportRecentOrders, supportRequestKeyboard, notifyOrderCreated, notifyBillReceived, sendToCustomer, notifyPayoutReady, shouldNotifyPayoutReady } from "../notifications.js";
 import { SystemConfigService } from "../../modules/system-config/system-config-service.js";
 import { generateTransferMemo } from "../../modules/orders/transfer-memo.js";
 import { parsePayoutDestinationText, parsePayoutDestinationPipe, parsePayoutDestinationWithAi, decodePayoutQrImage } from "../../modules/orders/payout-destination.js";
@@ -32,7 +32,6 @@ function maskPayoutAccount(accountNumber: string): string {
   return `****${n.slice(-4)}`;
 }
 import {
-  getCustomerMenuKeyboard,
   getLanguageSelectorKeyboard,
   getCustomerReplyKeyboard,
   renderCustomerWelcomeText,
@@ -155,7 +154,6 @@ export async function showCustomerStart(ctx: BotContext) {
     language: (ctx.from as { language_code?: string } | undefined)?.language_code
   });
   const locale = locOf(customer);
-  const keyboard = getCustomerMenuKeyboard(locale);
 
   // 1. Active order -> show/resume order status.
   const activeOrder = await OrderService.getLatestActiveOrderForCustomer(customer.id);
@@ -222,7 +220,6 @@ customerHandler.command("help", async (ctx) => {
   const locale = locOf(customer);
   await ctx.reply(t(locale, "help.body"), {
     parse_mode: "HTML",
-    reply_markup: getCustomerMenuKeyboard(locale)
   });
 });
 
@@ -237,15 +234,14 @@ customerHandler.command("orders", async (ctx) => {
 
   if (myOrders.length === 0) {
     return ctx.reply(t(locale, "order.active_empty"), {
-      reply_markup: getCustomerMenuKeyboard(locale)
     });
   }
 
-  let msg = `${t(locale, "order.history_title")}\n\n`;
+  let msg = `${t(locale, "order.active_title")}\n\n`;
   for (const o of myOrders.slice(0, 5)) {
     const srcAmt = MoneyService.formatAmount(o.sourceAmount, o.sourceCurrency);
     const tgtAmt = MoneyService.formatAmount(o.targetAmount, o.targetCurrency);
-    msg += `#${o.id.slice(-6)} · ${srcAmt} ${o.sourceCurrency} → ${tgtAmt} ${o.targetCurrency} · ${t(locale, `status.${o.status}`)}\n`;
+    msg += `${formatPublicOrderRef(o)} · ${srcAmt} ${o.sourceCurrency} → ${tgtAmt} ${o.targetCurrency} · ${t(locale, `status.${o.status}`)}\n`;
   }
 
   // E: active unpaid orders keep their full action set reachable from
@@ -253,7 +249,7 @@ customerHandler.command("orders", async (ctx) => {
   const actionable = myOrders.find((o: any) => OrderService.canCustomerCancel(o).allowed);
   await ctx.reply(msg, {
     parse_mode: "HTML",
-    reply_markup: actionable ? getActiveOrderActionKeyboard(actionable, locale) : getCustomerMenuKeyboard(locale)
+    reply_markup: actionable ? getActiveOrderActionKeyboard(actionable, locale) : undefined
   });
 });
 
@@ -297,7 +293,7 @@ async function showCustomerCancelWarning(ctx: BotContext, orderId: string): Prom
   const blocked = customerCancelBlockedText(order, locale);
   if (blocked) {
     // BILL_EXISTS / confirmed payment / completed / cancelled → no cancel UI.
-    return void ctx.reply(blocked, { parse_mode: "HTML", reply_markup: getCustomerMenuKeyboard(locale) });
+    return void ctx.reply(blocked, { parse_mode: "HTML" });
   }
 
   const amount = `${MoneyService.formatAmount(order.sourceAmount, order.sourceCurrency)} ${order.sourceCurrency}`;
@@ -356,7 +352,7 @@ customerHandler.callbackQuery(/^customer:order:cancel:confirm:([a-zA-Z0-9_-]+)$/
 
   const blocked = customerCancelBlockedText(order, locale);
   if (blocked) {
-    return void ctx.reply(blocked, { parse_mode: "HTML", reply_markup: getCustomerMenuKeyboard(locale) });
+    return void ctx.reply(blocked, { parse_mode: "HTML" });
   }
 
   try {
@@ -369,14 +365,18 @@ customerHandler.callbackQuery(/^customer:order:cancel:confirm:([a-zA-Z0-9_-]+)$/
       "CUSTOMER_CANCELLED",
       { source: "CUSTOMER_CANCELLED" }
     );
-    await ctx.reply(t(locale, "order.cancel_success", { id: formatPublicOrderRef(order) }), {
-      parse_mode: "HTML",
-      // Order-linked support — the customer NEVER types the Order number:
-      reply_markup: new InlineKeyboard().text(
-        t(locale, "payout.support_btn"),
-        `customer:support:order:${order.id}`
-      )
-    });
+    await ctx.reply(
+      `${t(locale, "order.cancel_success", { id: formatPublicOrderRef(order) })}\n` +
+        `${MoneyService.formatMoney(order.sourceAmount, order.sourceCurrency)} → ${MoneyService.formatMoney(order.targetAmount, order.targetCurrency)}`,
+      {
+        parse_mode: "HTML",
+        // Order-linked support — the customer NEVER types the Order number:
+        reply_markup: new InlineKeyboard().text(
+          t(locale, "order.support_this_btn"),
+          `customer:support:order:${order.id}`
+        )
+      }
+    );
     // Admin notification chat (Vietnamese) — audit already recorded in service.
     const fresh = await OrderService.getOrder(orderId);
     if (fresh) await notifyOrderCancelledByCustomer(fresh);
@@ -427,7 +427,7 @@ customerHandler.command("bank", async (ctx) => {
       `${t(locale, "order.pay_bank", { bank: bankName })}\n` +
       `${t(locale, "order.pay_name", { name: accountName })}\n` +
       `${t(locale, "order.pay_number", { number: accountNumber })}`,
-    { parse_mode: "HTML", reply_markup: getCustomerMenuKeyboard(locale) }
+    { parse_mode: "HTML" }
   );
 });
 
@@ -502,7 +502,6 @@ customerHandler.callbackQuery("customer:menu:quote", async (ctx) => {
   const localeQuote = locOf(customer);
   await ctx.reply(t(localeQuote, "exchange.instructions"), {
     parse_mode: "HTML",
-    reply_markup: getCustomerMenuKeyboard(localeQuote)
   });
 });
 
@@ -532,7 +531,7 @@ customerHandler.callbackQuery("customer:clearchat:back", async (ctx) => {
   await ctx.answerCallbackQuery();
   const customer = await CustomerService.getOrCreateCustomer({ telegramId: String(ctx.from?.id || "") });
   const locale = locOf(customer);
-  await ctx.reply(t(locale, "order.active_empty"), { reply_markup: getCustomerMenuKeyboard(locale) }).catch(() => {});
+  await ctx.reply(t(locale, "order.active_empty")).catch(() => {});
 });
 
 customerHandler.callbackQuery("customer:clearchat:go", async (ctx) => {
@@ -545,17 +544,17 @@ customerHandler.callbackQuery("customer:clearchat:go", async (ctx) => {
     // the customer's private chat. Backend rows are READ, never deleted.
     const result = await clearCustomerTelegramChat(customer.id);
     if (result.requested === 0) {
-      await ctx.reply(t(locale, "clearchat.nothing"), { reply_markup: getCustomerMenuKeyboard(locale) });
+      await ctx.reply(t(locale, "clearchat.nothing"));
       return;
     }
     // Telegram can refuse older (>48h) messages — the wording only claims what
     // was actually deleted.
     const key = result.failed > 0 ? "clearchat.done_partial" : "clearchat.done";
-    await ctx.reply(t(locale, key), { reply_markup: getCustomerMenuKeyboard(locale) });
+    await ctx.reply(t(locale, key));
   } catch (err: any) {
     // Failure cleanup must never affect financial data — report and continue.
     logger.warn({ err: err?.message }, "Clear chat: cleanup failed (business data untouched)");
-    await ctx.reply(t(locale, "clearchat.done_partial"), { reply_markup: getCustomerMenuKeyboard(locale) });
+    await ctx.reply(t(locale, "clearchat.done_partial"));
   }
 });
 
@@ -569,20 +568,21 @@ customerHandler.callbackQuery("customer:menu:orders", async (ctx) => {
   const myOrders = await OrderService.getActiveOrdersForCustomer(customer.id, 10);
 
   if (myOrders.length === 0) {
-    return ctx.reply(t(locale, "order.active_empty"), { reply_markup: getCustomerMenuKeyboard(locale) });
+    return ctx.reply(t(locale, "order.active_empty"));
   }
 
-  // P — concise history lines (active Order is shown first via /start).
-  let msg = `${t(locale, "order.history_title")}\n\n`;
+  // P — concise ACTIVE-ONLY lines (terminal orders live only in the customer's
+  // Telegram terminal messages; no customer history browser by product decision).
+  let msg = `${t(locale, "order.active_title")}\n\n`;
   for (const o of myOrders.slice(0, 5)) {
     const srcAmt = MoneyService.formatAmount(o.sourceAmount, o.sourceCurrency);
     const tgtAmt = MoneyService.formatAmount(o.targetAmount, o.targetCurrency);
-    msg += `#${o.id.slice(-6)} · ${srcAmt} ${o.sourceCurrency} → ${tgtAmt} ${o.targetCurrency} · ${t(locale, `status.${o.status}`)}\n`;
+    msg += `${formatPublicOrderRef(o)} · ${srcAmt} ${o.sourceCurrency} → ${tgtAmt} ${o.targetCurrency} · ${t(locale, `status.${o.status}`)}\n`;
   }
   const actionable = myOrders.find((o: any) => OrderService.canCustomerCancel(o).allowed);
   await ctx.reply(msg, {
     parse_mode: "HTML",
-    reply_markup: actionable ? getActiveOrderActionKeyboard(actionable, locale) : getCustomerMenuKeyboard(locale)
+    reply_markup: actionable ? getActiveOrderActionKeyboard(actionable, locale) : undefined
   });
 });
 
@@ -631,119 +631,21 @@ customerHandler.callbackQuery("customer:menu:support", async (ctx) => {
       content: "[YÊU CẦU GẶP CSKH TRỰC TIẾP]"
     });
 
-    await ctx.reply(t(locale, "support.requested"), { parse_mode: "HTML", reply_markup: getCustomerMenuKeyboard(locale) });
+    await ctx.reply(t(locale, "support.requested"), { parse_mode: "HTML" });
 
-    await notifySupportRequest(renderSupportRequestText(customer), {
+    await notifySupportRequest(renderSupportRequestText(customer) + (await renderSupportRecentOrders(customer.id)), {
       parse_mode: "HTML",
       reply_markup: await supportRequestKeyboard(customer.id)
     });
   } else {
-    await ctx.reply(t(locale, "support.active_body"), { parse_mode: "HTML", reply_markup: getCustomerMenuKeyboard(locale) });
+    await ctx.reply(t(locale, "support.active_body"), { parse_mode: "HTML" });
   }
 });
 
-// ---------------------------------------------------------------------------
-// 🧾 CUSTOMER TRANSACTION HISTORY — recent terminal Orders (COMPLETED/CANCELLED),
-// keyset-paginated 20/page (createdAt DESC, id DESC), strictly own-customer.
-// Historical detail → [💬 Hỗ trợ đơn này] carries the stable internal Order.id.
-// ---------------------------------------------------------------------------
-
-const HISTORY_TERMINAL_STATUSES = ["COMPLETED", "CANCELLED"];
-
-customerHandler.callbackQuery(/^customer:history(?::page:(next|prev))?$/, async (ctx) => {
-  await ctx.answerCallbackQuery();
-  const telegramId = String(ctx.from?.id || "");
-  const customer = await CustomerService.getOrCreateCustomer({ telegramId });
-  const move = ctx.match?.[1] as "next" | "prev" | undefined;
-  const st = getChatHistoryNav(telegramId, customer.id);
-  let cursorRaw = "";
-  if (move === "next" && st.next) cursorRaw = st.next;
-  else if (move === "prev" && st.prev) cursorRaw = st.prev;
-
-  const where: any = { customerId: customer.id, status: { in: HISTORY_TERMINAL_STATUSES } };
-  if (cursorRaw) {
-    const c = decodeChatCursorRaw(cursorRaw);
-    if (c) where.AND = [{ OR: [{ createdAt: { lt: c.createdAt } }, { createdAt: c.createdAt, id: { lt: c.id } }] }];
-  }
-  const rows: any[] = await prisma.order.findMany({
-    where,
-    orderBy: [{ createdAt: "desc" }, { id: "desc" }],
-    take: 21
-  });
-  const hasMore = rows.length > 20;
-  const page = rows.slice(0, 20);
-  setChatHistoryNav(telegramId, customer.id, {
-    next: hasMore ? encodeChatCursorRaw(page[page.length - 1]) : null,
-    prev: cursorRaw
-  });
-
-  const lines = ["🧾 <b>LỊCH SỬ GIAO DỊCH</b>", `${page.length} giao dịch gần nhất`, ""];
-  const kb = new InlineKeyboard();
-  if (page.length === 0) {
-    lines.push("Chưa có giao dịch nào.");
-  } else {
-    for (const o of page) {
-      const badge = o.status === "COMPLETED" ? "✅" : "❌";
-      lines.push(
-        `${badge} ${formatPublicOrderRef(o)} · ${MoneyService.formatAmount(o.sourceAmount, o.sourceCurrency)} ${o.sourceCurrency} · ${formatAdminDateTime(o.createdAt).slice(0, 10)}`
-      );
-      kb.row().text(`${badge} ${formatPublicOrderRef(o)}`, `customer:history:detail:${o.id}`);
-    }
-  }
-  const nav = kb.row();
-  if (cursorRaw) nav.text("⬅️ Trước", "customer:history:page:prev");
-  if (hasMore) nav.text("Tiếp ➡️", "customer:history:page:next");
-  await ctx.reply(lines.join("\n"), { parse_mode: "HTML", reply_markup: kb });
-});
-
-customerHandler.callbackQuery(/^customer:history:detail:([a-zA-Z0-9_-]+)$/, async (ctx) => {
-  await ctx.answerCallbackQuery();
-  const telegramId = String(ctx.from?.id || "");
-  const customer = await CustomerService.getOrCreateCustomer({ telegramId });
-  const order = await OrderService.getOrder(ctx.match?.[1] || "");
-  // Ownership guard — a customer can ONLY ever see their OWN orders.
-  if (!order || order.customerId !== customer.id) {
-    return void ctx.reply(t(locOf(customer), "order.cancel_none"));
-  }
-  const badge = order.status === "COMPLETED" ? "✅" : "❌";
-  const memo = await OrderService.getOrderTransferMemo(order).catch(() => "");
-  const lines = [
-    `📦 <b>${formatPublicOrderRef(order)}</b>`,
-    `${MoneyService.formatMoney(order.sourceAmount, order.sourceCurrency)} → ${MoneyService.formatMoney(order.targetAmount, order.targetCurrency)}`,
-    `${formatAdminDateTime(order.createdAt)} (GMT+7)`,
-    `📍 ${t(locOf(customer), `status.${order.status}`)}`,
-    memo ? `🔖 Nội dung chuyển khoản: <code>${escapeHtml(memo)}</code>` : ""
-  ];
-  const kb = new InlineKeyboard()
-    .text(`💬 Hỗ trợ đơn ${formatPublicOrderRef(order)}`, `customer:support:order:${order.id}`)
-    .row()
-    .text("⬅️ Lịch sử", "customer:history");
-  await ctx.reply(lines.filter(Boolean).join("\n"), { parse_mode: "HTML", reply_markup: kb });
-});
-
-// Per-chat minimal history navigation state (tiny cursors, bounded Map).
-const historyNav = new Map<string, { next: string | null; prev: string | null }>();
-function getChatHistoryNav(tg: string, customerId: string) {
-  return historyNav.get(`${tg}|${customerId}`) || { next: null, prev: null };
-}
-function setChatHistoryNav(tg: string, customerId: string, v: { next: string | null; prev: string | null }) {
-  historyNav.set(`${tg}|${customerId}`, v);
-  if (historyNav.size > 500) historyNav.delete(historyNav.keys().next().value as string);
-}
-function encodeChatCursorRaw(row: { createdAt: Date; id: string }): string {
-  return Buffer.from(`${row.createdAt.toISOString()}|${row.id}`, "utf8").toString("base64url");
-}
-function decodeChatCursorRaw(raw: string): { createdAt: Date; id: string } | null {
-  try {
-    const [iso, id] = Buffer.from(raw, "base64url").toString("utf8").split("|");
-    // strict indexing: both halves must be present before use.
-    if (!iso || !id) return null;
-    const d = new Date(iso);
-    return Number.isNaN(d.getTime()) ? null : { createdAt: d, id };
-  } catch {
-    return null;
-  }
-}
+// 🧾 CUSTOMER TRANSACTION HISTORY — REMOVED BY PRODUCT DECISION:
+// customers get NO browsable transaction/order history (active-only "My
+// Orders" + the Telegram terminal messages are their receipts). Full history
+// is STAFF-ONLY via Admin/CSKH CRM (ops:customer:history:* in admin-customers).
 
 // ---------------------------------------------------------------------------
 // 💬 ORDER-LINKED SUPPORT — customer presses [💬 Hỗ trợ đơn #REF] on any
@@ -779,7 +681,7 @@ customerHandler.callbackQuery(/^customer:support:order:([a-zA-Z0-9_-]+)$/, async
     senderType: "CUSTOMER",
     content: `[YÊU CẦU HỖ TRỢ ĐƠN ${formatPublicOrderRef(order)}]`
   });
-  await ctx.reply(t(locale, "support.requested"), { parse_mode: "HTML", reply_markup: getCustomerReplyKeyboard(locale, true) });
+  await ctx.reply(t(locale, "support.requested_order", { id: formatPublicOrderRef(order) }), { parse_mode: "HTML", reply_markup: getCustomerReplyKeyboard(locale, true) });
 
   // Order-context notification — same dedupe as generic support requests.
   const orderLines = [
@@ -789,7 +691,7 @@ customerHandler.callbackQuery(/^customer:support:order:([a-zA-Z0-9_-]+)$/, async
     "",
     `📦 Đơn: <b>${formatPublicOrderRef(order)}</b>`,
     `💵 ${MoneyService.formatMoney(order.sourceAmount, order.sourceCurrency)}`,
-    `📍 ${order.status}`,
+    `📍 Trạng thái: ${t("vi", `status.${order.status}`)}`,
     ...(await OrderService.getOrderTransferMemo(order).catch(() => ""))
       ? [`🔖 Nội dung CK: <code>${escapeHtml(String(await OrderService.getOrderTransferMemo(order).catch(() => "")))}</code>`]
       : []
@@ -798,7 +700,10 @@ customerHandler.callbackQuery(/^customer:support:order:([a-zA-Z0-9_-]+)$/, async
     .text("📦 Mở đơn", `ops:order:detail:${order.id}`)
     .text("💬 Chat khách", `cskh:preview:${customer.id}`)
     .row()
-    .text("👤 Hồ sơ khách", `ops:customer:detail:${customer.id}`);
+    .text("👤 Hồ sơ khách", `ops:customer:detail:${customer.id}`)
+    .text("📋 Giao dịch khách", `ops:customer:history:${customer.id}:all`)
+    .row()
+    .text("✋ Nhận hỗ trợ", `cskh:ticket:claim:${customer.id}`);
   await notifySupportRequest(orderLines.filter(Boolean).join("\n"), {
     parse_mode: "HTML",
     reply_markup: orderKb
@@ -848,7 +753,7 @@ customerHandler.callbackQuery(/^customer:bill:upload:([a-zA-Z0-9_-]+)$/, async (
   if (order.status !== "WAITING_PAYMENT") {
     return void ctx.reply(t(locale, "bill.not_eligible"), { parse_mode: "HTML" });
   }
-  await ctx.reply(t(locale, "order.bill_instruction", { id: order.id }), { parse_mode: "HTML" });
+  await ctx.reply(t(locale, "order.bill_instruction", { id: formatPublicOrderRef(order) }), { parse_mode: "HTML" });
 });
 
 // Quote confirmation callback (persisted Quote in DB)
@@ -885,7 +790,6 @@ customerHandler.callbackQuery(/^(?:customer:quote:confirm:|confirm_quote:)(.+)$/
       const locale = locOf(customer);
       await ctx.reply(t(locale, "quote.expired_notice"), {
         parse_mode: "HTML",
-        reply_markup: getCustomerMenuKeyboard(locale)
       });
       return;
     }
@@ -895,7 +799,6 @@ customerHandler.callbackQuery(/^(?:customer:quote:confirm:|confirm_quote:)(.+)$/
       const locale = locOf(customer);
       await ctx.reply(t(locale, "order.missing_desk_account", { currency: confirmedQuoteCurrency(err) }), {
         parse_mode: "HTML",
-        reply_markup: getCustomerMenuKeyboard(locale)
       });
       return;
     }
@@ -1078,7 +981,7 @@ async function handleReservedCustomerControl(
       });
       await ctx.reply(t(locale, "support.requested"), { parse_mode: "HTML", reply_markup: getCustomerReplyKeyboard(locale, true) });
 
-      await notifySupportRequest(renderSupportRequestText(customer), {
+      await notifySupportRequest(renderSupportRequestText(customer) + (await renderSupportRecentOrders(customer.id)), {
         parse_mode: "HTML",
         reply_markup: await supportRequestKeyboard(customer.id)
       });
@@ -1225,13 +1128,13 @@ export async function handleCustomerTextMessage(ctx: BotContext, text: string) {
     const displayName = (customer.fullName || customer.username || "quý khách").trim();
     const key = statusReplyKey(activeOrder.status as string) || "order.status_reply_verifying";
     await ctx.reply(
-      t(locale, key, { name: displayName, id: activeOrder.id }),
+      t(locale, key, { name: displayName, id: formatPublicOrderRef(activeOrder) }),
       {
         parse_mode: "HTML",
         reply_markup:
           activeOrder.status === "WAITING_PAYMENT"
             ? getActiveOrderActionKeyboard(activeOrder as any, locale)
-            : getCustomerMenuKeyboard(locale)
+            : undefined
       }
     );
     await ConversationService.addMessage({
@@ -1240,7 +1143,7 @@ export async function handleCustomerTextMessage(ctx: BotContext, text: string) {
       // Message.senderType convention (prisma schema comment) so the history
       // never attributes this financial-state reply to the conversational AI.
       senderType: "BOT",
-      content: t(locale, key, { name: displayName, id: activeOrder.id })
+      content: t(locale, key, { name: displayName, id: formatPublicOrderRef(activeOrder) })
     });
     return;
   }
@@ -1250,7 +1153,6 @@ export async function handleCustomerTextMessage(ctx: BotContext, text: string) {
     const locale = locOf(customer);
     await ctx.reply(t(locale, "order.active_empty"), {
       parse_mode: "HTML",
-      reply_markup: getCustomerMenuKeyboard(locale)
     });
     return;
   }
@@ -1283,7 +1185,7 @@ export async function handleCustomerTextMessage(ctx: BotContext, text: string) {
         `${t(locale, "order.pay_bank", { bank: bankName.trim() })}\n` +
         `${t(locale, "order.pay_name", { name: accountName.trim() })}\n` +
         `${t(locale, "order.pay_number", { number: accountNumber.trim() })}`,
-      { parse_mode: "HTML", reply_markup: getCustomerMenuKeyboard(locale) }
+      { parse_mode: "HTML" }
     );
     return;
   }
@@ -1292,9 +1194,12 @@ export async function handleCustomerTextMessage(ctx: BotContext, text: string) {
   // Scoped to the partner's OWN destination; nothing else can be written.
   const partnerPayoutSession = getPartnerPayoutSession(telegramId);
   if (partnerPayoutSession) {
+    // Partner locale (vi|en) — independent from Customer.locale.
+    const { PartnerService: PartnerSvc } = await import("../../modules/partner/partner-service.js");
+    const ctvPartner = await PartnerSvc.getPartnerByTelegramId(telegramId).catch(() => null);
     if (text.trim() === "/cancel") {
       clearPartnerPayoutSession(telegramId);
-      await ctx.reply("Đã hủy cập nhật thông tin nhận hoa hồng.");
+      await ctx.reply(ctvT(ctvPartner || { language: null }, "ctv.payout_cancelled"));
       return;
     }
     // V2 — FREE-FORM destination (reference info only; Admin reviews manually).
@@ -1302,16 +1207,16 @@ export async function handleCustomerTextMessage(ctx: BotContext, text: string) {
     // control-char stripping and a command-injection guard.
     const destination = parsePayoutDestinationFreeForm(text);
     if (!destination) {
-      await ctx.reply(
-        `❌ Thông tin chưa hợp lệ: không được trống, tối đa 500 ký tự và không bắt đầu bằng "/".\nGửi lại hoặc /cancel để hủy.`,
-        { parse_mode: "HTML" }
-      );
+      await ctx.reply(ctvT(ctvPartner || { language: null }, "ctv.payout_invalid"), {
+        parse_mode: "HTML"
+      });
       return;
     }
     updatePartnerPayoutSession(telegramId, { text: destination });
-    const kb = new InlineKeyboard().text("✅ Xác nhận", "ctv:payout:confirm:go").row().text("↩️ Hủy", "ctv:payout");
+    const langPartner = ctvPartner || { language: null };
+    const kb = new InlineKeyboard().text(ctvT(langPartner, "ctv.btn_confirm"), "ctv:payout:confirm:go").row().text(ctvT(langPartner, "ctv.btn_cancel"), "ctv:payout");
     await ctx.reply(
-      `⚠️ <b>XÁC NHẬN THÔNG TIN NHẬN HOA HỒNG</b>\n\n${escapeHtml(destination.length > 400 ? `${destination.slice(0, 400)}…` : destination)}\n\n<i>Chỉ là thông tin tham khảo — Admin sẽ xem thủ công khi chi trả.</i>`,
+      `${ctvT(langPartner, "ctv.payout_confirm_title")}\n\n${escapeHtml(destination.length > 400 ? `${destination.slice(0, 400)}…` : destination)}\n\n${ctvT(langPartner, "ctv.payout_confirm_hint")}`,
       { parse_mode: "HTML", reply_markup: kb }
     );
     return;
@@ -1374,14 +1279,12 @@ export async function handleCustomerTextMessage(ctx: BotContext, text: string) {
     });
 
     await ctx.reply(aiReply, {
-      reply_markup: getCustomerMenuKeyboard()
     });
     return;
   }
 
   await ctx.reply(t(locOf(customer), "customer.fallback"), {
     parse_mode: "HTML",
-    reply_markup: getCustomerMenuKeyboard(locOf(customer))
   });
 }
 
@@ -1612,7 +1515,7 @@ function payoutPreviewKeyboard(orderId: string, locale: SupportedLocale): Inline
     .text(t(locale, "payout.confirm_btn"), `customer:payout:confirm:${orderId}`)
     .text(t(locale, "payout.edit_btn"), `customer:payout:edit:${orderId}`)
     .row()
-    .text(t(locale, "payout.support_btn"), `customer:payout:support:${orderId}`);
+    .text(t(locale, "order.support_this_btn"), `customer:payout:support:${orderId}`);
 }
 
 /**
@@ -1636,7 +1539,7 @@ async function buildPayoutChooser(
   kb.text(t(locale, "payout.new_text"), `customer:payout:newtext:${order.id}`)
     .text(t(locale, "payout.new_qr"), `customer:payout:newqr:${order.id}`)
     .row()
-    .text(t(locale, "payout.support_btn"), `customer:payout:support:${order.id}`);
+    .text(t(locale, "order.support_this_btn"), `customer:payout:support:${order.id}`);
 
   return { text, kb };
 }
@@ -1667,8 +1570,8 @@ export async function sendPayoutDestinationPromptToCustomer(
     const lines = [t(locale, "payout.choose_title"), "", t(locale, "bill.multi_hint")];
     for (const o of eligible.slice(0, 5)) {
       const amount = `${MoneyService.formatAmount(o.targetAmount, o.targetCurrency)} ${o.targetCurrency}`;
-      lines.push(`📦 #${o.id.slice(-6)} · ${amount}`);
-      kb.text(`📦 #${o.id.slice(-6)} (${amount})`, `customer:payout:choose:${o.id}`).row();
+      lines.push(`📦 ${formatPublicOrderRef(o)} · ${amount}`);
+      kb.text(`📦 ${formatPublicOrderRef(o)} (${amount})`, `customer:payout:choose:${o.id}`).row();
     }
     text = lines.join("\n");
   } else {
@@ -1698,7 +1601,7 @@ customerHandler.callbackQuery(/^customer:payout:choose:([a-zA-Z0-9_-]+)$/, async
   }
   if (OrderService.isPayoutReady(order as any)) {
     // Already has a confirmed destination — nothing to choose.
-    return ctx.reply(t(locale, "payout.saved", { id: order.id }), { parse_mode: "HTML" });
+    return ctx.reply(t(locale, "payout.saved", { id: formatPublicOrderRef(order) }), { parse_mode: "HTML" });
   }
 
   const chooser = await buildPayoutChooser(order, customer, locale);
@@ -1764,7 +1667,7 @@ customerHandler.callbackQuery(/^customer:payout:confirm:([a-zA-Z0-9_-]+)$/, asyn
   }
   if (OrderService.isPayoutReady(order as any)) {
     clearPayoutInputSession(telegramId);
-    return ctx.reply(t(locale, "payout.saved", { id: order.id }), { parse_mode: "HTML" });
+    return ctx.reply(t(locale, "payout.saved", { id: formatPublicOrderRef(order) }), { parse_mode: "HTML" });
   }
 
   try {
@@ -1831,7 +1734,7 @@ customerHandler.callbackQuery(/^customer:payout:support:([a-zA-Z0-9_-]+)$/, asyn
   });
   await ctx.reply(t(locale, "support.requested"), { parse_mode: "HTML", reply_markup: getCustomerReplyKeyboard(locale, true) });
 
-  await notifySupportRequest(renderSupportRequestText(customer, "luồng nhận tiền"), {
+  await notifySupportRequest(renderSupportRequestText(customer, "luồng nhận tiền") + (await renderSupportRecentOrders(customer.id)), {
     parse_mode: "HTML",
     reply_markup: await supportRequestKeyboard(customer.id)
   });
@@ -1886,8 +1789,8 @@ async function tryBindPayoutTextInputFromState(
     const lines = [t(locale, "payout.choose_title"), "", t(locale, "bill.multi_hint")];
     for (const o of eligible.slice(0, 5)) {
       const amount = `${MoneyService.formatAmount(o.targetAmount, o.targetCurrency)} ${o.targetCurrency}`;
-      lines.push(`📦 #${o.id.slice(-6)} · ${amount}`);
-      kb.text(`⌨️ 📦 #${o.id.slice(-6)} (${amount})`, `customer:payout:newtext:${o.id}`).row();
+      lines.push(`📦 ${formatPublicOrderRef(o)} · ${amount}`);
+      kb.text(`⌨️ 📦 ${formatPublicOrderRef(o)} (${amount})`, `customer:payout:newtext:${o.id}`).row();
     }
     kb.row().text(t(locale, "payout.support_btn"), "customer:menu:support");
     await ctx.reply(lines.join("\n"), { parse_mode: "HTML", reply_markup: kb });
@@ -2052,7 +1955,7 @@ async function attachPayoutQrImage(
     });
     if (clearSession) clearPayoutInputSession(telegramId);
 
-    await ctx.reply(t(locale, "payout.qr_attached", { id: order.id }), { parse_mode: "HTML" });
+    await ctx.reply(t(locale, "payout.qr_attached", { id: formatPublicOrderRef(order) }), { parse_mode: "HTML" });
     if (shouldNotifyPayoutReady(updated)) {
       await notifyPayoutReady(updated);
     }
@@ -2101,11 +2004,24 @@ export async function showCtvDashboard(ctx: BotContext): Promise<void> {
 
   const partner = await PartnerService.getPartnerByTelegramId(telegramId);
   if (!partner) {
-    await ctx.reply("⚠️ Tài khoản Telegram này chưa được liên kết với CTV.\nVui lòng liên hệ quản trị viên.");
+    await ctx.reply(t("vi", "ctv.not_linked"));
     return;
   }
   if (partner.status !== "ACTIVE") {
-    await ctx.reply("⛔ Tài khoản CTV hiện đang tạm ngưng.");
+    await ctx.reply(ctvT(partner, "ctv.disabled"));
+    return;
+  }
+
+  // FIRST-RUN LANGUAGE PICKER — Partner.language (vi|en) is authoritative and
+  // INDEPENDENT from Customer.locale. No saved language ⇒ picker, then the
+  // menu renders immediately in the chosen language.
+  if (!partner.language) {
+    await ctx.reply(ctvT(partner, "ctv.pick_title"), {
+      parse_mode: "HTML",
+      reply_markup: new InlineKeyboard()
+        .text("🇻🇳 Tiếng Việt", "ctv:lang:vi")
+        .text("🇬🇧 English", "ctv:lang:en")
+    });
     return;
   }
 
@@ -2116,31 +2032,82 @@ export async function showCtvDashboard(ctx: BotContext): Promise<void> {
   const usd = (d: any) => `$${Number(d ?? 0).toFixed(2)}`;
 
   const kb = new InlineKeyboard()
-    .text("🔗 Link giới thiệu", "ctv:link")
-    .text("💰 Hoa hồng", "ctv:commissions")
+    .text(ctvT(partner, "ctv.btn_link"), "ctv:link")
+    .text(ctvT(partner, "ctv.btn_commissions"), "ctv:commissions")
     .row()
-    .text("💸 Lịch sử thanh toán", "ctv:settlements")
-    .text("🏦 Tài khoản nhận HH", "ctv:payout")
+    .text(ctvT(partner, "ctv.btn_settlements"), "ctv:settlements")
+    .text(ctvT(partner, "ctv.btn_payout"), "ctv:payout")
     .row()
-    .text("🔄 Làm mới", "ctv:home");
+    .text(ctvT(partner, "ctv.btn_refresh"), "ctv:home")
+    .text(ctvT(partner, "ctv.btn_language"), "ctv:lang");
 
   await ctx.reply(
-    `🤝 <b>CTV — ${escapeHtml(partner.displayName)}</b>\n\n` +
-      `🔗 Mã giới thiệu: <code>${escapeHtml(partner.referralCode)}</code>\n` +
-      `👥 Khách giới thiệu: <b>${referredCount}</b>\n` +
-      `✅ Giao dịch hoàn tất: <b>${summary.eligibleCompleted}</b>\n` +
-      `💳 Nhận hoa hồng: ${partner.payoutDestinationText || partner.payoutBankName ? "✅ đã thiết lập" : "⚠️ chưa có"}\n\n` +
-      `💰 Hoa hồng:\n` +
-      `• Đang chờ: <b>${usd(summary.held)}</b>\n` +
-      `• Có thể rút: <b>${usd(summary.available)}</b>\n` +
-      `• Đã thanh toán: <b>${usd(summary.paid)}</b>\n\n` +
-      (link ? `🔗 Link: <code>${link}</code>` : "🔗 Link: liên hệ Admin (bot chưa có username)."),
+    `${ctvT(partner, "ctv.dash_title", { name: escapeHtml(partner.displayName) })}\n\n` +
+      `${ctvT(partner, "ctv.dash_ref", { code: escapeHtml(partner.referralCode) })}\n` +
+      `${ctvT(partner, "ctv.dash_referred", { count: referredCount })}\n` +
+      `${ctvT(partner, "ctv.dash_completed", { count: summary.eligibleCompleted })}\n` +
+      `${ctvT(partner, "ctv.dash_payout_line", { state: partner.payoutDestinationText || partner.payoutBankName ? ctvT(partner, "ctv.state_payout_set") : ctvT(partner, "ctv.state_payout_missing") })}\n\n` +
+      `${ctvT(partner, "ctv.dash_commissions")}\n` +
+      `${ctvT(partner, "ctv.dash_pending", { amount: usd(summary.held) })}\n` +
+      `${ctvT(partner, "ctv.dash_available", { amount: usd(summary.available) })}\n` +
+      `${ctvT(partner, "ctv.dash_paid", { amount: usd(summary.paid) })}\n\n` +
+      (link ? ctvT(partner, "ctv.dash_link", { link }) : ctvT(partner, "ctv.dash_link_missing")),
     { parse_mode: "HTML", reply_markup: kb }
   );
 }
 
+/**
+ * CTV UI translation helper — Partner.language ("vi" | "en") is AUTHORITATIVE
+ * and fully independent from the Customer's vi/en/km/zh locale. NULL (not yet
+ * chosen) falls back to Vietnamese, which only the pre-picker messages use.
+ */
+function ctvT(partner: { language?: string | null }, key: string, vars?: Record<string, unknown>): string {
+  return t(partner?.language === "en" ? "en" : "vi", key, vars);
+}
+
+/** Canonical DB status → localized CTV display word (never persisted). */
+function ctvStatus(partner: { language?: string | null }, status: string): string {
+  const map: Record<string, string> = {
+    HELD: "ctv.status_held",
+    AVAILABLE: "ctv.status_available",
+    PAID: "ctv.status_paid",
+    REVERSED: "ctv.status_reversed"
+  };
+  const key = map[status];
+  return key ? ctvT(partner, key) : status;
+}
+
 customerHandler.callbackQuery("ctv:home", async (ctx) => {
   await ctx.answerCallbackQuery();
+  await showCtvDashboard(ctx);
+});
+
+// 🌐 CTV language switch — VI ↔ EN at any time; persists on Partner.language
+// and IMMEDIATELY re-renders the dashboard in the chosen language.
+customerHandler.callbackQuery("ctv:lang", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const telegramId = String(ctx.from?.id || "");
+  const { PartnerService } = await import("../../modules/partner/partner-service.js");
+  const partner = await PartnerService.getPartnerByTelegramId(telegramId);
+  if (!partner || partner.status !== "ACTIVE") return;
+  await ctx.reply(ctvT(partner, "ctv.pick_title"), {
+    parse_mode: "HTML",
+    reply_markup: new InlineKeyboard()
+      .text("🇻🇳 Tiếng Việt", "ctv:lang:vi")
+      .text("🇬🇧 English", "ctv:lang:en")
+  });
+});
+
+customerHandler.callbackQuery(/^ctv:lang:(vi|en)$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const chosen = ctx.match?.[1] === "en" ? "en" : "vi";
+  const telegramId = String(ctx.from?.id || "");
+  const { PartnerService } = await import("../../modules/partner/partner-service.js");
+  const partner = await PartnerService.getPartnerByTelegramId(telegramId);
+  if (!partner || partner.status !== "ACTIVE") return;
+  await PartnerService.setLanguage(partner.id, chosen, telegramId);
+  // Confirm in the NEW language, then refresh the dashboard immediately.
+  await ctx.reply(t(chosen, "ctv.lang_changed"));
   await showCtvDashboard(ctx);
 });
 
@@ -2155,8 +2122,8 @@ customerHandler.callbackQuery("ctv:link", async (ctx) => {
   const link = me ? `https://t.me/${me}?start=${PartnerService.referralPayload(partner)}` : null;
   await ctx.reply(
     link
-      ? `🔗 <b>Link giới thiệu của bạn:</b>\n<code>${link}</code>\n\nKhách bấm link sẽ được gán về CTV của bạn (chỉ khách mới / chưa gán).`
-      : "⚠️ Bot chưa có username công khai. Vui lòng liên hệ Admin.",
+      ? `${ctvT(partner, "ctv.link_title")}\n<code>${link}</code>\n\n${ctvT(partner, "ctv.link_hint")}`
+      : ctvT(partner, "ctv.link_no_username"),
     { parse_mode: "HTML" }
   );
 });
@@ -2170,23 +2137,26 @@ customerHandler.callbackQuery("ctv:commissions", async (ctx) => {
   if (!partner || partner.status !== "ACTIVE") return;
   const commissions = await PartnerService.listPartnerCommissions(partner.id, 15);
   const usd = (d: any) => `$${Number(d ?? 0).toFixed(2)}`;
-  const lines = ["💰 <b>HOA HỒNG GẦN NHẤT</b>", ""];
+  const lines = [ctvT(partner, "ctv.commissions_title"), ""];
   if (commissions.length === 0) {
-    lines.push("Chưa có hoa hồng nào.");
+    lines.push(ctvT(partner, "ctv.commissions_empty"));
   } else {
     for (const c of commissions) {
       const st = PartnerService.effectiveStatus(c);
       // PRIVACY (A1): date + order short-ref + amount + status + commission
       // breakdown. NO customer identity, no bank/payment/payout data.
       const level = c.level ?? 1;
-      const kind = level === 1 ? "Đơn trực tiếp" : `Hoa hồng tầng ${level}`;
+      const kind = level === 1 ? ctvT(partner, "ctv.level_direct") : ctvT(partner, "ctv.level_n", { level });
+      const fixed = ctvT(partner, "ctv.commission_fixed", { amount: usd(level === 1 ? c.baseCommissionUsd : c.totalUsd) });
+      const spread =
+        level === 1 && Number(c.spreadBonusUsd ?? 0) > 0
+          ? ` ${ctvT(partner, "ctv.commission_spread", { amount: usd(c.spreadBonusUsd) })}`
+          : "";
       lines.push(
         `✅ #COM-${c.id.slice(-6).toUpperCase()} · +${usd(c.totalUsd)}`,
-        level === 1
-          ? `${kind}: ${usd(c.baseCommissionUsd)} cố định${Number(c.spreadBonusUsd ?? 0) > 0 ? ` + ${usd(c.spreadBonusUsd)} chia sẻ tỷ giá` : ""}`
-          : `${kind}: ${usd(c.totalUsd)} cố định`,
+        level === 1 ? `${kind}: ${fixed}${spread}` : `${kind}: ${fixed}`,
         `${formatAdminDateTime(c.createdAt)}`,
-        `${st}`,
+        `${ctvStatus(partner, st)}`,
         ""
       );
     }
@@ -2203,12 +2173,14 @@ customerHandler.callbackQuery("ctv:settlements", async (ctx) => {
   if (!partner || partner.status !== "ACTIVE") return;
   const settlements = await PartnerService.listPartnerSettlements(partner.id, 10);
   const usd = (d: any) => `$${Number(d ?? 0).toFixed(2)}`;
-  const lines = ["💸 <b>LỊCH SỬ THANH TOÁN HOA HỒNG</b>", ""];
+  const lines = [ctvT(partner, "ctv.settlements_title"), ""];
   if (settlements.length === 0) {
-    lines.push("Chưa có đợt thanh toán nào.");
+    lines.push(ctvT(partner, "ctv.settlements_empty"));
   } else {
     for (const s of settlements) {
-      lines.push(`${s.status === "PAID" ? "✅" : "⏳"} ${formatAdminDateTime(s.createdAt)} · ${usd(s.totalUsd)} · ${s.itemCount} hoa hồng · ${s.status}`);
+      lines.push(
+        `${s.status === "PAID" ? "✅" : "⏳"} ${formatAdminDateTime(s.createdAt)} · ${usd(s.totalUsd)} · ${ctvT(partner, "ctv.settlement_items", { count: s.itemCount })} · ${ctvStatus(partner, s.status)}`
+      );
     }
   }
   await ctx.reply(lines.join("\n"), { parse_mode: "HTML" });
@@ -2227,28 +2199,28 @@ customerHandler.callbackQuery("ctv:payout", async (ctx) => {
   const partner = await PartnerService.getPartnerByTelegramId(telegramId);
   if (!partner || partner.status !== "ACTIVE") return;
   // V2 — free-form payout destination (reference info only).
-  const lines = ["💳 <b>THÔNG TIN NHẬN HOA HỒNG</b>", ""];
+  const lines = [ctvT(partner, "ctv.payout_title"), ""];
   if (partner.payoutDestinationText) {
-    const t = partner.payoutDestinationText;
-    lines.push(`<pre>${escapeHtml(t.length > 400 ? `${t.slice(0, 400)}…` : t)}</pre>`);
+    const destText = partner.payoutDestinationText;
+    lines.push(`<pre>${escapeHtml(destText.length > 400 ? `${destText.slice(0, 400)}…` : destText)}</pre>`);
   } else if (partner.payoutBankName) {
-    lines.push(`🏦 Ngân hàng: <b>${escapeHtml(partner.payoutBankName)}</b>`);
-    lines.push(`💳 Số TK: <code>${escapeHtml(PartnerService.maskAccountNumber(partner.payoutAccountNumber))}</code>`);
-    lines.push(`👤 Chủ TK: ${escapeHtml(partner.payoutAccountName || "")}`);
+    lines.push(ctvT(partner, "ctv.payout_bank_label", { value: escapeHtml(partner.payoutBankName) }));
+    lines.push(ctvT(partner, "ctv.payout_account_label", { value: escapeHtml(PartnerService.maskAccountNumber(partner.payoutAccountNumber)) }));
+    lines.push(ctvT(partner, "ctv.payout_holder_label", { value: escapeHtml(partner.payoutAccountName || "") }));
   } else {
-    lines.push("Chưa có thông tin nhận hoa hồng.");
+    lines.push(ctvT(partner, "ctv.payout_empty"));
   }
-  lines.push("", `🖼 Ảnh QR: ${partner.payoutQrFileId ? "✅ đã tải lên (Admin xem thủ công)" : "— chưa có"}`);
+  lines.push("", ctvT(partner, "ctv.payout_qr_line", { state: partner.payoutQrFileId ? ctvT(partner, "ctv.state_qr_set") : ctvT(partner, "ctv.state_qr_missing") }));
   await ctx.reply(
     lines.join("\n"),
     {
       parse_mode: "HTML",
       reply_markup: new InlineKeyboard()
-        .text("✏️ Cập nhật thông tin", "ctv:payout:edit")
+        .text(ctvT(partner, "ctv.btn_edit_payout"), "ctv:payout:edit")
         .row()
-        .text("🖼 Gửi ảnh QR", "ctv:payout:qr")
+        .text(ctvT(partner, "ctv.btn_send_qr"), "ctv:payout:qr")
         .row()
-        .text("⬅️ Về dashboard", "ctv:home")
+        .text(ctvT(partner, "ctv.btn_back"), "ctv:home")
     }
   );
 });
@@ -2260,10 +2232,7 @@ customerHandler.callbackQuery("ctv:payout:edit", async (ctx) => {
   const partner = await PartnerService.getPartnerByTelegramId(telegramId);
   if (!partner || partner.status !== "ACTIVE") return;
   setPartnerPayoutSession(telegramId, partner.id);
-  await ctx.reply(
-    "💳 <b>CẬP NHẬT THÔNG TIN NHẬN HOA HỒNG</b>\n\nGửi thông tin nhận tiền ở dạng tự do, ví dụ:\n<code>ABA 001234567 - BUI DUY</code>\n<code>Bakong: abc@bakong</code>\n<code>Vietcombank 1234567890 Nguyen Van A</code>\n\n<i>Chỉ cần rõ ràng để Admin chuyển tiền — không bắt buộc mẫu nào.</i>\n\nGửi /cancel để hủy.",
-    { parse_mode: "HTML" }
-  );
+  await ctx.reply(ctvT(partner, "ctv.payout_edit_title"), { parse_mode: "HTML" });
 });
 
 customerHandler.callbackQuery("ctv:payout:qr", async (ctx) => {
@@ -2274,10 +2243,7 @@ customerHandler.callbackQuery("ctv:payout:qr", async (ctx) => {
   if (!partner || partner.status !== "ACTIVE") return;
   setPartnerPayoutSession(telegramId, partner.id);
   setPartnerPayoutQrAwaiting(telegramId, true);
-  await ctx.reply(
-    "🖼 <b>GỬI ẢNH QR NHẬN HOA HỒNG</b>\n\nGửi ảnh QR (PNG/JPG) vào khung chat.\n\n<i>Ảnh chỉ mang tính THAM KHẢO — không OCR, không kiểm tra tự động; Admin xem thủ công khi chi trả.</i>\n\nGửi /cancel để hủy.",
-    { parse_mode: "HTML" }
-  );
+  await ctx.reply(ctvT(partner, "ctv.payout_qr_title"), { parse_mode: "HTML" });
 });
 
 customerHandler.callbackQuery("ctv:payout:confirm:go", async (ctx) => {
@@ -2289,13 +2255,16 @@ customerHandler.callbackQuery("ctv:payout:confirm:go", async (ctx) => {
     const { PartnerService } = await import("../../modules/partner/partner-service.js");
     await PartnerService.setPayoutDestination(session.partnerId, { text: session.pending.text });
     clearPartnerPayoutSession(telegramId);
-    const t = session.pending.text;
+    const destText = session.pending.text;
+    const partner = await PartnerService.getPartnerByTelegramId(telegramId);
+    const langPartner = partner || { language: null };
     await ctx.reply(
-      `✅ <b>ĐÃ LƯU THÔNG TIN NHẬN HOA HỒNG</b>\n\n${escapeHtml(t.length > 400 ? `${t.slice(0, 400)}…` : t)}`,
+      `${ctvT(langPartner, "ctv.payout_saved")}\n${escapeHtml(destText.length > 400 ? `${destText.slice(0, 400)}…` : destText)}`,
       { parse_mode: "HTML" }
     );
   } catch (err: any) {
-    await ctx.reply(`❌ ${err?.message || "Không lưu được thông tin."}`);
+    const partner = await PartnerService.getPartnerByTelegramId(telegramId).catch(() => null);
+    await ctx.reply(ctvT(partner || { language: null }, "ctv.payout_save_failed") + (err?.message ? `\n${escapeHtml(err.message)}` : ""));
   }
 });
 
@@ -2409,15 +2378,18 @@ export async function sendOrderPaymentQrOnConfirm(ctx: BotContext, order: any, l
  * simply stored as FileEvidence and referenced from Partner.payoutQrFileId.
  */
 async function handlePartnerPayoutQrUpload(ctx: BotContext, telegramId: string, partnerId: string): Promise<void> {
+  // Partner locale (vi|en) — independent from Customer.locale.
+  const { PartnerService: PartnerSvc } = await import("../../modules/partner/partner-service.js");
+  const ctvPartner = (await PartnerSvc.getPartnerByTelegramId(telegramId).catch(() => null)) || { language: null };
   const photo = ctx.message?.photo?.length ? ctx.message.photo[ctx.message.photo.length - 1] : undefined;
   const document = (ctx.message as any)?.document as any;
   if (!photo && !document) {
-    await ctx.reply("📷 Vui lòng gửi ẢNH QR (PNG/JPG), hoặc /cancel để hủy.", { parse_mode: "HTML" });
+    await ctx.reply(ctvT(ctvPartner, "ctv.qr_need_image"), { parse_mode: "HTML" });
     return;
   }
   const maxBytes = (env.MAX_UPLOAD_MB || 10) * 1024 * 1024;
   if (document?.file_size && document.file_size > maxBytes) {
-    await ctx.reply(`⚠️ Ảnh quá lớn (giới hạn ${env.MAX_UPLOAD_MB || 10}MB). Vui lòng nén/gửi ảnh nhỏ hơn.`);
+    await ctx.reply(ctvT(ctvPartner, "ctv.qr_too_large", { limit: env.MAX_UPLOAD_MB || 10 }));
     return;
   }
   try {
@@ -2428,7 +2400,7 @@ async function handlePartnerPayoutQrUpload(ctx: BotContext, telegramId: string, 
     if (!res.ok) throw new Error(`Tải ảnh thất bại (HTTP ${res.status})`);
     const buffer = Buffer.from(await res.arrayBuffer());
     if (!buffer || buffer.length === 0 || buffer.length > maxBytes) {
-      await ctx.reply("❌ Ảnh không hợp lệ hoặc quá lớn. Vui lòng gửi lại.");
+      await ctx.reply(ctvT(ctvPartner, "ctv.qr_invalid"));
       return;
     }
     // Magic-byte-first MIME resolution — only real images are accepted.
@@ -2439,7 +2411,7 @@ async function handlePartnerPayoutQrUpload(ctx: BotContext, telegramId: string, 
       buffer
     });
     if (!resolved.accepted || !resolved.mimeType.startsWith("image/")) {
-      await ctx.reply("❌ Vui lòng gửi ẢNH QR (PNG/JPG) — tệp này không phải ảnh.", { parse_mode: "HTML" });
+      await ctx.reply(ctvT(ctvPartner, "ctv.qr_not_image"), { parse_mode: "HTML" });
       return;
     }
     const ext = resolved.mimeType === "image/png" ? "png" : resolved.mimeType === "image/webp" ? "webp" : "jpg";
@@ -2449,16 +2421,12 @@ async function handlePartnerPayoutQrUpload(ctx: BotContext, telegramId: string, 
       "QR",
       resolved.mimeType
     );
-    const { PartnerService } = await import("../../modules/partner/partner-service.js");
-    await PartnerService.setPayoutQr(partnerId, evidence.id, telegramId);
+    await PartnerSvc.setPayoutQr(partnerId, evidence.id, telegramId);
     clearPartnerPayoutSession(telegramId);
-    await ctx.reply(
-      "✅ <b>ĐÃ LƯU ẢNH QR NHẬN HOA HỒNG</b>\n🖼 Ảnh chỉ mang tính THAM KHẢO — Admin sẽ xem thủ công khi chi trả.",
-      { parse_mode: "HTML" }
-    );
+    await ctx.reply(ctvT(ctvPartner, "ctv.qr_saved"), { parse_mode: "HTML" });
   } catch (err: any) {
     // Session stays armed so the CTV can simply send another image.
-    await ctx.reply(`❌ Không lưu được ảnh QR: ${escapeHtml(err?.message || "lỗi")}`).catch(() => {});
+    await ctx.reply(ctvT(ctvPartner, "ctv.qr_save_failed", { reason: escapeHtml(err?.message || "error") })).catch(() => {});
   }
 }
 
@@ -2517,8 +2485,8 @@ export async function handleCustomerPhoto(ctx: BotContext) {
     const lines = [t(locale, "payout.choose_title"), "", t(locale, "bill.multi_hint")];
     for (const o of payoutEligible.slice(0, 5)) {
       const amount = `${MoneyService.formatAmount(o.targetAmount, o.targetCurrency)} ${o.targetCurrency}`;
-      lines.push(`📦 #${o.id.slice(-6)} · ${amount}`);
-      kb.text(`📷 📦 #${o.id.slice(-6)} (${amount})`, `customer:payout:newqr:${o.id}`).row();
+      lines.push(`📦 ${formatPublicOrderRef(o)} · ${amount}`);
+      kb.text(`📷 📦 ${formatPublicOrderRef(o)} (${amount})`, `customer:payout:newqr:${o.id}`).row();
     }
     kb.row().text(t(locale, "payout.support_btn"), "customer:menu:support");
     await ctx.reply(lines.join("\n"), { parse_mode: "HTML", reply_markup: kb });
@@ -2582,7 +2550,7 @@ export async function handleCustomerPhoto(ctx: BotContext) {
           if (conv.mode === "HUMAN" && conv.claimedById) {
             await sendToStaff(
               conv.claimedById,
-              `📷 <b>Khách ${customer.fullName || (customer.username ? "@" + customer.username : `Telegram ID ${customer.telegramId}`)} vừa gửi bill cho đơn #${targetOrder.id.slice(-6).toUpperCase()}.</b>\nĐơn chuyển sang chờ Admin đối soát.`,
+              `📷 <b>Khách ${customer.fullName || (customer.username ? "@" + customer.username : `Telegram ID ${customer.telegramId}`)} vừa gửi bill cho đơn ${formatPublicOrderRef(targetOrder)}.</b>\nĐơn chuyển sang chờ Admin đối soát.`,
               { parse_mode: "HTML" }
             ).catch(() => {});
           }
@@ -2606,7 +2574,7 @@ export async function handleCustomerPhoto(ctx: BotContext) {
       for (const o of awaitingOrders.slice(0, 5)) {
         const srcAmt = MoneyService.formatAmount(o.sourceAmount, o.sourceCurrency);
         kb.text(
-          t(locale, "bill.order_btn", { id: o.id.slice(-6), amount: `${srcAmt} ${o.sourceCurrency}` }),
+          t(locale, "bill.order_btn", { id: orderPublicRef(o), amount: `${srcAmt} ${o.sourceCurrency}` }),
           `customer:bill:attach:${o.id}`
         ).row();
       }
@@ -2753,7 +2721,6 @@ export async function handleCustomerVoice(ctx: BotContext) {
     await ctx.reply(t(locale, "voice.retry_prompt"), { parse_mode: "HTML" });
   }
 }
-
 
 
 
